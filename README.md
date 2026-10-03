@@ -71,7 +71,17 @@ Keep the process running on your machine/VPS/container. Discord sends interactio
 docker compose up -d --build
 ```
 
-Useful commands: `docker compose logs -f bombagif`, `docker compose restart bombagif`, and `docker compose down`. Compose does not publish ports. For an always-on VPS, use a restart policy (already set in [compose.yaml](compose.yaml)) and keep the `.env` file private. Compose v2.24.0+ is needed for the required env-file check in [compose.yaml](compose.yaml). Be aware that the Docker daemon runs containers with root-equivalent host privileges; only run containers/images you trust.
+Useful commands: `docker compose logs -f bombagif`, `docker compose restart bombagif`, and `docker compose down`. Compose does not publish ports. For an always-on VPS, use a restart policy (already set in [compose.yaml](compose.yaml)) and keep the `.env` file private. Compose v2.24.0+ is needed for the required env-file check in [compose.yaml](compose.yaml). The customizable Discord presence is in [`status.config`](status.config); edit it then restart the bot to apply. Be aware that the Docker daemon runs containers with root-equivalent host privileges; only run containers/images you trust.
+
+## Custom Discord presence
+
+Edit [`status.config`](status.config) in the install directory, then restart Bombagif. The `[status]` section supports `status = online|idle|dnd|invisible`, `activity_type = playing|listening|watching|competing|streaming|custom`, and `activity_text` up to 128 characters. For `streaming`, set an HTTPS `streaming_url`; for `custom`, optionally set `activity_emoji`. Leave `activity_text` blank to hide the activity while keeping the selected presence status. The bot reloads this configuration whenever Discord connects or reconnects; it does not hot-reload edits made while connected.
+
+For the Ubuntu systemd installer, edit `~/Bombagif/status.config` and run `sudo systemctl restart bombagif`. For Docker Compose, edit `~/Bombagif/status.config` and run `docker compose restart bombagif`; Compose mounts the file read-only into the container. For Python, restart the running process.
+
+## Zipline upload responses
+
+Bombagif supports Zipline JSON responses containing a `files` URL list, legacy objects with a `url` field, a JSON string URL, and the documented plain-text URL response. If an upload succeeds but no valid URL is returned, Bombagif warns you to check Zipline before retrying to avoid duplicate uploads.
 
 ## Secret hygiene before publishing
 

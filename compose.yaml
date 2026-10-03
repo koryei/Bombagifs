@@ -13,6 +13,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    volumes:
+      - ./status.config:/app/status.config:ro
     restart: unless-stopped
     init: true
     logging:
