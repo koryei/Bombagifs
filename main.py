@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import configparser
 import importlib
 import io
 import json
@@ -16,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlparse
 
@@ -39,6 +41,7 @@ MAX_SVG_DIMENSION: Final[int] = 2048
 DOWNLOAD_TIMEOUT: Final[int] = 30
 UPLOAD_TIMEOUT: Final[int] = 45
 MAX_UPLOAD_ATTEMPTS: Final[int] = 4
+PRESENCE_CONFIG_PATH: Final[Path] = Path(__file__).with_name("status.config")
 SVG_MAX_NODES: Final[int] = 20_000
 SVG_MAX_TEXT_BYTES: Final[int] = 2_000_000
 ALLOWED_TYPES: Final[dict[str, set[str]]] = {
@@ -152,6 +155,61 @@ def configure_logging(level: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level, logging.INFO))
+
+
+def load_presence_config(
+    config_path: str | os.PathLike[str] = PRESENCE_CONFIG_PATH,
+) -> tuple[discord.Status, discord.BaseActivity | None]:
+    """Load and validate the public Discord status/activity from status.config."""
+    path = Path(config_path)
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with path.open(encoding="utf-8") as config_file:
+            parser.read_file(config_file)
+    except (OSError, configparser.Error) as exc:
+        raise RuntimeError(f"Could not read Discord presence config at {path}: {exc}") from exc
+
+    if not parser.has_section("status"):
+        raise RuntimeError(f"Presence config {path} must contain a [status] section")
+    section = parser["status"]
+    status_name = section.get("status", "online").strip().lower()
+    if status_name not in {"online", "idle", "dnd", "invisible"}:
+        raise RuntimeError("status.config status must be online, idle, dnd, or invisible")
+    status = discord.Status(status_name)
+
+    activity_type = section.get("activity_type", "playing").strip().lower()
+    allowed_types = {"playing", "listening", "watching", "competing", "streaming", "custom"}
+    if activity_type not in allowed_types:
+        raise RuntimeError(f"status.config activity_type must be one of: {', '.join(sorted(allowed_types))}")
+    activity_text = section.get("activity_text", "").strip()
+    if len(activity_text) > 128 or "\n" in activity_text or "\r" in activity_text:
+        raise RuntimeError("status.config activity_text must be a single line of at most 128 characters")
+    if not activity_text:
+        return status, None
+
+    if activity_type == "playing":
+        activity: discord.BaseActivity = discord.Game(name=activity_text)
+    elif activity_type == "streaming":
+        streaming_url = section.get("streaming_url", "").strip()
+        try:
+            parsed_stream = urlparse(streaming_url)
+            if parsed_stream.scheme != "https" or not parsed_stream.hostname:
+                raise ValueError
+            _ = parsed_stream.port
+        except ValueError as exc:
+            raise RuntimeError("status.config streaming_url must be a valid HTTPS URL when activity_type is streaming") from exc
+        activity = discord.Streaming(name=activity_text, url=streaming_url)
+    elif activity_type == "custom":
+        activity_emoji = section.get("activity_emoji", "").strip() or None
+        activity = discord.CustomActivity(name=activity_text, emoji=activity_emoji)
+    else:
+        activity_kinds = {
+            "listening": discord.ActivityType.listening,
+            "watching": discord.ActivityType.watching,
+            "competing": discord.ActivityType.competing,
+        }
+        activity = discord.Activity(type=activity_kinds[activity_type], name=activity_text)
+    return status, activity
 
 
 def validate_image_metadata(filename: str, content_type: str | None, size: int | None) -> str:
@@ -396,6 +454,41 @@ def _retry_delay(response: aiohttp.ClientResponse, attempt: int) -> float:
     return min(8.0, 0.5 * (2**attempt))
 
 
+def _extract_zipline_file_url(payload: Any) -> str | None:
+    """Read the uploaded file URL from common Zipline API response versions."""
+    candidate: Any = payload
+    if isinstance(payload, list):
+        candidate = payload[0] if payload else None
+    elif isinstance(payload, dict):
+        files = payload.get("files")
+        if isinstance(files, list):
+            candidate = files[0] if files else None
+        elif isinstance(files, (str, dict)):
+            candidate = files
+        else:
+            candidate = payload.get("url")
+    if isinstance(candidate, dict):
+        candidate = candidate.get("url")
+    if not isinstance(candidate, str):
+        return None
+
+    file_url = candidate.strip()
+    try:
+        parsed_url = urlparse(file_url)
+        if (
+            parsed_url.scheme.lower() != "https"
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+        ):
+            return None
+        # Accessing .port also validates malformed authority suffixes.
+        _ = parsed_url.port
+    except ValueError:
+        return None
+    return file_url
+
+
 async def upload_to_zipline(
     session: aiohttp.ClientSession,
     settings: Settings,
@@ -436,15 +529,28 @@ async def upload_to_zipline(
                         response_body.extend(chunk)
                         if len(response_body) > 1_000_000:
                             raise ValueError("Zipline response exceeded its size limit")
-                    payload = json.loads(response_body)
-                except (aiohttp.ClientError, UnicodeDecodeError, ValueError) as exc:
+                except (aiohttp.ClientError, ValueError) as exc:
                     raise UploadFailure("The file host returned an invalid response. Please try again later.") from exc
-                files = payload.get("files") if isinstance(payload, dict) else None
-                first = files[0] if isinstance(files, list) and files else None
-                returned_url = first.get("url") if isinstance(first, dict) else None
-                parsed_link = urlparse(returned_url) if isinstance(returned_url, str) else None
-                if not parsed_link or parsed_link.scheme != "https" or not parsed_link.netloc:
-                    raise UploadFailure("The file host returned an invalid response. Please try again later.")
+
+                try:
+                    payload = json.loads(response_body)
+                except (UnicodeDecodeError, ValueError, RecursionError):
+                    # Some Zipline deployments (and reverse proxies) return the
+                    # file URL as plain text instead of JSON.
+                    payload = bytes(response_body).decode("utf-8", errors="replace").strip()
+                returned_url = _extract_zipline_file_url(payload)
+                if returned_url is None:
+                    logging.getLogger("bombagif.zipline").warning(
+                        "Zipline returned success without a readable file URL "
+                        "(content_type=%s, payload_type=%s)",
+                        response.content_type,
+                        type(payload).__name__,
+                        extra={"trace_id": trace_id},
+                    )
+                    raise UploadFailure(
+                        "Zipline returned a successful upload, but Bombagif couldn't read its file URL. "
+                        "Check Zipline before retrying to avoid a duplicate upload."
+                    )
                 return returned_url
         except asyncio.TimeoutError as exc:
             last_error = exc
@@ -514,11 +620,9 @@ class BombagifBot(commands.Bot):
             await super().close()
 
     async def on_ready(self) -> None:
-        """Show online presence and log a successful Discord connection."""
-        await self.change_presence(
-            status=discord.Status.online,
-            activity=discord.Game(name="/gif | your images to GIFs"),
-        )
+        """Apply configured presence after every successful Discord connection."""
+        status, activity = load_presence_config()
+        await self.change_presence(status=status, activity=activity)
         self.logger.info("Bot connected", extra={"user_id": self.user.id if self.user else None})
 
     def _log_context(self, user_id: int, guild_id: int | None, trace_id: str) -> dict[str, Any]:

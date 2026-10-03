@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import aiohttp
@@ -21,6 +23,7 @@ from main import (
     _rasterize_svg,
     create_bot,
     convert_image,
+    load_presence_config,
     upload_to_zipline,
     validate_image_metadata,
 )
@@ -158,6 +161,68 @@ class ImageTests(unittest.TestCase):
                     convert_image(unsafe, ".svg", (255, 255, 255))
 
 
+class PresenceConfigTests(unittest.TestCase):
+    """Validate editable Discord status and activity settings."""
+
+    def test_loads_playing_presence(self) -> None:
+        """Read the checked-in default activity and online status."""
+        from main import PRESENCE_CONFIG_PATH
+
+        status, activity = load_presence_config(PRESENCE_CONFIG_PATH)
+        self.assertEqual(status, discord.Status.online)
+        self.assertIsInstance(activity, discord.Game)
+        self.assertEqual(activity.name, "/gif | your images to GIFs")
+
+    def test_supports_custom_activity_modes(self) -> None:
+        """Create listening, watching, streaming, and custom presences from config."""
+        cases = (
+            ("listening", "music", "", discord.ActivityType.listening),
+            ("watching", "GIFs", "", discord.ActivityType.watching),
+            ("competing", "a GIF challenge", "", discord.ActivityType.competing),
+            ("streaming", "a live GIF build", "streaming_url = https://twitch.tv/example", None),
+            ("custom", "ready for GIFs", "activity_emoji = ✨", None),
+        )
+        for activity_type, text, extra, expected_type in cases:
+            with self.subTest(activity_type=activity_type):
+                config = f"[status]\nstatus = dnd\nactivity_type = {activity_type}\nactivity_text = {text}\n{extra}"
+                with tempfile.TemporaryDirectory() as directory:
+                    config_path = Path(directory) / "status.config"
+                    config_path.write_text(config, encoding="utf-8")
+                    status, activity = load_presence_config(config_path)
+                self.assertEqual(status, discord.Status.dnd)
+                self.assertIsNotNone(activity)
+                assert activity is not None
+                if expected_type is not None:
+                    self.assertEqual(activity.type, expected_type)
+                self.assertEqual(activity.name, text)
+                if activity_type == "custom":
+                    self.assertEqual(activity.emoji.name, "✨")
+
+    def test_blank_activity_disables_activity(self) -> None:
+        """Allow operators to leave only a selected online/offline status."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "status.config"
+            config_path.write_text("[status]\nstatus = idle\nactivity_text = \n", encoding="utf-8")
+            status, activity = load_presence_config(config_path)
+        self.assertEqual(status, discord.Status.idle)
+        self.assertIsNone(activity)
+
+    def test_rejects_invalid_presence_values(self) -> None:
+        """Fail fast on invalid status and unsupported activity values."""
+        invalid_values = (
+            "[status]\nstatus = bogus\n",
+            "[status]\nactivity_type = unknown\n",
+            "[status]\nactivity_type = streaming\nactivity_text = live\n",
+        )
+        for config in invalid_values:
+            with self.subTest(config=config):
+                with tempfile.TemporaryDirectory() as directory:
+                    config_path = Path(directory) / "status.config"
+                    config_path.write_text(config, encoding="utf-8")
+                    with self.assertRaises(RuntimeError):
+                        load_presence_config(config_path)
+
+
 class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
     """Verify the command is exposed as a personal user-installed app."""
 
@@ -177,8 +242,9 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
                 await bot.on_ready()
             change_presence.assert_awaited_once()
             kwargs = change_presence.await_args.kwargs
-            self.assertEqual(kwargs["status"], discord.Status.online)
-            self.assertEqual(kwargs["activity"].name, "/gif | your images to GIFs")
+            expected_status, expected_activity = load_presence_config()
+            self.assertEqual(kwargs["status"], expected_status)
+            self.assertEqual(kwargs["activity"].name, expected_activity.name)
         finally:
             await bot.close()
 
@@ -223,7 +289,7 @@ class ZiplineTests(unittest.IsolatedAsyncioTestCase):
                 return web.Response(status=503)
             if self.requests == 2:
                 return web.Response(status=429, headers={"Retry-After": "0"})
-            return web.json_response({"files": [{"url": "https://self-hosted.example.test/a1b2.gif"}]})
+            return web.json_response({"files": ["https://self-hosted.example.test/a1b2.gif"]})
 
         self.app = web.Application()
         self.app.router.add_post("/api/upload", upload)
@@ -238,7 +304,7 @@ class ZiplineTests(unittest.IsolatedAsyncioTestCase):
         await self.runner.cleanup()
 
     async def test_retries_and_returns_zipline_file_url(self) -> None:
-        """Retry a 5xx response and parse the returned files[0].url."""
+        """Retry errors, then parse Zipline v3 files as URL strings."""
         settings = Settings(
             discord_token="unused",
             zipline_token="test-token",
@@ -258,6 +324,122 @@ class ZiplineTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(link, "https://self-hosted.example.test/a1b2.gif")
         self.assertEqual(self.requests, 3)
+
+    async def test_accepts_zipline_legacy_object_response(self) -> None:
+        """Accept Zipline instances that wrap file URLs in objects."""
+
+        async def upload(_: web.Request) -> web.Response:
+            return web.json_response({"files": [{"url": "https://self-hosted.example.test/legacy.gif"}]})
+
+        app = web.Application()
+        app.router.add_post("/api/upload", upload)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="test-token",
+            zipline_url=f"http://127.0.0.1:{port}",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+                result = await upload_to_zipline(session, settings, b"gif", "legacy.gif", trace_id="legacy")
+            self.assertEqual(result, "https://self-hosted.example.test/legacy.gif")
+        finally:
+            await runner.cleanup()
+
+    async def test_accepts_zipline_plain_text_url_response(self) -> None:
+        """Accept Zipline's documented No-JSON URL response format."""
+
+        async def upload(_: web.Request) -> web.Response:
+            return web.Response(text="https://self-hosted.example.test/plain.gif")
+
+        app = web.Application()
+        app.router.add_post("/api/upload", upload)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="test-token",
+            zipline_url=f"http://127.0.0.1:{port}",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+                result = await upload_to_zipline(session, settings, b"gif", "plain.gif", trace_id="plain")
+            self.assertEqual(result, "https://self-hosted.example.test/plain.gif")
+        finally:
+            await runner.cleanup()
+
+    async def test_accepts_zipline_root_list_response(self) -> None:
+        """Accept JSON responses that directly contain a list of file URLs."""
+
+        async def upload(_: web.Request) -> web.Response:
+            return web.json_response(["https://self-hosted.example.test/list.gif"])
+
+        app = web.Application()
+        app.router.add_post("/api/upload", upload)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="test-token",
+            zipline_url=f"http://127.0.0.1:{port}",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+                result = await upload_to_zipline(session, settings, b"gif", "list.gif", trace_id="list")
+            self.assertEqual(result, "https://self-hosted.example.test/list.gif")
+        finally:
+            await runner.cleanup()
+
+    async def test_accepts_zipline_v4_string_response(self) -> None:
+        """Accept a JSON string URL response used by current Zipline docs."""
+
+        async def upload(_: web.Request) -> web.Response:
+            return web.json_response("https://self-hosted.example.test/v4.gif")
+
+        app = web.Application()
+        app.router.add_post("/api/upload", upload)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="test-token",
+            zipline_url=f"http://127.0.0.1:{port}",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+                result = await upload_to_zipline(session, settings, b"gif", "v4.gif", trace_id="v4")
+            self.assertEqual(result, "https://self-hosted.example.test/v4.gif")
+        finally:
+            await runner.cleanup()
 
     async def test_rejects_invalid_zipline_payload(self) -> None:
         """Treat malformed success responses as an explicit upload failure."""
