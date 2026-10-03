@@ -514,7 +514,11 @@ class BombagifBot(commands.Bot):
             await super().close()
 
     async def on_ready(self) -> None:
-        """Log a successful bot connection."""
+        """Show online presence and log a successful Discord connection."""
+        await self.change_presence(
+            status=discord.Status.online,
+            activity=discord.Game(name="/gif | your images to GIFs"),
+        )
         self.logger.info("Bot connected", extra={"user_id": self.user.id if self.user else None})
 
     def _log_context(self, user_id: int, guild_id: int | None, trace_id: str) -> dict[str, Any]:

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import aiohttp
+import discord
 from aiohttp import web
 from PIL import Image
 
@@ -159,6 +160,27 @@ class ImageTests(unittest.TestCase):
 
 class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
     """Verify the command is exposed as a personal user-installed app."""
+
+    async def test_bot_sets_online_presence_when_connected(self) -> None:
+        """Show an online status and a useful activity after connecting."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        try:
+            with patch.object(bot, "change_presence", new_callable=unittest.mock.AsyncMock) as change_presence:
+                await bot.on_ready()
+            change_presence.assert_awaited_once()
+            kwargs = change_presence.await_args.kwargs
+            self.assertEqual(kwargs["status"], discord.Status.online)
+            self.assertEqual(kwargs["activity"].name, "/gif | your images to GIFs")
+        finally:
+            await bot.close()
 
     async def test_gif_is_user_installed_and_global_context_enabled(self) -> None:
         """Enable user installation without requiring a server bot install."""
