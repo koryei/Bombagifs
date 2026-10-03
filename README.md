@@ -1,5 +1,4 @@
 # Bombagif
-http://gifs.bombaclat.wtf/u/Wkokm1.gif
 Bombagif converts WEBP, PNG, SVG, MP4, and WebM uploads into optimized GIFs, uploads them to **your own Zipline instance**, then replies with its link. People add your Discord application to their user account once and run `/gif` in DMs, group DMs, or servers; they do not need to install a bot in each server.
 
 ## Quick install
