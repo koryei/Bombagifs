@@ -39,8 +39,8 @@ banner() {
   say "${C_BOLD}${C_PURPLE} ▄█■████▄▄█                                   ${C_RESET}"
   say "${C_BOLD}${C_PURPLE} ███████▀▀                                    ${C_RESET}"
   say ""
-  say "${C_BOLD}GIFs on the fly. Your Discord app. Your Zipline. Your secrets stay yours.${C_RESET}"
-  say "${C_DIM}Install, update, check, repair, or remove Bombagif — all from this menu.${C_RESET}"
+  say "${C_BOLD}GIFs on the fly. Your Discord app. Your Zipline. All self-hostable.${C_RESET}"
+  say "${C_DIM}Install, update, check, repair, or remove Bombagif from this menu.${C_RESET}"
   say "${C_CYAN}────────────────────────────────────────────────────────────────${C_RESET}"
 }
 
