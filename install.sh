@@ -277,6 +277,7 @@ preflight() {
       if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists cairo 2>/dev/null; then
         warn "Cairo is not detected. PNG/WEBP work; SVG needs Cairo (macOS: brew install cairo; Ubuntu: sudo apt install libcairo2)."
       fi
+      command -v ffmpeg >/dev/null 2>&1 || warn "FFmpeg is not detected. Image conversion works; MP4/WebM video conversion needs FFmpeg (macOS: brew install ffmpeg; Ubuntu: sudo apt install ffmpeg)."
       ;;
     docker)
       command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install Docker Engine/Desktop with Compose first."
@@ -437,7 +438,7 @@ install_systemd_mode() {
   python_bin="$(find_python311)" || die "Python 3.11+ required; no system changes were made."
   sudo -v
   sudo apt-get update
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv libcairo2
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv ffmpeg libcairo2
   local user_name group_name unit_tmp
   user_name="$(id -un)"
   group_name="$(id -gn)"
@@ -579,6 +580,7 @@ doctor() {
     python)
       if [[ -x "$INSTALL_DIR/.venv/bin/python" ]]; then ok "Virtual environment ready."; else fail "Virtual environment missing — re-run option 1."; problems=$((problems + 1)); fi
       if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists cairo 2>/dev/null; then ok "Cairo present (SVG input supported)."; else warn "Cairo not detected — PNG/WEBP work, SVG will be rejected."; fi
+      if command -v ffmpeg >/dev/null 2>&1; then ok "FFmpeg present (MP4/WebM input supported)."; else warn "FFmpeg not detected — MP4/WebM video conversion is unavailable."; fi
       ;;
     docker)
       if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then ok "Docker + Compose v2 available."; else fail "Docker Compose v2 missing."; problems=$((problems + 1)); fi

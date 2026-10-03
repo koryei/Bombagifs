@@ -1,6 +1,6 @@
 # Bombagif
 
-Bombagif converts WEBP, PNG, and SVG images into optimized GIFs, uploads them to **your own Zipline instance**, then replies with its link. People add your Discord application to their user account once and run `/gif` in DMs, group DMs, or servers; they do not need to install a bot in each server.
+Bombagif converts WEBP, PNG, SVG, MP4, and WebM uploads into optimized GIFs, uploads them to **your own Zipline instance**, then replies with its link. People add your Discord application to their user account once and run `/gif` in DMs, group DMs, or servers; they do not need to install a bot in each server.
 
 ## Quick install
 
@@ -17,7 +17,7 @@ Run the same command any time to reopen the menu:
 3. **Manage the service** — start, stop, restart, show recent logs, or re-apply `.env`/`status.config`.
 4. **Show status** — install directory, detected mode, whether the bot is running, and the next command to type.
 5. **Uninstall** — stops and removes the service, then asks before deleting the install directory.
-6. **Check installation** — verifies `.env` keys, Zipline reachability, Cairo, Docker, and the virtualenv.
+6. **Check installation** — verifies `.env` keys, Zipline reachability, Cairo, FFmpeg, Docker, and the virtualenv.
 
 For a new install the menu then asks how Bombagif should run:
 
@@ -46,7 +46,7 @@ You can customize the repository, branch, install path, and mode with `BOMBAGIF_
 
    `https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=applications.commands&integration_type=1`
 
-Users choose **Add to my apps**, authorize, then use `/gif` and select a WEBP, PNG, or SVG image (maximum 15 MB). Global command propagation after first startup may take a short while.
+Users choose **Add to my apps**, authorize, then use `/gif` and select a WEBP, PNG, SVG, MP4, or WebM file (maximum 15 MB). Video uploads are trimmed to their first 10 seconds and converted at 15 fps, scaled to fit within 480×480. Global command propagation after first startup may take a short while.
 
 ## Zipline and environment
 
@@ -58,7 +58,7 @@ Leave `ALLOWED_GUILDS` blank to allow public use in all server contexts and DMs.
 
 ## Manual Python setup
 
-Requires Python 3.11+; SVG conversion additionally needs Cairo. The bot starts and handles PNG/WEBP without Cairo. On macOS install Cairo with `brew install cairo`; on Ubuntu, install it with `sudo apt-get install libcairo2`.
+Requires Python 3.11+; MP4/WebM video conversion requires FFmpeg, and SVG conversion additionally needs Cairo. The bot starts and handles WEBP/PNG images without either. Install FFmpeg on macOS with `brew install ffmpeg` or Ubuntu with `sudo apt-get install ffmpeg`; install Cairo with `brew install cairo` or `sudo apt-get install libcairo2`.
 
 ```bash
 python3 -m venv .venv
@@ -71,6 +71,8 @@ python -m pip install -r requirements.txt
 ```
 
 Keep the process running on your machine/VPS/container. Discord sends interactions over the bot's existing gateway connection, so no inbound web port is needed.
+
+The `/gif` command accepts MP4 and WebM video attachments up to 15 MB. It converts only the first 10 seconds at 15 fps and scales frames to fit within 480×480. FFmpeg conversion runs with a 45-second timeout; the output GIF is capped at 25 MB, and temporary input/output files are deleted after processing. Install FFmpeg on the host for Python mode; Docker and Ubuntu systemd installs include it automatically. Python mode also requires Cairo for SVG conversion; Docker and Ubuntu systemd installs include Cairo, while macOS Python installs need `brew install cairo`.
 
 ## Docker Compose (manual)
 
@@ -102,4 +104,4 @@ Bombagif supports Zipline JSON responses containing a `files` URL list, legacy o
 
 ## Checks
 
-Run `bash tests/test_installer.sh` for installer helper checks and `python -m unittest discover -s tests -v` for offline image, presence, and local mock-Zipline behavior tests. They do not contact Discord or your production Zipline host. The SVG rasterization test needs Cairo installed; without it, that single test reports the Cairo prerequisite while the rest pass.
+Run `bash tests/test_installer.sh` for installer helper checks and `python -m unittest discover -s tests -v` for offline image/video, presence, and local mock-Zipline behavior tests. They do not contact Discord or your production Zipline host. The SVG rasterization test needs Cairo installed; without it, that single test reports the Cairo prerequisite while the rest pass.

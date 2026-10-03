@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,11 +20,14 @@ from main import (
     Settings,
     UploadFailure,
     UserFacingError,
+    MAX_INPUT_BYTES,
+    MAX_OUTPUT_BYTES,
     _extract_zipline_file_url,
     _read_settings,
     _rasterize_svg,
     create_bot,
     convert_image,
+    convert_video,
     load_presence_config,
     load_presence_or_default,
     upload_to_zipline,
@@ -97,6 +101,8 @@ class ImageTests(unittest.TestCase):
     def test_validates_suffix_mime_and_size(self) -> None:
         """Accept a valid image and reject mismatches and oversized inputs."""
         self.assertEqual(validate_image_metadata("input.PNG", "image/png", 20), ".png")
+        self.assertEqual(validate_image_metadata("clip.MP4", "video/mp4", 20), ".mp4")
+        self.assertEqual(validate_image_metadata("clip.webm", "video/webm", 20), ".webm")
         # Discord's content_type can be absent or incorrectly generic for uploads.
         self.assertEqual(validate_image_metadata("input.png", None, 20), ".png")
         self.assertEqual(validate_image_metadata("input.png", "application/octet-stream", 20), ".png")
@@ -104,6 +110,95 @@ class ImageTests(unittest.TestCase):
             validate_image_metadata("input.jpg", "image/jpeg", 20)
         with self.assertRaisesRegex(UserFacingError, "too large"):
             validate_image_metadata("large.png", "image/png", 15 * 1024 * 1024 + 1)
+        with self.assertRaisesRegex(UserFacingError, "too large"):
+            validate_image_metadata("large.mp4", "video/mp4", 15 * 1024 * 1024 + 1)
+
+    def test_video_conversion_uses_bounded_ffmpeg_pipeline_and_cleans_tempfiles(self) -> None:
+        """Trim and optimize video with a shell-free FFmpeg command and clean temp files."""
+        workdirs: list[Path] = []
+        commands: list[list[str]] = []
+
+        def fake_ffmpeg(command: list[str], **kwargs: object) -> object:
+            input_path = Path(command[command.index("-i") + 1])
+            output_path = Path(command[-1])
+            workdirs.append(input_path.parent)
+            commands.append(command)
+            self.assertEqual(input_path.read_bytes(), b"video bytes")
+            output_path.write_bytes(b"GIF89a" + b"frame" + b";")
+            return type("Completed", (), {"returncode": 0})()
+
+        for suffix in (".mp4", ".webm"):
+            with self.subTest(suffix=suffix):
+                with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+                    "main.subprocess.run", side_effect=fake_ffmpeg
+                ) as run:
+                    converted = convert_video(b"video bytes", suffix)
+                self.assertEqual(converted, b"GIF89aframe;")
+                run.assert_called_once()
+                self.assertTrue(run.call_args.kwargs["stdin"] is subprocess.DEVNULL)
+                self.assertFalse(run.call_args.kwargs["shell"])
+                self.assertEqual(run.call_args.kwargs["timeout"], 45)
+                self.assertFalse(workdirs[-1].exists())
+
+        for command in commands:
+            self.assertNotIn("shell", command)
+            self.assertEqual(command[command.index("-t") + 1], "10")
+            self.assertEqual(command[command.index("-max_pixels") + 1], str(20_000_000))
+            self.assertEqual(command[command.index("-protocol_whitelist") + 1], "file")
+            self.assertEqual(
+                command[command.index("-f") + 1],
+                "mp4" if command[command.index("-i") + 1].endswith(".mp4") else "matroska",
+            )
+            self.assertIn("fps=15", command[command.index("-filter_complex") + 1])
+            self.assertIn("palettegen", command[command.index("-filter_complex") + 1])
+            self.assertIn("scale=480:480", command[command.index("-filter_complex") + 1])
+            self.assertIn("-an", command)
+            self.assertIn("-autorotate", command)
+            self.assertEqual(command[command.index("-frames:v") + 1], "150")
+            self.assertEqual(command[command.index("-loop") + 1], "0")
+            self.assertEqual(command[command.index("-fs") + 1], str(MAX_OUTPUT_BYTES))
+
+    def test_video_conversion_reports_missing_ffmpeg_and_invalid_outputs(self) -> None:
+        """Report missing FFmpeg, timeout, failed decodes, and oversized output clearly."""
+        with patch("main.shutil.which", return_value=None):
+            with self.assertRaisesRegex(InvalidImage, "requires FFmpeg"):
+                convert_video(b"video bytes", ".mp4")
+
+        with self.assertRaisesRegex(InvalidImage, "MP4 or WebM"):
+            convert_video(b"video bytes", ".mov")
+        with self.assertRaisesRegex(InvalidImage, "maximum upload size is 15 MB"):
+            convert_video(b"v" * (MAX_INPUT_BYTES + 1), ".mp4")
+
+        timed_out_workdirs: list[Path] = []
+
+        def time_out(command: list[str], **kwargs: object) -> object:
+            timed_out_workdirs.append(Path(str(kwargs["cwd"])))
+            raise subprocess.TimeoutExpired(command, 45)
+
+        with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "main.subprocess.run", side_effect=time_out
+        ):
+            with self.assertRaisesRegex(InvalidImage, "took too long"):
+                convert_video(b"video bytes", ".mp4")
+        self.assertFalse(timed_out_workdirs[-1].exists())
+
+        with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "main.subprocess.run", return_value=type("Completed", (), {"returncode": 1})()
+        ):
+            with self.assertRaisesRegex(InvalidImage, "could not be converted"):
+                convert_video(b"video bytes", ".webm")
+
+        def oversized_output(command: list[str], **kwargs: object) -> object:
+            Path(command[-1]).write_bytes(b"GIF89a")
+            with Path(command[-1]).open("r+b") as output:
+                output.truncate(MAX_OUTPUT_BYTES + 1)
+            return type("Completed", (), {"returncode": 0})()
+
+        with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "main.subprocess.run", side_effect=oversized_output
+        ):
+            with self.assertRaisesRegex(InvalidImage, "maximum 25 MB"):
+                convert_video(b"video bytes", ".mp4")
 
     def test_converts_png_and_flattens_transparency(self) -> None:
         """Produce a readable GIF with configured background for transparent pixels."""
@@ -320,6 +415,7 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(command.allowed_contexts.guild)
             self.assertTrue(command.allowed_contexts.dm_channel)
             self.assertTrue(command.allowed_contexts.private_channel)
+            self.assertEqual(command.parameters[0].name, "media")
         finally:
             await bot.close()
 

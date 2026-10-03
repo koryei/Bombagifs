@@ -68,4 +68,10 @@ if (preflight >/dev/null 2>&1); then
   exit 1
 fi
 
+# FFmpeg is installed in the Ubuntu service and Docker runtime, but is only an
+# optional host prerequisite for Python installs.
+grep -Eq 'apt-get install -y python3 python3-venv ffmpeg libcairo2' "$ROOT/install.sh"
+grep -Eq 'apt-get install -y --no-install-recommends ffmpeg libcairo2 libffi8' "$ROOT/Dockerfile"
+grep -Eq 'FFmpeg is not detected' "$ROOT/install.sh"
+
 printf 'Installer unit checks passed.\n'

@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libcairo2 libffi8 \
+    && apt-get install -y --no-install-recommends ffmpeg libcairo2 libffi8 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

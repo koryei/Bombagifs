@@ -11,7 +11,10 @@ import logging
 import math
 import os
 import re
+import shutil
 import signal
+import subprocess
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -41,6 +44,10 @@ MAX_SVG_DIMENSION: Final[int] = 2048
 DOWNLOAD_TIMEOUT: Final[int] = 30
 UPLOAD_TIMEOUT: Final[int] = 45
 MAX_UPLOAD_ATTEMPTS: Final[int] = 4
+MAX_VIDEO_DURATION: Final[int] = 10
+MAX_VIDEO_FRAMES: Final[int] = 150
+VIDEO_CONVERSION_TIMEOUT: Final[int] = 45
+VIDEO_MAX_DIMENSION: Final[int] = 480
 PRESENCE_CONFIG_PATH: Final[Path] = Path(__file__).with_name("status.config")
 SVG_MAX_NODES: Final[int] = 20_000
 SVG_MAX_TEXT_BYTES: Final[int] = 2_000_000
@@ -48,6 +55,8 @@ ALLOWED_TYPES: Final[dict[str, set[str]]] = {
     ".webp": {"image/webp"},
     ".png": {"image/png"},
     ".svg": {"image/svg+xml", "text/xml", "application/xml"},
+    ".mp4": {"video/mp4"},
+    ".webm": {"video/webm"},
 }
 
 
@@ -225,16 +234,21 @@ def load_presence_or_default() -> tuple[discord.Status, discord.BaseActivity | N
         return discord.Status.online, None
 
 
-def validate_image_metadata(filename: str, content_type: str | None, size: int | None) -> str:
-    """Validate the supported extension and known declared size."""
+def validate_attachment_metadata(filename: str, content_type: str | None, size: int | None) -> str:
+    """Validate a supported image or video extension and known declared size."""
     suffix = os.path.splitext(os.path.basename(filename).lower())[1]
     if suffix not in ALLOWED_TYPES:
-        raise InvalidImage("Please use a WEBP, PNG, or SVG image.")
+        raise InvalidImage("Use a WEBP, PNG, SVG, MP4, or WebM file.")
     # Discord can omit or misreport attachment MIME metadata. Validate the
-    # extension here and verify the actual decoded format in convert_image.
+    # extension here and verify the actual decoded format in the converter.
     if size is not None and size > MAX_INPUT_BYTES:
-        raise UserFacingError("That image is too large. The maximum upload size is 15 MB.")
+        raise UserFacingError("That file is too large. The maximum upload size is 15 MB.")
     return suffix
+
+
+def validate_image_metadata(filename: str, content_type: str | None, size: int | None) -> str:
+    """Backward-compatible alias for attachment metadata validation."""
+    return validate_attachment_metadata(filename, content_type, size)
 
 
 def _check_svg(svg: bytes) -> tuple[int, int]:
@@ -367,6 +381,104 @@ def _rasterize_svg(data: bytes, width: int, height: int) -> bytes:
         raise InvalidImage("That SVG could not be safely converted to an image.") from exc
 
 
+def convert_video(data: bytes, suffix: str) -> bytes:
+    """Convert the first 10 seconds of an MP4/WebM to a bounded, optimized GIF."""
+    if suffix not in {".mp4", ".webm"}:
+        raise InvalidImage("Use an MP4 or WebM video.")
+    if len(data) > MAX_INPUT_BYTES:
+        raise InvalidImage("That video is too large. The maximum upload size is 15 MB.")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise InvalidImage("Video conversion requires FFmpeg. Ask the bot host to install it and restart Bombagif.")
+
+    filter_graph = (
+        f"[0:V:0]fps=15,scale={VIDEO_MAX_DIMENSION}:{VIDEO_MAX_DIMENSION}:"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+        "split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
+        "[s1][p]paletteuse=dither=bayer[out]"
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="bombagif-video-") as work_dir:
+            input_path = Path(work_dir) / f"input{suffix}"
+            output_path = Path(work_dir) / "output.gif"
+            input_path.write_bytes(data)
+            command = [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-threads",
+                "1",
+                "-filter_complex_threads",
+                "1",
+                "-autorotate",
+                "-max_pixels",
+                str(MAX_PIXELS),
+                "-protocol_whitelist",
+                "file",
+                "-f",
+                "mp4" if suffix == ".mp4" else "matroska",
+                "-t",
+                str(MAX_VIDEO_DURATION),
+                "-i",
+                str(input_path),
+                "-filter_complex",
+                filter_graph,
+                "-map",
+                "[out]",
+                "-an",
+                "-sn",
+                "-dn",
+                "-frames:v",
+                str(MAX_VIDEO_FRAMES),
+                "-map_metadata",
+                "-1",
+                "-loop",
+                "0",
+                "-fs",
+                str(MAX_OUTPUT_BYTES),
+                str(output_path),
+            ]
+            try:
+                result = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    shell=False,
+                    timeout=VIDEO_CONVERSION_TIMEOUT,
+                    cwd=work_dir,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise InvalidImage("Video conversion took too long. Try a shorter or smaller video.") from exc
+            except OSError as exc:
+                raise InvalidImage("FFmpeg could not start video conversion on this host.") from exc
+            output_size = output_path.stat().st_size if output_path.is_file() else 0
+            if output_size > MAX_OUTPUT_BYTES:
+                raise InvalidImage("The converted GIF is too large to upload (maximum 25 MB).")
+            if result.returncode != 0:
+                raise InvalidImage(
+                    "That MP4/WebM could not be converted. Please try another video."
+                )
+            if output_size == 0:
+                raise InvalidImage("That video does not contain a usable video stream.")
+            with output_path.open("rb") as output_file:
+                signature = output_file.read(6)
+                output_file.seek(-1, os.SEEK_END)
+                trailer = output_file.read(1)
+                if signature not in {b"GIF87a", b"GIF89a"} or trailer != b";":
+                    raise InvalidImage("FFmpeg did not produce a complete GIF for that video.")
+                output_file.seek(0)
+                return output_file.read(MAX_OUTPUT_BYTES)
+    except InvalidImage:
+        raise
+    except OSError as exc:
+        raise InvalidImage("Video conversion could not access temporary storage on this host.") from exc
+
+
 def convert_image(data: bytes, suffix: str, background: tuple[int, int, int]) -> bytes:
     """Decode/rasterize a supported image and encode an optimized bounded GIF."""
     if len(data) > MAX_INPUT_BYTES:
@@ -429,23 +541,23 @@ async def read_bounded(response: aiohttp.ClientResponse, limit: int) -> bytes:
     async for chunk in response.content.iter_chunked(64 * 1024):
         chunks.extend(chunk)
         if len(chunks) > limit:
-            raise UserFacingError("That image is too large. The maximum upload size is 15 MB.")
+            raise UserFacingError("That file is too large. The maximum upload size is 15 MB.")
     return bytes(chunks)
 
 
 async def download_attachment(session: aiohttp.ClientSession, attachment: discord.Attachment) -> bytes:
-    """Download a validated Discord attachment while enforcing the hard input cap."""
-    validate_image_metadata(attachment.filename, attachment.content_type or "", attachment.size)
+    """Download a validated image or video attachment within the hard input cap."""
+    validate_attachment_metadata(attachment.filename, attachment.content_type or "", attachment.size)
     timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=20)
     try:
         async with session.get(attachment.url, timeout=timeout) as response:
             if response.status != 200:
                 raise UserFacingError("Discord could not provide that attachment. Please try again.")
             if response.content_length is not None and response.content_length > MAX_INPUT_BYTES:
-                raise UserFacingError("That image is too large. The maximum upload size is 15 MB.")
+                raise UserFacingError("That file is too large. The maximum upload size is 15 MB.")
             return await read_bounded(response, MAX_INPUT_BYTES)
     except asyncio.TimeoutError as exc:
-        raise UserFacingError("Downloading that image timed out. Please try again.") from exc
+        raise UserFacingError("Downloading that file timed out. Please try again.") from exc
     except aiohttp.ClientError as exc:
         raise UserFacingError("Discord could not provide that attachment. Please try again.") from exc
 
@@ -700,33 +812,32 @@ class BombagifBot(commands.Bot):
         user_id: int,
         guild_id: int | None,
     ) -> str:
-        """Run one pipeline while holding the global work/conversion limit."""
+        """Run one pipeline while holding the global media-work limit."""
         trace_id = uuid.uuid4().hex
         context = self._log_context(user_id, guild_id, trace_id)
-        suffix = validate_image_metadata(attachment.filename, attachment.content_type, attachment.size)
+        suffix = validate_attachment_metadata(attachment.filename, attachment.content_type, attachment.size)
         if self.http_session is None:
             raise UploadFailure("The bot is still starting up. Please try again shortly.")
         self.logger.info("Processing attachment", extra={**context, "attachment_name": attachment.filename})
         data = await download_attachment(self.http_session, attachment)
         try:
             loop = asyncio.get_running_loop()
-            gif_data = await loop.run_in_executor(
-                self.image_executor,
-                convert_image,
-                data,
-                suffix,
-                self.settings.background,
-            )
+            converter = convert_video if suffix in {".mp4", ".webm"} else convert_image
+            if converter is convert_video:
+                conversion_args = (data, suffix)
+            else:
+                conversion_args = (data, suffix, self.settings.background)
+            gif_data = await loop.run_in_executor(self.image_executor, converter, *conversion_args)
         except InvalidImage:
             raise
         except Exception as exc:
-            self.logger.exception("Image conversion failed", extra=context)
-            raise InvalidImage("That image could not be converted. Please try another file.") from exc
+            self.logger.exception("Media conversion failed", extra=context)
+            raise InvalidImage("That file could not be converted. Please try another image or video.") from exc
         safe_stem = re.sub(
             r"[^A-Za-z0-9_-]+",
             "-",
             os.path.splitext(os.path.basename(attachment.filename))[0],
-        ).strip("-_")[:64] or "image"
+        ).strip("-_")[:64] or "media"
         output_name = f"{safe_stem}.gif"
         return await upload_to_zipline(self.http_session, self.settings, gif_data, output_name, trace_id=trace_id)
 
@@ -737,7 +848,7 @@ class BombagifBot(commands.Bot):
         user_id: int,
         guild_id: int | None,
     ) -> None:
-        """Process every selected image and report a concise per-file result."""
+        """Process each selected image/video and report a concise per-file result."""
         for attachment in attachments:
             try:
                 link = await self._process_one(attachment, user_id, guild_id)
@@ -752,11 +863,11 @@ class BombagifBot(commands.Bot):
                 )
             except Exception:
                 self.logger.exception(
-                    "Unexpected attachment processing error",
+                    "Unexpected media processing error",
                     extra=self._log_context(user_id, guild_id, uuid.uuid4().hex),
                 )
                 await destination.send(
-                    f"**{discord.utils.escape_markdown(attachment.filename)}**: Sorry, the image could not be processed.",
+                    f"**{discord.utils.escape_markdown(attachment.filename)}**: Sorry, the media could not be processed.",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 
@@ -790,7 +901,7 @@ class BombagifBot(commands.Bot):
                 extra=self._log_context(interaction.user.id, guild_id, uuid.uuid4().hex),
             )
             await interaction.followup.send(
-                "Sorry, something went wrong while processing that image.",
+                "Sorry, something went wrong while processing that media.",
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -800,13 +911,13 @@ def create_bot(settings: Settings) -> BombagifBot:
     """Create the bot and register the globally available `/gif` command."""
     bot = BombagifBot(settings)
 
-    @bot.tree.command(name="gif", description="Convert an uploaded WEBP, PNG, or SVG image to a GIF")
+    @bot.tree.command(name="gif", description="Convert an uploaded image or MP4/WebM video to a GIF")
     @app_commands.allowed_installs(guilds=False, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @app_commands.describe(image="The WEBP, PNG, or SVG image to convert")
-    async def gif_command(interaction: discord.Interaction, image: discord.Attachment) -> None:
+    @app_commands.describe(media="The image or MP4/WebM video to convert")
+    async def gif_command(interaction: discord.Interaction, media: discord.Attachment) -> None:
         """Convert a slash-command attachment to a GIF and short link."""
-        await bot.interaction_upload(interaction, image)
+        await bot.interaction_upload(interaction, media)
 
     return bot
 
