@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 .DS_Store
 *.png
+# Written by install.sh inside the install directory.
+.install-mode
+bombagif.log

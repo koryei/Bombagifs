@@ -4,19 +4,28 @@ Bombagif converts WEBP, PNG, and SVG images into optimized GIFs, uploads them to
 
 ## Quick install
 
-The interactive installer clones this public repository, asks which hosting mode you want, and prompts privately for **your own** Discord bot token, Zipline token, and Zipline URL. It never prints those values or places them in the command line. As with any `curl | bash` installer, the command executes the downloaded script; inspect it first if you want to review the code before running it.
+One script installs, updates, inspects, and removes Bombagif. It prompts privately for **your own** Discord bot token, Zipline token, and Zipline URL, and never prints those values or places them in the command line. As with any `curl | bash` installer, the command executes the downloaded script; inspect it first if you want to review the code before running it.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/koryei/Bombagifs/main/install.sh | bash
 ```
 
-The menu offers:
+Run the same command any time to reopen the menu:
 
-1. **Python venv** — local or VPS setup; prints the command to run Bombagif.
+1. **Install Bombagif** — first-time setup; also repairs or reconfigures an existing install.
+2. **Update to the latest** — pulls new source, then rebuilds or restarts with your existing `.env`.
+3. **Manage the service** — start, stop, restart, show recent logs, or re-apply `.env`/`status.config`.
+4. **Show status** — install directory, detected mode, whether the bot is running, and the next command to type.
+5. **Uninstall** — stops and removes the service, then asks before deleting the install directory.
+6. **Check installation** — verifies `.env` keys, Zipline reachability, Cairo, Docker, and the virtualenv.
+
+For a new install the menu then asks how Bombagif should run:
+
+1. **Python venv** — local or VPS setup; installs dependencies and starts the bot in the background with a log file.
 2. **Docker Compose** — builds and starts the bot with restart and bounded log settings.
 3. **Ubuntu systemd** — asks before using `sudo` to install packages and register a service that starts at boot. Use a normal VPS login user, not `root`; install goes under that user's home directory.
 
-The installer leaves its clone in `~/Bombagif` by default and intentionally stops if that path already exists. To choose another fresh path, download the installer first and run `BOMBAGIF_INSTALL_DIR=/path/to/new/folder bash /tmp/bombagif-install.sh`.
+Every install finishes with a results summary: whether the bot actually started, the exact log and restart commands for your mode, the Discord invite URL, and a reminder that `.env` holds your secrets. To choose another install path, download the installer first and run `BOMBAGIF_INSTALL_DIR=/path/to/folder bash /tmp/bombagif-install.sh`. Non-interactive automation can set `BOMBAGIF_INSTALL_MODE` (`python`, `docker`, or `systemd`) and `BOMBAGIF_INSTALL_ACTION` (`install`, `update`, `manage`, `status`, `uninstall`, or `doctor`) with `DISCORD_TOKEN`, `ZIPLINE_TOKEN`, and `ZIPLINE_URL` exported.
 
 For security-conscious installs, inspect the installer first, then run it:
 
@@ -75,9 +84,11 @@ Useful commands: `docker compose logs -f bombagif`, `docker compose restart bomb
 
 ## Custom Discord presence
 
+The presence is sent with the bot's very first gateway connection and re-applied on every reconnect, so the app never appears offline. If `status.config` is missing or contains an invalid value, Bombagif logs the problem and stays online instead of failing to connect.
+
 Edit [`status.config`](status.config) in the install directory, then restart Bombagif. The `[status]` section supports `status = online|idle|dnd|invisible`, `activity_type = playing|listening|watching|competing|streaming|custom`, and `activity_text` up to 128 characters. For `streaming`, set an HTTPS `streaming_url`; for `custom`, optionally set `activity_emoji`. Leave `activity_text` blank to hide the activity while keeping the selected presence status. The bot reloads this configuration whenever Discord connects or reconnects; it does not hot-reload edits made while connected.
 
-For the Ubuntu systemd installer, edit `~/Bombagif/status.config` and run `sudo systemctl restart bombagif`. For Docker Compose, edit `~/Bombagif/status.config` and run `docker compose restart bombagif`; Compose mounts the file read-only into the container. For Python, restart the running process.
+For the Ubuntu systemd installer, edit `~/Bombagif/status.config` and run `sudo systemctl restart bombagif`. For Docker Compose, edit `~/Bombagif/status.config` and run `docker compose restart bombagif`; Compose mounts the file read-only into the container. For Python, restart the running process — or pick **Manage the service → Re-apply settings** in the installer menu, which restarts the right thing for your mode.
 
 ## Zipline upload responses
 
@@ -91,4 +102,4 @@ Bombagif supports Zipline JSON responses containing a `files` URL list, legacy o
 
 ## Checks
 
-Run `bash tests/test_installer.sh` for installer helper checks and `python -m unittest discover -s tests -v` for offline image and local mock-Zipline behavior tests. They do not contact Discord or your production Zipline host.
+Run `bash tests/test_installer.sh` for installer helper checks and `python -m unittest discover -s tests -v` for offline image, presence, and local mock-Zipline behavior tests. They do not contact Discord or your production Zipline host. The SVG rasterization test needs Cairo installed; without it, that single test reports the Cairo prerequisite while the rest pass.

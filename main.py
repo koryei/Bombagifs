@@ -212,6 +212,19 @@ def load_presence_config(
     return status, activity
 
 
+def load_presence_or_default() -> tuple[discord.Status, discord.BaseActivity | None]:
+    """Load status.config, falling back to a visible online presence on error.
+
+    A broken or half-edited status.config must never leave the app appearing
+    offline or invisible, so an unreadable file keeps the bot online.
+    """
+    try:
+        return load_presence_config(PRESENCE_CONFIG_PATH)
+    except RuntimeError as exc:
+        logging.getLogger("bombagif").error("Invalid status.config (%s); keeping the online presence", exc)
+        return discord.Status.online, None
+
+
 def validate_image_metadata(filename: str, content_type: str | None, size: int | None) -> str:
     """Validate the supported extension and known declared size."""
     suffix = os.path.splitext(os.path.basename(filename).lower())[1]
@@ -603,7 +616,15 @@ class BombagifBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         # The core user-installed slash command does not need privileged intents.
         intents = discord.Intents.default()
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+        # Send the configured presence with the initial IDENTIFY payload so the
+        # app is never briefly offline, and re-apply it on every reconnect.
+        self.presence_status, self.presence_activity = load_presence_or_default()
+        super().__init__(
+            command_prefix=commands.when_mentioned,
+            intents=intents,
+            status=self.presence_status,
+            activity=self.presence_activity,
+        )
         self.settings = settings
         self.http_session: aiohttp.ClientSession | None = None
         self.max_parallel_jobs = max(1, min(2, os.cpu_count() or 1))
@@ -636,11 +657,28 @@ class BombagifBot(commands.Bot):
         finally:
             await super().close()
 
+    async def _apply_presence(self, reason: str) -> None:
+        """Reload status.config and push the presence, never failing the connection."""
+        status, activity = load_presence_or_default()
+        self.presence_status, self.presence_activity = status, activity
+        try:
+            await self.change_presence(status=status, activity=activity)
+        except Exception:  # pragma: no cover - defensive; presence must not break startup
+            self.logger.exception("Could not apply Discord presence", extra={"reason": reason})
+            return
+        self.logger.info(
+            "Discord presence applied",
+            extra={"reason": reason, "status": status.value, "activity": activity.name if activity else None},
+        )
+
     async def on_ready(self) -> None:
         """Apply configured presence after every successful Discord connection."""
-        status, activity = load_presence_config()
-        await self.change_presence(status=status, activity=activity)
+        await self._apply_presence("ready")
         self.logger.info("Bot connected", extra={"user_id": self.user.id if self.user else None})
+
+    async def on_resumed(self) -> None:
+        """Re-apply presence after a gateway resume, which skips on_ready."""
+        await self._apply_presence("resumed")
 
     def _log_context(self, user_id: int, guild_id: int | None, trace_id: str) -> dict[str, Any]:
         """Build per-request logging context."""

@@ -25,6 +25,7 @@ from main import (
     create_bot,
     convert_image,
     load_presence_config,
+    load_presence_or_default,
     upload_to_zipline,
     validate_image_metadata,
 )
@@ -208,6 +209,16 @@ class PresenceConfigTests(unittest.TestCase):
         self.assertEqual(status, discord.Status.idle)
         self.assertIsNone(activity)
 
+    def test_broken_config_keeps_bot_online(self) -> None:
+        """Never let a half-edited status.config hide the bot's presence."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "status.config"
+            config_path.write_text("[status]\nstatus = bogus\n", encoding="utf-8")
+            with patch("main.PRESENCE_CONFIG_PATH", config_path):
+                status, activity = load_presence_or_default()
+        self.assertEqual(status, discord.Status.online)
+        self.assertIsNone(activity)
+
     def test_rejects_invalid_presence_values(self) -> None:
         """Fail fast on invalid status and unsupported activity values."""
         invalid_values = (
@@ -226,6 +237,46 @@ class PresenceConfigTests(unittest.TestCase):
 
 class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
     """Verify the command is exposed as a personal user-installed app."""
+
+    async def test_bot_announces_presence_in_initial_connection(self) -> None:
+        """Send the configured presence with the first IDENTIFY payload."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        try:
+            expected_status, expected_activity = load_presence_or_default()
+            self.assertEqual(bot.presence_status, expected_status)
+            self.assertEqual(
+                bot.presence_activity.name if bot.presence_activity else None,
+                expected_activity.name if expected_activity else None,
+            )
+        finally:
+            await bot.close()
+
+    async def test_bot_reapplies_presence_after_gateway_resume(self) -> None:
+        """Re-push the presence when Discord resumes a session without on_ready."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        try:
+            with patch.object(bot, "change_presence", new_callable=unittest.mock.AsyncMock) as change_presence:
+                await bot.on_resumed()
+            change_presence.assert_awaited_once()
+            self.assertEqual(change_presence.await_args.kwargs["status"], discord.Status.online)
+        finally:
+            await bot.close()
 
     async def test_bot_sets_online_presence_when_connected(self) -> None:
         """Show an online status and a useful activity after connecting."""
