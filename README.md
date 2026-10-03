@@ -72,7 +72,7 @@ python -m pip install -r requirements.txt
 
 Keep the process running on your machine/VPS/container. Discord sends interactions over the bot's existing gateway connection, so no inbound web port is needed.
 
-The `/gif` command accepts MP4 and WebM video attachments up to 15 MB. It converts only the first 10 seconds at 15 fps and scales frames to fit within 480×480. FFmpeg conversion runs with a 45-second timeout; the output GIF is capped at 25 MB, and temporary input/output files are deleted after processing. Install FFmpeg on the host for Python mode; Docker and Ubuntu systemd installs include it automatically. Python mode also requires Cairo for SVG conversion; Docker and Ubuntu systemd installs include Cairo, while macOS Python installs need `brew install cairo`.
+The `/gif` command accepts MP4 and WebM video attachments up to 15 MB. FFmpeg probes the file container rather than forcing a guessed demuxer, including MP4s whose index (`moov`) atom is at the end. It converts only the first 10 seconds at 15 fps and scales frames to fit within 480×480. FFmpeg conversion runs with a 45-second timeout; the output GIF is capped at 25 MB, and temporary input/output files are deleted after processing. Install FFmpeg on the host for Python mode; Docker and Ubuntu systemd installs include it automatically. Python mode also requires Cairo for SVG conversion; Docker and Ubuntu systemd installs include Cairo, while macOS Python installs need `brew install cairo`.
 
 ## Docker Compose (manual)
 

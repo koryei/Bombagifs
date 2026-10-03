@@ -480,7 +480,7 @@ def _rasterize_svg(data: bytes, width: int, height: int) -> bytes:
         raise InvalidImage("That SVG could not be safely converted to an image.") from exc
 
 
-def convert_video(data: bytes, suffix: str) -> bytes:
+def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> bytes:
     """Convert the first 10 seconds of an MP4/WebM to a bounded, optimized GIF."""
     if suffix not in {".mp4", ".webm"}:
         raise InvalidImage("Use an MP4 or WebM video.")
@@ -501,6 +501,7 @@ def convert_video(data: bytes, suffix: str) -> bytes:
             input_path = Path(work_dir) / f"input{suffix}"
             output_path = Path(work_dir) / "output.gif"
             input_path.write_bytes(data)
+            stderr_path = Path(work_dir) / "ffmpeg.stderr"
             command = [
                 ffmpeg,
                 "-nostdin",
@@ -517,8 +518,6 @@ def convert_video(data: bytes, suffix: str) -> bytes:
                 str(MAX_PIXELS),
                 "-protocol_whitelist",
                 "file",
-                "-f",
-                "mp4" if suffix == ".mp4" else "matroska",
                 "-t",
                 str(MAX_VIDEO_DURATION),
                 "-i",
@@ -541,16 +540,17 @@ def convert_video(data: bytes, suffix: str) -> bytes:
                 str(output_path),
             ]
             try:
-                result = subprocess.run(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    shell=False,
-                    timeout=VIDEO_CONVERSION_TIMEOUT,
-                    cwd=work_dir,
-                )
+                with stderr_path.open("wb") as stderr_file:
+                    result = subprocess.run(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=stderr_file,
+                        check=False,
+                        shell=False,
+                        timeout=VIDEO_CONVERSION_TIMEOUT,
+                        cwd=work_dir,
+                    )
             except subprocess.TimeoutExpired as exc:
                 raise InvalidImage("Video conversion took too long. Try a shorter or smaller video.") from exc
             except OSError as exc:
@@ -559,8 +559,22 @@ def convert_video(data: bytes, suffix: str) -> bytes:
             if output_size > MAX_OUTPUT_BYTES:
                 raise InvalidImage("The converted GIF is too large to upload (maximum 25 MB).")
             if result.returncode != 0:
+                with stderr_path.open("rb") as stderr_file:
+                    stderr_size = stderr_file.seek(0, os.SEEK_END)
+                    stderr_file.seek(max(0, stderr_size - 4096))
+                    diagnostic = stderr_file.read(4096).decode("utf-8", errors="replace")
+                diagnostic = " ".join(
+                    "".join(char if char.isprintable() else " " for char in diagnostic).split()
+                )[:1000]
+                logging.getLogger("bombagif.media").warning(
+                    "FFmpeg video conversion failed (returncode=%s)%s",
+                    result.returncode,
+                    f": {diagnostic}" if diagnostic else "",
+                    extra={"trace_id": trace_id} if trace_id else {},
+                )
                 raise InvalidImage(
-                    "That MP4/WebM could not be converted. Please try another video."
+                    "That MP4/WebM could not be converted. Please try another video. "
+                    "The bot host can inspect the service journal for the FFmpeg error."
                 )
             if output_size == 0:
                 raise InvalidImage("That video does not contain a usable video stream.")
@@ -967,7 +981,7 @@ class BombagifBot(commands.Bot):
             loop = asyncio.get_running_loop()
             converter = convert_video if suffix in {".mp4", ".webm"} else convert_image
             if converter is convert_video:
-                conversion_args = (data, suffix)
+                conversion_args = (data, suffix, trace_id)
             else:
                 conversion_args = (data, suffix, self.settings.background)
             gif_data = await loop.run_in_executor(self.image_executor, converter, *conversion_args)

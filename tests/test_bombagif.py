@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -120,14 +121,18 @@ class ImageTests(unittest.TestCase):
         workdirs: list[Path] = []
         commands: list[list[str]] = []
 
-        def fake_ffmpeg(command: list[str], **kwargs: object) -> object:
+        def fake_ffmpeg(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
             input_path = Path(command[command.index("-i") + 1])
             output_path = Path(command[-1])
             workdirs.append(input_path.parent)
             commands.append(command)
             self.assertEqual(input_path.read_bytes(), b"video bytes")
+            self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+            self.assertIsNot(kwargs["stderr"], subprocess.DEVNULL)
+            self.assertFalse(kwargs["shell"])
             output_path.write_bytes(b"GIF89a" + b"frame" + b";")
-            return type("Completed", (), {"returncode": 0})()
+            return subprocess.CompletedProcess(command, 0)
 
         for suffix in (".mp4", ".webm"):
             with self.subTest(suffix=suffix):
@@ -147,10 +152,7 @@ class ImageTests(unittest.TestCase):
             self.assertEqual(command[command.index("-t") + 1], "10")
             self.assertEqual(command[command.index("-max_pixels") + 1], str(20_000_000))
             self.assertEqual(command[command.index("-protocol_whitelist") + 1], "file")
-            self.assertEqual(
-                command[command.index("-f") + 1],
-                "mp4" if command[command.index("-i") + 1].endswith(".mp4") else "matroska",
-            )
+            self.assertNotIn("-f", command)  # let FFmpeg detect MP4/MOV and Matroska/WebM variants
             self.assertIn("fps=15", command[command.index("-filter_complex") + 1])
             self.assertIn("palettegen", command[command.index("-filter_complex") + 1])
             self.assertIn("scale=480:480", command[command.index("-filter_complex") + 1])
@@ -159,6 +161,46 @@ class ImageTests(unittest.TestCase):
             self.assertEqual(command[command.index("-frames:v") + 1], "150")
             self.assertEqual(command[command.index("-loop") + 1], "0")
             self.assertEqual(command[command.index("-fs") + 1], str(MAX_OUTPUT_BYTES))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
+    def test_converts_mp4_with_default_moov_atom_at_end(self) -> None:
+        """Convert a generated MP4 in the common non-faststart layout end-to-end."""
+        ffmpeg = shutil.which("ffmpeg")
+        self.assertIsNotNone(ffmpeg)
+        with tempfile.TemporaryDirectory(prefix="bombagif-mp4-test-") as work_dir:
+            input_path = Path(work_dir) / "fixture.mp4"
+            generated = subprocess.run(
+                [
+                    str(ffmpeg),
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=red:s=160x120:r=15:d=1.2",
+                    "-an",
+                    "-c:v",
+                    "mpeg4",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(input_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(generated.returncode, 0, generated.stderr.decode(errors="replace"))
+            converted = convert_video(input_path.read_bytes(), ".mp4")
+
+        with Image.open(io.BytesIO(converted)) as gif:
+            self.assertEqual(gif.format, "GIF")
+            self.assertEqual(gif.size, (480, 360))
+            self.assertGreater(gif.n_frames, 1)
+            self.assertLessEqual(gif.n_frames, 150)
 
     def test_video_conversion_reports_missing_ffmpeg_and_invalid_outputs(self) -> None:
         """Report missing FFmpeg, timeout, failed decodes, and oversized output clearly."""
@@ -184,17 +226,30 @@ class ImageTests(unittest.TestCase):
                 convert_video(b"video bytes", ".mp4")
         self.assertFalse(timed_out_workdirs[-1].exists())
 
-        with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
-            "main.subprocess.run", return_value=type("Completed", (), {"returncode": 1})()
-        ):
-            with self.assertRaisesRegex(InvalidImage, "could not be converted"):
-                convert_video(b"video bytes", ".webm")
+        failed_workdirs: list[Path] = []
+
+        def failed_ffmpeg(command: list[str], **kwargs: object) -> object:
+            failed_workdirs.append(Path(str(kwargs["cwd"])))
+            stderr_file = kwargs["stderr"]
+            self.assertNotEqual(stderr_file, subprocess.DEVNULL)
+            stderr_file.write(b"[mov,mp4] moov atom not found")
+            return subprocess.CompletedProcess(command, 1)
+
+        with self.assertLogs("bombagif.media", level="WARNING") as logs:
+            with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+                "main.subprocess.run", side_effect=failed_ffmpeg
+            ):
+                with self.assertRaisesRegex(InvalidImage, "service journal"):
+                    convert_video(b"video bytes", ".mp4", "test-trace")
+        self.assertIn("moov atom not found", "\n".join(logs.output))
+        self.assertEqual(logs.records[0].trace_id, "test-trace")
+        self.assertFalse(failed_workdirs[-1].exists())
 
         def oversized_output(command: list[str], **kwargs: object) -> object:
             Path(command[-1]).write_bytes(b"GIF89a")
             with Path(command[-1]).open("r+b") as output:
                 output.truncate(MAX_OUTPUT_BYTES + 1)
-            return type("Completed", (), {"returncode": 0})()
+            return subprocess.CompletedProcess(command, 0)
 
         with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
             "main.subprocess.run", side_effect=oversized_output
