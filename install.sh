@@ -694,11 +694,18 @@ main() {
     INSTALL_MODE="$(detect_mode || true)"
     [[ -n "$INSTALL_MODE" ]] || die "Could not detect the install mode at $INSTALL_DIR."
     case "$INSTALL_MODE" in
-      python) install_python_mode ;;
+      python)
+        install_python_mode
+        pkill -f "$INSTALL_DIR/.venv/bin/python.*main\.py" >/dev/null 2>&1 || true
+        start_python_mode || die "Updated source was installed but Bombagif did not restart; inspect $INSTALL_DIR/bombagif.log."
+        ;;
       docker) install_docker_mode ;;
-      systemd) install_systemd_mode ;;
+      systemd)
+        install_systemd_mode
+        sudo systemctl restart "${SERVICE_NAME}.service" || die "Updated source was installed but Bombagif did not restart; inspect sudo journalctl -u ${SERVICE_NAME}.service."
+        ;;
     esac
-    ok "Update complete."
+    ok "Update complete; the service is running the new source."
     show_status || true
     exit 0
   fi

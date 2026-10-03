@@ -983,11 +983,10 @@ class BombagifBot(commands.Bot):
 
         install_url = _user_install_url(self.application_id)
         response = (
-            "Hey! I'm Bombagif. Use `/gif` and attach photos or videos to get an optimized GIF link. "
-            "http://gifs.bombaclat.wtf/u/T1XJjE.gif"
+            "Yo! I'm Bombagif. Use `/gif` and attach photos or videos to get an optimized [GIF link](https://gifs.bombaclat.wtf/u/T1XJjE.gif)."
         )
         if install_url:
-            response += f"\nAdd Bombagif to your apps: <{install_url}>"
+            response += f"\n[**Click this hyper-link** to add Bombagif to your apps.](<{install_url}>)"
         await message.channel.send(
             response,
             allowed_mentions=discord.AllowedMentions.none(),

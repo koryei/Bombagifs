@@ -82,4 +82,45 @@ grep -Eq 'apt-get install -y python3 python3-venv ffmpeg libcairo2' "$ROOT/insta
 grep -Eq 'apt-get install -y --no-install-recommends ffmpeg libcairo2 libffi8' "$ROOT/Dockerfile"
 grep -Eq 'FFmpeg is not detected' "$ROOT/install.sh"
 
+# Updating source must restart Python/systemd deployments so they execute the
+# fetched code. Docker's `up --build` already recreates the running container.
+UPDATE_TEST_LOG="$TEST_ROOT/update-actions.log"
+UPDATE_INSTALLER="$ROOT/install.sh"
+export UPDATE_TEST_LOG UPDATE_INSTALLER
+UPDATE_LOG=""
+info() { UPDATE_LOG+="info:$*;"; }
+ok() { UPDATE_LOG+="ok:$*;"; }
+show_status() { UPDATE_LOG+="show-status;"; return 0; }
+preflight() { UPDATE_LOG+="preflight;"; }
+die() { printf 'unexpected installer error: %s\n' "$*" >&2; exit 1; }
+update_project() { UPDATE_LOG+="fetch-reset;"; }
+detect_mode() { printf '%s' "$INSTALL_MODE"; }
+install_python_mode() { UPDATE_LOG+="install-python;"; }
+start_python_mode() { UPDATE_LOG+="start-python;"; }
+install_docker_mode() { UPDATE_LOG+="install-docker;"; }
+install_systemd_mode() { UPDATE_LOG+="install-systemd;"; }
+pkill() { UPDATE_LOG+="pkill-python;"; }
+sudo() { UPDATE_LOG+="sudo $*;"; }
+for update_mode in python docker systemd; do
+  (
+    INSTALL_ACTION=update
+    INSTALL_MODE="$update_mode"
+    INSTALL_DIR="$TEST_ROOT/update-$update_mode"
+    preflight() { :; }
+    update_project() { printf 'fetch-reset\n' >> "$UPDATE_TEST_LOG"; }
+    detect_mode() { printf '%s' "$INSTALL_MODE"; }
+    install_python_mode() { printf 'install-python\n' >> "$UPDATE_TEST_LOG"; }
+    start_python_mode() { printf 'start-python\n' >> "$UPDATE_TEST_LOG"; }
+    install_docker_mode() { printf 'install-docker\n' >> "$UPDATE_TEST_LOG"; }
+    install_systemd_mode() { printf 'install-systemd\n' >> "$UPDATE_TEST_LOG"; }
+    pkill() { printf 'pkill-python\n' >> "$UPDATE_TEST_LOG"; }
+    sudo() { printf 'sudo %s\n' "$*" >> "$UPDATE_TEST_LOG"; }
+    show_status() { return 0; }
+    main >/dev/null
+  )
+done
+expected_updates=$'fetch-reset\ninstall-python\npkill-python\nstart-python\nfetch-reset\ninstall-docker\nfetch-reset\ninstall-systemd\nsudo systemctl restart bombagif.service'
+actual_updates="$(cat "$UPDATE_TEST_LOG")"
+assert_equal "$expected_updates" "$actual_updates" "update restarts Python and systemd; rebuilds Docker"
+
 printf 'Installer unit checks passed.\n'
