@@ -22,7 +22,9 @@ from main import (
     UserFacingError,
     MAX_INPUT_BYTES,
     MAX_OUTPUT_BYTES,
+    PRESENCE_REASSERT_TICKS,
     _extract_zipline_file_url,
+    _presence_signature,
     _read_settings,
     _rasterize_svg,
     create_bot,
@@ -261,14 +263,85 @@ class ImageTests(unittest.TestCase):
 class PresenceConfigTests(unittest.TestCase):
     """Validate editable Discord status and activity settings."""
 
-    def test_loads_playing_presence(self) -> None:
-        """Read the checked-in default activity and online status."""
+    def test_loads_checked_in_status_card(self) -> None:
+        """Read the checked-in card: title, both lines, and its button."""
         from main import PRESENCE_CONFIG_PATH
 
         status, activity = load_presence_config(PRESENCE_CONFIG_PATH)
         self.assertEqual(status, discord.Status.online)
-        self.assertIsInstance(activity, discord.Game)
-        self.assertEqual(activity.name, "/gif | your images to GIFs")
+        self.assertIsInstance(activity, discord.Activity)
+        assert isinstance(activity, discord.Activity)
+        self.assertEqual(activity.name, "Bombagif")
+        self.assertEqual(activity.type, discord.ActivityType.playing)
+        self.assertEqual(
+            activity.details,
+            "Converts WEBP, PNG, SVG, MP4 & WebM into optimized GIFs, then uploads to your Zipline instance.",
+        )
+        self.assertEqual(activity.state, "Install once to use /gif in DMs, group chats, or any server.")
+        self.assertEqual(activity.buttons, ["Try It Out"])
+
+    def test_resolves_user_install_button_url(self) -> None:
+        """Point the card's button at this app's own User-Install URL."""
+        config = (
+            "[status]\nactivity_name = Bombagif\nstate = Install once\n"
+            "button_label = Try It Out\nbutton_url = user-install\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "status.config"
+            config_path.write_text(config, encoding="utf-8")
+            _, resolved = load_presence_config(config_path, 123456789)
+            _, pending = load_presence_config(config_path)
+        assert isinstance(resolved, discord.Activity)
+        assert isinstance(pending, discord.Activity)
+        self.assertEqual(
+            resolved.state_url,
+            "https://discord.com/oauth2/authorize?client_id=123456789"
+            "&scope=applications.commands&integration_type=1",
+        )
+        self.assertEqual(resolved.buttons, ["Try It Out"])
+        # Without a known application id the button waits for the next READY.
+        self.assertIsNone(pending.state_url)
+
+    def test_builds_card_images_from_config(self) -> None:
+        """Expose the Rich Presence assets shown on the card."""
+        config = (
+            "[status]\nactivity_name = Bombagif\n"
+            "large_image = bombagif_logo\nlarge_text = Bombagif\n"
+            "small_image = bombagif_badge\nsmall_text = Bombagif\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "status.config"
+            config_path.write_text(config, encoding="utf-8")
+            _, activity = load_presence_config(config_path)
+        assert isinstance(activity, discord.Activity)
+        self.assertEqual(
+            activity.assets,
+            {
+                "large_image": "bombagif_logo",
+                "large_text": "Bombagif",
+                "small_image": "bombagif_badge",
+                "small_text": "Bombagif",
+            },
+        )
+        self.assertEqual(activity.to_dict()["assets"], activity.assets)
+
+    def test_plain_activity_text_stays_a_single_line(self) -> None:
+        """Keep the minimal one-line presence free of rich activity fields."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "status.config"
+            config_path.write_text(
+                "[status]\nstatus = idle\nactivity_type = watching\nactivity_text = GIFs\n",
+                encoding="utf-8",
+            )
+            status, activity = load_presence_config(config_path)
+        self.assertEqual(status, discord.Status.idle)
+        assert activity is not None
+        self.assertEqual(activity.name, "GIFs")
+        self.assertEqual(activity.type, discord.ActivityType.watching)
+        payload = activity.to_dict()
+        self.assertNotIn("details", payload)
+        self.assertNotIn("state", payload)
+        self.assertEqual(payload["buttons"], [])
 
     def test_supports_custom_activity_modes(self) -> None:
         """Create listening, watching, streaming, and custom presences from config."""
@@ -320,6 +393,12 @@ class PresenceConfigTests(unittest.TestCase):
             "[status]\nstatus = bogus\n",
             "[status]\nactivity_type = unknown\n",
             "[status]\nactivity_type = streaming\nactivity_text = live\n",
+            f"[status]\ndetails = {'x' * 129}\n",
+            f"[status]\nactivity_name = Bombagif\nbutton_label = {'y' * 33}\n",
+            f"[status]\nactivity_name = Bombagif\nlarge_image = {'z' * 33}\n",
+            "[status]\nactivity_type = custom\nactivity_name = Bombagif\nlarge_image = logo\n",
+            "[status]\nactivity_name = Bombagif\nbutton_label = Try It Out\nbutton_url = http://insecure.example\n",
+            "[status]\nactivity_type = custom\nactivity_name = Bombagif\ndetails = one line\n",
         )
         for config in invalid_values:
             with self.subTest(config=config):
@@ -395,7 +474,67 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await bot.close()
 
-    async def test_gif_is_user_installed_and_global_context_enabled(self) -> None:
+    async def test_bot_applies_status_config_edits_without_restart(self) -> None:
+        """Follow status.config while connected so presence edits apply live."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                config_path = Path(directory) / "status.config"
+                config_path.write_text("[status]\nstatus = idle\nactivity_name = First\n", encoding="utf-8")
+                with patch("main.PRESENCE_CONFIG_PATH", config_path):
+                    signature = _presence_signature()
+                    with patch.object(
+                        bot, "change_presence", new_callable=unittest.mock.AsyncMock
+                    ) as change_presence:
+                        config_path.write_text(
+                            "[status]\nstatus = dnd\nactivity_name = Second\n", encoding="utf-8"
+                        )
+                        signature, tick = await bot._presence_watch_step(signature, 3)
+                    self.assertEqual(signature, _presence_signature())
+            change_presence.assert_awaited_once()
+            self.assertEqual(change_presence.await_args.kwargs["status"], discord.Status.dnd)
+            self.assertEqual(change_presence.await_args.kwargs["activity"].name, "Second")
+            self.assertEqual(tick, 0)
+        finally:
+            await bot.close()
+
+    async def test_presence_watch_reasserts_unchanged_config_periodically(self) -> None:
+        """Keep a quiet app's presence fresh without any config edit."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                config_path = Path(directory) / "status.config"
+                config_path.write_text("[status]\nstatus = online\nactivity_name = Bombagif\n", encoding="utf-8")
+                with patch("main.PRESENCE_CONFIG_PATH", config_path):
+                    signature = _presence_signature()
+                    with patch.object(
+                        bot, "change_presence", new_callable=unittest.mock.AsyncMock
+                    ) as change_presence:
+                        bot.ws = object()
+                        await bot._presence_watch_step(signature, PRESENCE_REASSERT_TICKS - 2)
+                        change_presence.assert_not_awaited()
+                        await bot._presence_watch_step(signature, PRESENCE_REASSERT_TICKS - 1)
+            change_presence.assert_awaited_once()
+            self.assertEqual(change_presence.await_args.kwargs["status"], discord.Status.online)
+        finally:
+            bot.ws = None
+            await bot.close()
         """Enable user installation without requiring a server bot install."""
         settings = Settings(
             discord_token="unused",

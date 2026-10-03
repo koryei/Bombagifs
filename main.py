@@ -49,6 +49,12 @@ MAX_VIDEO_FRAMES: Final[int] = 150
 VIDEO_CONVERSION_TIMEOUT: Final[int] = 45
 VIDEO_MAX_DIMENSION: Final[int] = 480
 PRESENCE_CONFIG_PATH: Final[Path] = Path(__file__).with_name("status.config")
+PRESENCE_WATCH_SECONDS: Final[float] = 15.0
+PRESENCE_REASSERT_TICKS: Final[int] = 20
+MAX_PRESENCE_TEXT: Final[int] = 128
+MAX_PRESENCE_BUTTON_LABEL: Final[int] = 32
+MAX_PRESENCE_ASSET_KEY: Final[int] = 32
+USER_INSTALL_BUTTON_URL: Final[str] = "user-install"
 SVG_MAX_NODES: Final[int] = 20_000
 SVG_MAX_TEXT_BYTES: Final[int] = 2_000_000
 ALLOWED_TYPES: Final[dict[str, set[str]]] = {
@@ -166,10 +172,57 @@ def configure_logging(level: str) -> None:
     root.setLevel(getattr(logging, level, logging.INFO))
 
 
+def _presence_text(
+    section: configparser.SectionProxy,
+    key: str,
+    limit: int = MAX_PRESENCE_TEXT,
+) -> str:
+    """Read one single-line status.config value within Discord's length limit."""
+    value = section.get(key, "").strip()
+    if len(value) > limit or "\n" in value or "\r" in value:
+        raise RuntimeError(f"status.config {key} must be a single line of at most {limit} characters")
+    return value
+
+
+def _https_url(value: str, key: str) -> str:
+    """Validate a status.config URL that Discord requires over HTTPS."""
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError
+        _ = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(f"status.config {key} must be a valid HTTPS URL") from exc
+    return value
+
+
+def _presence_button_url(section: configparser.SectionProxy, application_id: int | None) -> str:
+    """Resolve button_url, including the `user-install` shortcut for this app."""
+    raw = section.get("button_url", "").strip()
+    if not raw:
+        return ""
+    if raw.lower() == USER_INSTALL_BUTTON_URL:
+        if application_id is None:
+            # The application id only exists once Discord has sent READY; the
+            # presence is re-applied there, so the link is not lost.
+            return ""
+        return (
+            f"https://discord.com/oauth2/authorize?client_id={application_id}"
+            "&scope=applications.commands&integration_type=1"
+        )
+    return _https_url(raw, "button_url")
+
+
 def load_presence_config(
     config_path: str | os.PathLike[str] = PRESENCE_CONFIG_PATH,
+    application_id: int | None = None,
 ) -> tuple[discord.Status, discord.BaseActivity | None]:
-    """Load and validate the public Discord status/activity from status.config."""
+    """Load and validate the public Discord presence card from status.config.
+
+    The card's title (`activity_name`), line 1 (`details`), line 2 (`state`),
+    and optional button are all configurable. `application_id` is only used to
+    resolve the `button_url = user-install` shortcut into an install link.
+    """
     path = Path(config_path)
     parser = configparser.ConfigParser(interpolation=None)
     try:
@@ -187,51 +240,97 @@ def load_presence_config(
     status = discord.Status(status_name)
 
     activity_type = section.get("activity_type", "playing").strip().lower()
-    allowed_types = {"playing", "listening", "watching", "competing", "streaming", "custom"}
-    if activity_type not in allowed_types:
-        raise RuntimeError(f"status.config activity_type must be one of: {', '.join(sorted(allowed_types))}")
-    activity_text = section.get("activity_text", "").strip()
-    if len(activity_text) > 128 or "\n" in activity_text or "\r" in activity_text:
-        raise RuntimeError("status.config activity_text must be a single line of at most 128 characters")
-    if not activity_text:
+    activity_kinds = {
+        "playing": discord.ActivityType.playing,
+        "listening": discord.ActivityType.listening,
+        "watching": discord.ActivityType.watching,
+        "competing": discord.ActivityType.competing,
+        "streaming": discord.ActivityType.streaming,
+    }
+    if activity_type not in {*activity_kinds, "custom"}:
+        raise RuntimeError(f"status.config activity_type must be one of: {', '.join(sorted({*activity_kinds, 'custom'}))}")
+
+    activity_text = _presence_text(section, "activity_text")
+    activity_name = _presence_text(section, "activity_name")
+    details = _presence_text(section, "details")
+    state = _presence_text(section, "state")
+    button_label = _presence_text(section, "button_label", MAX_PRESENCE_BUTTON_LABEL)
+    assets = {
+        "large_image": _presence_text(section, "large_image", MAX_PRESENCE_ASSET_KEY),
+        "large_text": _presence_text(section, "large_text"),
+        "small_image": _presence_text(section, "small_image", MAX_PRESENCE_ASSET_KEY),
+        "small_text": _presence_text(section, "small_text"),
+    }
+    assets = {key: value for key, value in assets.items() if value}
+    if not (activity_text or activity_name or details or state):
         return status, None
 
-    if activity_type == "playing":
-        activity: discord.BaseActivity = discord.Game(name=activity_text)
-    elif activity_type == "streaming":
-        streaming_url = section.get("streaming_url", "").strip()
-        try:
-            parsed_stream = urlparse(streaming_url)
-            if parsed_stream.scheme != "https" or not parsed_stream.hostname:
-                raise ValueError
-            _ = parsed_stream.port
-        except ValueError as exc:
-            raise RuntimeError("status.config streaming_url must be a valid HTTPS URL when activity_type is streaming") from exc
-        activity = discord.Streaming(name=activity_text, url=streaming_url)
-    elif activity_type == "custom":
+    # Discord needs a title, and the config's own text is the best fallback.
+    name = activity_name or activity_text or details or state
+
+    if activity_type == "custom":
+        if details or state or button_label or assets:
+            raise RuntimeError(
+                "status.config activity_type = custom keeps a single line; use another "
+                "activity_type for details, state, button_label, or images"
+            )
         activity_emoji = section.get("activity_emoji", "").strip() or None
-        activity = discord.CustomActivity(name=activity_text, emoji=activity_emoji)
-    else:
-        activity_kinds = {
-            "listening": discord.ActivityType.listening,
-            "watching": discord.ActivityType.watching,
-            "competing": discord.ActivityType.competing,
-        }
-        activity = discord.Activity(type=activity_kinds[activity_type], name=activity_text)
-    return status, activity
+        return status, discord.CustomActivity(name=name, emoji=activity_emoji)
+
+    streaming_url = ""
+    if activity_type == "streaming":
+        streaming_url = _https_url(section.get("streaming_url", "").strip(), "streaming_url")
+
+    # Discord only renders details/state/buttons/assets for rich activities, so
+    # a plain one-line config keeps using the slim library activities.
+    if not (details or state or button_label or assets):
+        if activity_type == "playing":
+            return status, discord.Game(name=name)
+        if activity_type == "streaming":
+            return status, discord.Streaming(name=name, url=streaming_url)
+        return status, discord.Activity(type=activity_kinds[activity_type], name=name)
+
+    activity_fields: dict[str, Any] = {"type": activity_kinds[activity_type], "name": name}
+    if streaming_url:
+        activity_fields["url"] = streaming_url
+    if details:
+        activity_fields["details"] = details
+    if state:
+        activity_fields["state"] = state
+    if assets:
+        activity_fields["assets"] = assets
+    button_url = _presence_button_url(section, application_id)
+    if button_label:
+        activity_fields["buttons"] = [button_label]
+        if button_url:
+            # Discord resolves button links from the app's own settings, so the
+            # same URL is attached to the state line as a guaranteed link.
+            activity_fields["state_url"] = button_url
+    return status, discord.Activity(**activity_fields)
 
 
-def load_presence_or_default() -> tuple[discord.Status, discord.BaseActivity | None]:
+def load_presence_or_default(
+    application_id: int | None = None,
+) -> tuple[discord.Status, discord.BaseActivity | None]:
     """Load status.config, falling back to a visible online presence on error.
 
     A broken or half-edited status.config must never leave the app appearing
     offline or invisible, so an unreadable file keeps the bot online.
     """
     try:
-        return load_presence_config(PRESENCE_CONFIG_PATH)
+        return load_presence_config(PRESENCE_CONFIG_PATH, application_id)
     except RuntimeError as exc:
         logging.getLogger("bombagif").error("Invalid status.config (%s); keeping the online presence", exc)
         return discord.Status.online, None
+
+
+def _presence_signature() -> tuple[int, int] | None:
+    """Fingerprint status.config so the watcher only reacts to real edits."""
+    try:
+        stat = PRESENCE_CONFIG_PATH.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 def validate_attachment_metadata(filename: str, content_type: str | None, size: int | None) -> str:
@@ -743,6 +842,7 @@ class BombagifBot(commands.Bot):
         self.image_executor = ThreadPoolExecutor(max_workers=self.max_parallel_jobs)
         self.processing_semaphore = asyncio.Semaphore(self.max_parallel_jobs)
         self._shutdown = False
+        self._presence_watch_task: asyncio.Task[None] | None = None
         self.logger = logging.getLogger("bombagif")
 
     async def setup_hook(self) -> None:
@@ -753,6 +853,8 @@ class BombagifBot(commands.Bot):
         # Global synchronization is required for user-installed commands.
         await self.tree.sync()
         self.logger.info("Global user-installed command synced")
+        # Watch status.config so presence edits apply without a restart.
+        self._presence_watch_task = asyncio.create_task(self._watch_presence())
 
     async def close(self) -> None:
         """Close HTTP resources and drain image work before disconnecting."""
@@ -760,6 +862,13 @@ class BombagifBot(commands.Bot):
             return
         self._shutdown = True
         try:
+            if self._presence_watch_task is not None:
+                self._presence_watch_task.cancel()
+                try:
+                    await self._presence_watch_task
+                except asyncio.CancelledError:
+                    pass
+                self._presence_watch_task = None
             if self.http_session and not self.http_session.closed:
                 await self.http_session.close()
             loop = asyncio.get_running_loop()
@@ -771,7 +880,7 @@ class BombagifBot(commands.Bot):
 
     async def _apply_presence(self, reason: str) -> None:
         """Reload status.config and push the presence, never failing the connection."""
-        status, activity = load_presence_or_default()
+        status, activity = load_presence_or_default(self.application_id)
         self.presence_status, self.presence_activity = status, activity
         try:
             await self.change_presence(status=status, activity=activity)
@@ -791,6 +900,40 @@ class BombagifBot(commands.Bot):
     async def on_resumed(self) -> None:
         """Re-apply presence after a gateway resume, which skips on_ready."""
         await self._apply_presence("resumed")
+
+    async def _presence_watch_step(
+        self,
+        signature: tuple[int, int] | None,
+        tick: int,
+    ) -> tuple[tuple[int, int] | None, int]:
+        """Apply edited presence config, or re-assert it periodically.
+
+        Returns the refreshed fingerprint and tick count so the loop stays
+        stateless and this step is directly testable.
+        """
+        current = _presence_signature()
+        if current != signature:
+            await self._apply_presence("status.config changed")
+            return current, 0
+        tick += 1
+        if self.ws is not None and tick >= PRESENCE_REASSERT_TICKS:
+            # Discord can quietly drop a presence nothing refreshes, and an
+            # app with no users is easy to forget, so keep it authoritative.
+            await self._apply_presence("periodic reassert")
+            return current, 0
+        return current, tick
+
+    async def _watch_presence(self) -> None:
+        """Reload status.config while running so edits need no restart."""
+        signature, tick = _presence_signature(), 0
+        try:
+            while True:
+                await asyncio.sleep(PRESENCE_WATCH_SECONDS)
+                signature, tick = await self._presence_watch_step(signature, tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - the watcher must never stop the bot
+            self.logger.exception("Presence watcher stopped")
 
     def _log_context(self, user_id: int, guild_id: int | None, trace_id: str) -> dict[str, Any]:
         """Build per-request logging context."""

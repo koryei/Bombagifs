@@ -560,7 +560,7 @@ doctor() {
     problems=$((problems + 1))
   fi
   if [[ -f "$INSTALL_DIR/status.config" ]]; then
-    ok "status.config found (Discord presence)."
+    ok "status.config found (customizable Discord status card)."
   else
     warn "status.config missing — the bot will still show an online status."
   fi
@@ -650,7 +650,7 @@ post_install_result() {
   say "${C_BOLD}Good to know${C_RESET}"
   tip "Discord setup: enable User Install in the Developer Portal, then invite with"
   say "     https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=applications.commands&integration_type=1"
-  tip "Presence: edit '$INSTALL_DIR/status.config', then restart Bombagif to apply."
+  tip "Presence: edit '$INSTALL_DIR/status.config' — the running bot applies it in ~15s."
   tip "Re-run this installer any time: update, check status, see logs, or uninstall."
   tip "Your tokens stay in '$INSTALL_DIR/.env' (mode 600). Never share or commit that file."
   say "${C_CYAN}────────────────────────────────────────────────────────────────${C_RESET}"
