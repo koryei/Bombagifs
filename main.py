@@ -78,6 +78,60 @@ class UploadFailure(UserFacingError):
     """The Zipline service could not accept or report the uploaded file."""
 
 
+class PublicGifView(discord.ui.View):
+    """Single-use control for posting the invoking user's GIF in its server channel."""
+
+    def __init__(self, requester_id: int, embed: discord.Embed) -> None:
+        super().__init__(timeout=15 * 60)
+        self.requester_id = requester_id
+        self.embed = embed
+        self.posted = False
+        self._post_lock = asyncio.Lock()
+
+    @discord.ui.button(
+        label="Send in public chat",
+        style=discord.ButtonStyle.primary,
+        emoji="📣",
+    )
+    async def send_public(self, interaction: discord.Interaction, button: discord.ui.Button["PublicGifView"]) -> None:
+        """Post the GIF embed once, only to the channel where it was requested."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who requested this GIF can post it.", ephemeral=True
+            )
+            return
+
+        async with self._post_lock:
+            if self.posted:
+                await interaction.response.send_message("This GIF was already posted.", ephemeral=True)
+                return
+            if interaction.guild is None or interaction.channel is None:
+                await interaction.response.send_message(
+                    "Public posting is only available in a server channel.", ephemeral=True
+                )
+                return
+            if not interaction.app_permissions.send_messages or not interaction.app_permissions.embed_links:
+                await interaction.response.send_message(
+                    "I need Send Messages and Embed Links permission in this channel to post the GIF.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.channel.send(
+                embed=self.embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            self.posted = True
+            for item in self.children:
+                item.disabled = True
+            await interaction.edit_original_response(
+                content="Posted your GIF in this channel.",
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Validated runtime configuration loaded from the environment."""
@@ -929,8 +983,8 @@ class BombagifBot(commands.Bot):
 
         install_url = _user_install_url(self.application_id)
         response = (
-            "Hey! I'm Bombagif. Use `/gif` and attach a WEBP, PNG, SVG, MP4, or "
-            "WebM to get an optimized GIF link."
+            "Hey! I'm Bombagif. Use `/gif` and attach photos or videos to get an optimized GIF link. "
+            "http://gifs.bombaclat.wtf/u/T1XJjE.gif"
         )
         if install_url:
             response += f"\nAdd Bombagif to your apps: <{install_url}>"
@@ -1067,8 +1121,18 @@ class BombagifBot(commands.Bot):
         await interaction.response.defer(thinking=True, ephemeral=True)
         try:
             link = await self._process_one(attachment, interaction.user.id, guild_id)
+            embed = discord.Embed(
+                title="Your GIF is ready",
+                description="Your optimized GIF is ready to view or share.",
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=link)
+            embed.add_field(name="Open GIF", value=f"[View or copy the direct link]({link})")
+            embed.set_footer(text="Converted by Bombagif")
+            view = PublicGifView(interaction.user.id, embed) if guild_id is not None else None
             await interaction.followup.send(
-                f"Your GIF is ready: {link}",
+                embed=embed,
+                view=view,
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
