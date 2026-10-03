@@ -81,7 +81,7 @@ For the Ubuntu systemd installer, edit `~/Bombagif/status.config` and run `sudo 
 
 ## Zipline upload responses
 
-Bombagif supports Zipline JSON responses containing a `files` URL list, legacy objects with a `url` field, a JSON string URL, and the documented plain-text URL response. If an upload succeeds but no valid URL is returned, Bombagif warns you to check Zipline before retrying to avoid duplicate uploads.
+Bombagif supports Zipline JSON responses containing a `files` URL list, legacy objects with a `url` field, a JSON string URL, and the documented plain-text URL response. If Zipline returns an HTTP link for your same host while your configured public URL is HTTPS, Bombagif safely upgrades that link to your configured HTTPS host. If an upload succeeds but no safe URL is returned, Bombagif explains that HTTPS return URLs may need to be enabled in Zipline (`CORE_RETURN_HTTPS_URLS=true`) and warns you to check Zipline before retrying to avoid duplicate uploads.
 
 ## Secret hygiene before publishing
 

@@ -19,6 +19,7 @@ from main import (
     Settings,
     UploadFailure,
     UserFacingError,
+    _extract_zipline_file_url,
     _read_settings,
     _rasterize_svg,
     create_bot,
@@ -270,6 +271,38 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(command.allowed_contexts.private_channel)
         finally:
             await bot.close()
+
+
+class ZiplineResponseParsingTests(unittest.TestCase):
+    """Parse HTTPS links returned by Zipline across proxy and API versions."""
+
+    def test_upgrades_same_host_http_url_behind_https_proxy(self) -> None:
+        """Use the configured public host and HTTPS scheme for proxy-generated links."""
+        result = _extract_zipline_file_url(
+            {"files": ["http://zip.example.test:3000/u/abc123.gif"]},
+            "https://zip.example.test",
+        )
+        self.assertEqual(result, "https://zip.example.test/u/abc123.gif")
+
+    def test_preserves_https_response_url(self) -> None:
+        """Keep the valid HTTPS URL returned by Zipline unchanged."""
+        url = "https://zip.example.test/u/abc123.gif"
+        self.assertEqual(_extract_zipline_file_url({"files": [url]}, "https://zip.example.test"), url)
+
+    def test_rejects_cross_host_or_plain_http_urls(self) -> None:
+        """Do not upgrade arbitrary HTTP links from a successful API payload."""
+        self.assertIsNone(
+            _extract_zipline_file_url(
+                {"files": ["http://elsewhere.example.test/u/abc123.gif"]},
+                "https://zip.example.test",
+            )
+        )
+        self.assertIsNone(
+            _extract_zipline_file_url(
+                {"files": ["http://zip.example.test/u/abc123.gif"]},
+                "http://zip.example.test",
+            )
+        )
 
 
 class ZiplineTests(unittest.IsolatedAsyncioTestCase):

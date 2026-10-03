@@ -454,8 +454,9 @@ def _retry_delay(response: aiohttp.ClientResponse, attempt: int) -> float:
     return min(8.0, 0.5 * (2**attempt))
 
 
-def _extract_zipline_file_url(payload: Any) -> str | None:
-    """Read the uploaded file URL from common Zipline API response versions."""
+def _extract_zipline_file_url(payload: Any, zipline_base_url: str) -> str | None:
+    """Read a Zipline file URL and upgrade same-host HTTP links behind TLS proxies."""
+    configured_url = urlparse(zipline_base_url)
     candidate: Any = payload
     if isinstance(payload, list):
         candidate = payload[0] if payload else None
@@ -475,15 +476,29 @@ def _extract_zipline_file_url(payload: Any) -> str | None:
     file_url = candidate.strip()
     try:
         parsed_url = urlparse(file_url)
+        configured_host = configured_url.hostname
+        returned_host = parsed_url.hostname
         if (
-            parsed_url.scheme.lower() != "https"
-            or not parsed_url.hostname
+            not configured_host
+            or not returned_host
             or parsed_url.username is not None
             or parsed_url.password is not None
         ):
             return None
         # Accessing .port also validates malformed authority suffixes.
         _ = parsed_url.port
+        if parsed_url.scheme.lower() == "http":
+            # Upgrade only when the bot's configured public URL is HTTPS and
+            # Zipline's returned hostname matches it (ignoring an internal
+            # port, which often differs behind a TLS-terminating proxy).
+            if (
+                configured_url.scheme.lower() != "https"
+                or returned_host.casefold() != configured_host.casefold()
+            ):
+                return None
+            file_url = parsed_url._replace(scheme="https", netloc=configured_url.netloc).geturl()
+        elif parsed_url.scheme.lower() != "https":
+            return None
     except ValueError:
         return None
     return file_url
@@ -538,7 +553,7 @@ async def upload_to_zipline(
                     # Some Zipline deployments (and reverse proxies) return the
                     # file URL as plain text instead of JSON.
                     payload = bytes(response_body).decode("utf-8", errors="replace").strip()
-                returned_url = _extract_zipline_file_url(payload)
+                returned_url = _extract_zipline_file_url(payload, settings.zipline_url)
                 if returned_url is None:
                     logging.getLogger("bombagif.zipline").warning(
                         "Zipline returned success without a readable file URL "
@@ -548,7 +563,9 @@ async def upload_to_zipline(
                         extra={"trace_id": trace_id},
                     )
                     raise UploadFailure(
-                        "Zipline returned a successful upload, but Bombagif couldn't read its file URL. "
+                        "Zipline accepted the upload, but Bombagif couldn't read a safe file URL. "
+                        "For Zipline behind HTTPS, enable its Return HTTPS URLs setting "
+                        "(CORE_RETURN_HTTPS_URLS=true) and confirm the returned link uses your configured Zipline host. "
                         "Check Zipline before retrying to avoid a duplicate upload."
                     )
                 return returned_url
