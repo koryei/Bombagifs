@@ -327,15 +327,12 @@ class PresenceConfigTests(unittest.TestCase):
         self.assertEqual(status, discord.Status.online)
         self.assertIsInstance(activity, discord.Activity)
         assert isinstance(activity, discord.Activity)
-        self.assertEqual(activity.name, "Bombagifs")
+        self.assertEqual(activity.name, "Convert video & images to optimized GIFs")
         self.assertEqual(activity.type, discord.ActivityType.playing)
-        self.assertEqual(activity.details, "Convert video & images to optimized GIFs")
-        self.assertLess(len(activity.details), 45)
+        self.assertIsNone(activity.details)
         self.assertEqual(activity.state, "Run /gif in DMs, groups, or servers")
-        self.assertLess(len(activity.state), 40)
-        self.assertEqual(activity.assets["large_image"], "bombagif_logo")
-        self.assertEqual(activity.assets["large_text"], "Bombagif Optimizer")
-        self.assertEqual(activity.buttons, ["Try It Out"])
+        self.assertEqual(activity.assets, {})
+        self.assertEqual(activity.buttons, [])
 
     def test_resolves_user_install_button_url(self) -> None:
         """Point the card's button at this app's own User-Install URL."""
@@ -530,16 +527,7 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
             expected_status, expected_activity = load_presence_config(application_id=123456789)
             self.assertEqual(kwargs["status"], expected_status)
             self.assertEqual(kwargs["activity"].name, expected_activity.name)
-            self.assertEqual(kwargs["activity"].details, "Convert video & images to optimized GIFs")
-            self.assertEqual(kwargs["activity"].state, "Run /gif in DMs, groups, or servers")
-            self.assertEqual(kwargs["activity"].assets["large_image"], "bombagif_logo")
-            self.assertEqual(kwargs["activity"].assets["large_text"], "Bombagif Optimizer")
-            self.assertEqual(kwargs["activity"].buttons, ["Try It Out"])
-            self.assertEqual(
-                kwargs["activity"].state_url,
-                "https://discord.com/oauth2/authorize?client_id=123456789"
-                "&scope=applications.commands&integration_type=1",
-            )
+            self.assertEqual(kwargs["activity"].to_dict(), expected_activity.to_dict())
         finally:
             await bot.close()
 

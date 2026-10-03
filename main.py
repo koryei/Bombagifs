@@ -1128,13 +1128,19 @@ class BombagifBot(commands.Bot):
             embed.set_image(url=link)
             embed.add_field(name="Open GIF", value=f"[View or copy the direct link]({link})")
             embed.set_footer(text="Converted by Bombagif")
-            view = PublicGifView(interaction.user.id, embed) if guild_id is not None else None
-            await interaction.followup.send(
-                embed=embed,
-                view=view,
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            if guild_id is not None:
+                await interaction.followup.send(
+                    embed=embed,
+                    view=PublicGifView(interaction.user.id, embed),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await interaction.followup.send(
+                    embed=embed,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except UserFacingError as exc:
             await interaction.followup.send(
                 str(exc), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
