@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
+.venv/
 .DS_Store
 *.png

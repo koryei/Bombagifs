@@ -1,7 +1,9 @@
 .env
 .env.*
 !.env.example
-.venv
-__pycache__
+.venv/
+__pycache__/
 *.py[cod]
-.git
+.git/
+.idea/
+.freebuff/

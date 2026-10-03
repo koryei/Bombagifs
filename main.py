@@ -20,7 +20,6 @@ from typing import Any, Final
 from urllib.parse import urlparse
 
 import aiohttp
-import cairosvg
 import discord
 from defusedxml import ElementTree as SafeET
 from discord import app_commands
