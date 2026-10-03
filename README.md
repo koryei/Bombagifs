@@ -1,6 +1,6 @@
-# Bombagif
+# Bombagifs
+<img width="800" height="429" alt="BombaGif Tutorial" src="https://github.com/user-attachments/assets/7d58900f-f757-45bc-ab14-1d31066a783d" /><br>
 Bombagif converts WEBP, PNG, SVG, MP4, and WebM uploads into optimized GIFs, uploads them to **your own Zipline instance**, then replies with its link. People add your Discord application to their user account once and run `/gif` in DMs, group DMs, or servers; they do not need to install a bot in each server.
-
 ## Quick install
 
 One script installs, updates, inspects, and removes Bombagif. It prompts privately for **your own** Discord bot token, Zipline token, and Zipline URL, and never prints those values or places them in the command line. As with any `curl | bash` installer, the command executes the downloaded script; inspect it first if you want to review the code before running it.
