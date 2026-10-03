@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import aiohttp
 import discord
@@ -539,6 +539,88 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
                 "https://discord.com/oauth2/authorize?client_id=123456789"
                 "&scope=applications.commands&integration_type=1",
             )
+        finally:
+            await bot.close()
+
+    async def test_bot_replies_to_direct_messages_with_user_install_link(self) -> None:
+        """Send helpful GIF guidance and the account-install link in DMs."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        message = Mock()
+        message.author.bot = False
+        message.guild = None
+        message.channel.send = unittest.mock.AsyncMock()
+        try:
+            with patch.object(bot._connection, "application_id", 123456789):
+                await bot.on_message(message)
+            message.channel.send.assert_awaited_once()
+            response = message.channel.send.await_args.args[0]
+            self.assertIn("/gif", response)
+            self.assertIn("WEBP, PNG, SVG, MP4, or WebM", response)
+            self.assertIn(
+                "https://discord.com/oauth2/authorize?client_id=123456789"
+                "&scope=applications.commands&integration_type=1",
+                response,
+            )
+            allowed_mentions = message.channel.send.await_args.kwargs["allowed_mentions"]
+            self.assertFalse(allowed_mentions.everyone)
+            self.assertFalse(allowed_mentions.users)
+            self.assertFalse(allowed_mentions.roles)
+            self.assertFalse(allowed_mentions.replied_user)
+        finally:
+            await bot.close()
+
+    async def test_bot_skips_guild_and_bot_authored_messages(self) -> None:
+        """Never auto-reply to ordinary server messages or other bots."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        try:
+            for guild, is_bot in ((Mock(), False), (None, True)):
+                with self.subTest(guild=guild is not None, is_bot=is_bot):
+                    message = Mock()
+                    message.guild = guild
+                    message.author.bot = is_bot
+                    message.channel.send = unittest.mock.AsyncMock()
+                    await bot.on_message(message)
+                    message.channel.send.assert_not_awaited()
+        finally:
+            await bot.close()
+
+    async def test_bot_dm_reply_without_application_id_omits_broken_link(self) -> None:
+        """Keep startup-safe help useful without constructing an invalid OAuth URL."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        message = Mock()
+        message.author.bot = False
+        message.guild = None
+        message.channel.send = unittest.mock.AsyncMock()
+        try:
+            with patch.object(bot._connection, "application_id", None):
+                await bot.on_message(message)
+            response = message.channel.send.await_args.args[0]
+            self.assertIn("/gif", response)
+            self.assertNotIn("oauth2/authorize", response)
         finally:
             await bot.close()
 

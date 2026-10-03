@@ -196,22 +196,25 @@ def _https_url(value: str, key: str) -> str:
     return value
 
 
+def _user_install_url(application_id: int | None) -> str | None:
+    """Build this app's account-level command-install URL once Discord supplies its ID."""
+    if application_id is None:
+        return None
+    return (
+        f"https://discord.com/oauth2/authorize?client_id={application_id}"
+        "&scope=applications.commands&integration_type=1"
+    )
+
+
 def _presence_button_url(section: configparser.SectionProxy, application_id: int | None) -> str:
     """Resolve button_url, including the `user-install` shortcut for this app."""
     raw = section.get("button_url", "").strip()
     if not raw:
         return ""
     if raw.lower() == USER_INSTALL_BUTTON_URL:
-        if application_id is None:
-            # The application id only exists once Discord has sent READY; the
-            # presence is re-applied there, so the link is not lost.
-            return ""
-        # Discord READY supplies the real Client ID. If using a literal URL,
-        # replace YOUR_CLIENT_ID with that ID and keep integration_type=1.
-        return (
-            f"https://discord.com/oauth2/authorize?client_id={application_id}"
-            "&scope=applications.commands&integration_type=1"
-        )
+        # The application id exists after Discord sends READY; presence is
+        # re-applied then, so the link is not lost during initial startup.
+        return _user_install_url(application_id) or ""
     return _https_url(raw, "button_url")
 
 
@@ -918,6 +921,23 @@ class BombagifBot(commands.Bot):
     async def on_resumed(self) -> None:
         """Re-apply presence after a gateway resume, which skips on_ready."""
         await self._apply_presence("resumed")
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Help human users who DM the bot; never answer in guild channels."""
+        if message.author.bot or message.guild is not None:
+            return
+
+        install_url = _user_install_url(self.application_id)
+        response = (
+            "Hey! I'm Bombagif. Use `/gif` and attach a WEBP, PNG, SVG, MP4, or "
+            "WebM to get an optimized GIF link."
+        )
+        if install_url:
+            response += f"\nAdd Bombagif to your apps: <{install_url}>"
+        await message.channel.send(
+            response,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def _presence_watch_step(
         self,
