@@ -9,7 +9,7 @@ INSTALL_MODE="${BOMBAGIF_INSTALL_MODE:-}"
 INSTALL_ACTION="${BOMBAGIF_INSTALL_ACTION:-}"
 SERVICE_NAME="bombagif"
 
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "" && "${TERM:-}" != "dumb" ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'
   C_PURPLE=$'\033[35m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
 else
@@ -25,15 +25,11 @@ fail() { say "${C_RED}[x]${C_RESET} $*"; }
 die() { fail "$*" >&2; exit 1; }
 
 banner() {
-  say "${C_PURPLE}${C_BOLD}"
-  say ' ____                     _             _  __'
-  say '| __ )  ___  _ __ ___  _ __| | __ _  __| |/ _|'
-  say '|  _ \ / _ \| '\''_ ` _ \ / _` |/ _` | | |_ '
-  say '| |_) | (_) | | | | | | (_| | (_| | |  _|'
-  say '|____/ \\___/|_| |_| |_|\\__,_|\\__,_| |_|'
+  say ""
+  say "${C_BOLD}${C_PURPLE}BOMBAGIF${C_RESET}"
   say "${C_BOLD}GIFs on the fly. Your Discord app. Your Zipline. All self-hostable.${C_RESET}"
   say "${C_DIM}Install, update, check, repair, or remove Bombagif from this menu.${C_RESET}"
-  say "${C_CYAN}────────────────────────────────────────────────────────────────${C_RESET}"
+  say ""
 }
 
 dotenv_quote() {
@@ -672,7 +668,7 @@ main() {
     say "  ${C_CYAN}3)${C_RESET} Manage the service     ${C_DIM}start, stop, restart, logs, re-apply settings${C_RESET}"
     say "  ${C_CYAN}4)${C_RESET} Show status            ${C_DIM}where it is, whether it runs, what to type next${C_RESET}"
     say "  ${C_CYAN}5)${C_RESET} Uninstall              ${C_DIM}remove the service and optionally the files${C_RESET}"
-    say "  ${C_CYAN}6)${C_RESET} Check installation     ${C_DIM}diagnose .env, Zipline, Cairo, Docker${C_RESET}"
+    say "  ${C_CYAN}6)${C_RESET} Check installation     ${C_DIM}diagnose .env, Zipline, Cairo, FFmpeg, Docker${C_RESET}"
     local choice=''
     read_prompt "Select [1-6]: " choice
     case "$choice" in
