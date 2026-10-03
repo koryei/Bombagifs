@@ -25,20 +25,12 @@ fail() { say "${C_RED}[x]${C_RESET} $*"; }
 die() { fail "$*" >&2; exit 1; }
 
 banner() {
-  say ""
-  say "${C_BOLD}${C_PURPLE}               ███   ▄▓░▄▄▄▄▄    ▄▄▄▄▄▄▄█ ▄▄ ▄ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE} ▄▄▄ ▄▄▄▄▄▄▄█▓████   █▓░  ▄░█▀▄▀▀▀▓██▌ █▐▀▀▀▀▀▀▓▄▄▓ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}▐▐███▓▀▀▀▓████  ██▄███ ████▀    █░▐▐▐▄▄      ▀▀ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}█▓▌▌     █▓█  █████▓  █▓█▄▄▄ ▄▓░▐▐▄▀▀▄▄▄▄▄▄▄▄▄▄   ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}█▒ ▌     █▒█   ███   █▒█▄▄▄ ████ ▀████▄▄▄ ▀▀ ▄▄ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}█░█▌     █░█   ███   █░█▀▀▀         ▀▀▀███▄  ▐ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}▌███    ▄█▒█   ███   ███         ▄▄       ▀▌█▌ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}▓▄███▄▄▓█▓██████████████       ▄ ██▄▄▄▄▄▄▄▄▓ ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE} ▀████▀▀ █░████▓▒░███▓▒       ▀▒▓████████▀  ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE}       ▄■████                                  ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE} ▄█■████▄▄█                                   ${C_RESET}"
-  say "${C_BOLD}${C_PURPLE} ███████▀▀                                    ${C_RESET}"
-  say ""
+  say "${C_PURPLE}${C_BOLD}"
+  say ' ____                     _             _  __'
+  say '| __ )  ___  _ __ ___  _ __| | __ _  __| |/ _|'
+  say '|  _ \ / _ \| '\''_ ` _ \ / _` |/ _` | | |_ '
+  say '| |_) | (_) | | | | | | (_| | (_| | |  _|'
+  say '|____/ \\___/|_| |_| |_|\\__,_|\\__,_| |_|'
   say "${C_BOLD}GIFs on the fly. Your Discord app. Your Zipline. All self-hostable.${C_RESET}"
   say "${C_DIM}Install, update, check, repair, or remove Bombagif from this menu.${C_RESET}"
   say "${C_CYAN}────────────────────────────────────────────────────────────────${C_RESET}"
