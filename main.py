@@ -496,8 +496,9 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
         raise InvalidImage("Video conversion requires FFmpeg. Ask the bot host to install it and restart Bombagif.")
 
     filter_graph = (
-        f"[0:V:0]fps=15,scale={VIDEO_MAX_DIMENSION}:{VIDEO_MAX_DIMENSION}:"
-        "force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+        "[0:V:0]fps=15,scale="
+        f"trunc(iw*min({VIDEO_MAX_DIMENSION}/iw\\,{VIDEO_MAX_DIMENSION}/ih)/2)*2:"
+        f"trunc(ih*min({VIDEO_MAX_DIMENSION}/iw\\,{VIDEO_MAX_DIMENSION}/ih)/2)*2:flags=lanczos,"
         "split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
         "[s1][p]paletteuse=dither=bayer[out]"
     )

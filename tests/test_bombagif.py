@@ -155,7 +155,10 @@ class ImageTests(unittest.TestCase):
             self.assertNotIn("-f", command)  # let FFmpeg detect MP4/MOV and Matroska/WebM variants
             self.assertIn("fps=15", command[command.index("-filter_complex") + 1])
             self.assertIn("palettegen", command[command.index("-filter_complex") + 1])
-            self.assertIn("scale=480:480", command[command.index("-filter_complex") + 1])
+            self.assertIn(
+                r"scale=trunc(iw*min(480/iw\,480/ih)/2)*2:trunc(ih*min(480/iw\,480/ih)/2)*2:flags=lanczos",
+                command[command.index("-filter_complex") + 1],
+            )
             self.assertIn("-an", command)
             self.assertIn("-autorotate", command)
             self.assertEqual(command[command.index("-frames:v") + 1], "150")
