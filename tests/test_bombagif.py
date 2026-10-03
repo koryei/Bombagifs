@@ -91,8 +91,9 @@ class ImageTests(unittest.TestCase):
     def test_validates_suffix_mime_and_size(self) -> None:
         """Accept a valid image and reject mismatches and oversized inputs."""
         self.assertEqual(validate_image_metadata("input.PNG", "image/png", 20), ".png")
-        with self.assertRaises(InvalidImage):
-            validate_image_metadata("input.png", "image/webp", 20)
+        # Discord's content_type can be absent or incorrectly generic for uploads.
+        self.assertEqual(validate_image_metadata("input.png", None, 20), ".png")
+        self.assertEqual(validate_image_metadata("input.png", "application/octet-stream", 20), ".png")
         with self.assertRaises(InvalidImage):
             validate_image_metadata("input.jpg", "image/jpeg", 20)
         with self.assertRaisesRegex(UserFacingError, "too large"):

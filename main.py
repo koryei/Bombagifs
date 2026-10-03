@@ -155,11 +155,12 @@ def configure_logging(level: str) -> None:
 
 
 def validate_image_metadata(filename: str, content_type: str | None, size: int | None) -> str:
-    """Validate allowed suffix, compatible MIME type, and known declared size."""
+    """Validate the supported extension and known declared size."""
     suffix = os.path.splitext(os.path.basename(filename).lower())[1]
-    mime_type = (content_type or "").split(";", 1)[0].strip().lower()
-    if suffix not in ALLOWED_TYPES or mime_type not in ALLOWED_TYPES[suffix]:
-        raise InvalidImage("Please use a WEBP, PNG, or SVG image with a matching file type.")
+    if suffix not in ALLOWED_TYPES:
+        raise InvalidImage("Please use a WEBP, PNG, or SVG image.")
+    # Discord can omit or misreport attachment MIME metadata. Validate the
+    # extension here and verify the actual decoded format in convert_image.
     if size is not None and size > MAX_INPUT_BYTES:
         raise UserFacingError("That image is too large. The maximum upload size is 15 MB.")
     return suffix
