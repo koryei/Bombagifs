@@ -326,13 +326,14 @@ class PresenceConfigTests(unittest.TestCase):
         self.assertEqual(status, discord.Status.online)
         self.assertIsInstance(activity, discord.Activity)
         assert isinstance(activity, discord.Activity)
-        self.assertEqual(activity.name, "Bombagif")
+        self.assertEqual(activity.name, "Bombagifs")
         self.assertEqual(activity.type, discord.ActivityType.playing)
-        self.assertEqual(
-            activity.details,
-            "Converts WEBP, PNG, SVG, MP4 & WebM into optimized GIFs, then uploads to your Zipline instance.",
-        )
-        self.assertEqual(activity.state, "Install once to use /gif in DMs, group chats, or any server.")
+        self.assertEqual(activity.details, "Convert video & images to optimized GIFs")
+        self.assertLess(len(activity.details), 45)
+        self.assertEqual(activity.state, "Run /gif in DMs, groups, or servers")
+        self.assertLess(len(activity.state), 40)
+        self.assertEqual(activity.assets["large_image"], "bombagif_logo")
+        self.assertEqual(activity.assets["large_text"], "Bombagif Optimizer")
         self.assertEqual(activity.buttons, ["Try It Out"])
 
     def test_resolves_user_install_button_url(self) -> None:
@@ -353,6 +354,7 @@ class PresenceConfigTests(unittest.TestCase):
             "https://discord.com/oauth2/authorize?client_id=123456789"
             "&scope=applications.commands&integration_type=1",
         )
+        self.assertIn("integration_type=1", resolved.state_url)
         self.assertEqual(resolved.buttons, ["Try It Out"])
         # Without a known application id the button waits for the next READY.
         self.assertIsNone(pending.state_url)
@@ -520,12 +522,23 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
         bot = create_bot(settings)
         try:
             with patch.object(bot, "change_presence", new_callable=unittest.mock.AsyncMock) as change_presence:
-                await bot.on_ready()
+                with patch.object(bot._connection, "application_id", 123456789):
+                    await bot.on_ready()
             change_presence.assert_awaited_once()
             kwargs = change_presence.await_args.kwargs
-            expected_status, expected_activity = load_presence_config()
+            expected_status, expected_activity = load_presence_config(application_id=123456789)
             self.assertEqual(kwargs["status"], expected_status)
             self.assertEqual(kwargs["activity"].name, expected_activity.name)
+            self.assertEqual(kwargs["activity"].details, "Convert video & images to optimized GIFs")
+            self.assertEqual(kwargs["activity"].state, "Run /gif in DMs, groups, or servers")
+            self.assertEqual(kwargs["activity"].assets["large_image"], "bombagif_logo")
+            self.assertEqual(kwargs["activity"].assets["large_text"], "Bombagif Optimizer")
+            self.assertEqual(kwargs["activity"].buttons, ["Try It Out"])
+            self.assertEqual(
+                kwargs["activity"].state_url,
+                "https://discord.com/oauth2/authorize?client_id=123456789"
+                "&scope=applications.commands&integration_type=1",
+            )
         finally:
             await bot.close()
 

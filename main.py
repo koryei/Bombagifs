@@ -206,6 +206,8 @@ def _presence_button_url(section: configparser.SectionProxy, application_id: int
             # The application id only exists once Discord has sent READY; the
             # presence is re-applied there, so the link is not lost.
             return ""
+        # Discord READY supplies the real Client ID. If using a literal URL,
+        # replace YOUR_CLIENT_ID with that ID and keep integration_type=1.
         return (
             f"https://discord.com/oauth2/authorize?client_id={application_id}"
             "&scope=applications.commands&integration_type=1"
@@ -908,6 +910,8 @@ class BombagifBot(commands.Bot):
 
     async def on_ready(self) -> None:
         """Apply configured presence after every successful Discord connection."""
+        # Keep status.config's large_image key identical to the Developer Portal asset.
+        # The user-install button resolves with Discord's READY Client ID and integration_type=1.
         await self._apply_presence("ready")
         self.logger.info("Bot connected", extra={"user_id": self.user.id if self.user else None})
 
