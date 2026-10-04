@@ -613,8 +613,8 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await bot.close()
 
-    async def test_ready_gif_result_offers_public_post_only_in_guilds(self) -> None:
-        """Attach the public-post button to guild results, but not DM results."""
+    async def test_gif_result_offers_share_and_copy_controls_in_every_context(self) -> None:
+        """Attach one share/copy view to guild, bot-DM, and private-channel results."""
         settings = Settings(
             discord_token="unused",
             zipline_token="unused",
@@ -628,89 +628,185 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
         attachment.filename = "reaction.webp"
         attachment.content_type = "image/webp"
         attachment.size = 128
+        link = "https://gifs.example.test/u/reaction.gif"
 
         async def fake_process(_attachment: object, _user_id: int, _guild_id: int | None) -> str:
-            return "https://gifs.example.test/u/reaction.gif"
+            return link
 
         try:
-            with patch.object(bot, "_process_one", side_effect=fake_process), patch("main.PublicGifView") as view_factory:
-                guild_interaction = Mock()
-                guild_interaction.guild_id = 123
-                guild_interaction.user.id = 456
-                guild_interaction.response.defer = unittest.mock.AsyncMock()
-                guild_interaction.followup.send = unittest.mock.AsyncMock()
-                guild_interaction.response.send_message = unittest.mock.AsyncMock()
-                await bot.interaction_upload(guild_interaction, attachment)
-                view_factory.assert_called_once()
-                self.assertIsInstance(guild_interaction.followup.send.await_args.kwargs["embed"], discord.Embed)
-                self.assertEqual(
-                    guild_interaction.followup.send.await_args.kwargs["embed"].image.url,
-                    "https://gifs.example.test/u/reaction.gif",
-                )
-                self.assertIs(guild_interaction.followup.send.await_args.kwargs["view"], view_factory.return_value)
-                self.assertTrue(guild_interaction.followup.send.await_args.kwargs["ephemeral"])
+            with patch.object(bot, "_process_one", side_effect=fake_process):
+                for guild_id, context in (
+                    (123, discord.app_commands.AppCommandContext(guild=True)),
+                    (None, discord.app_commands.AppCommandContext(dm_channel=True)),
+                    (None, discord.app_commands.AppCommandContext(private_channel=True)),
+                ):
+                    with self.subTest(guild_id=guild_id, context=context):
+                        interaction = Mock()
+                        interaction.guild_id = guild_id
+                        interaction.context = context
+                        interaction.user.id = 456
+                        interaction.response.defer = unittest.mock.AsyncMock()
+                        interaction.followup.send = unittest.mock.AsyncMock()
+                        interaction.response.send_message = unittest.mock.AsyncMock()
+                        await bot.interaction_upload(interaction, attachment)
 
-            with patch("main.PublicGifView") as view_factory:
-                dm_interaction = Mock()
-                dm_interaction.guild_id = None
-                dm_interaction.user.id = 456
-                dm_interaction.response.defer = unittest.mock.AsyncMock()
-                dm_interaction.followup.send = unittest.mock.AsyncMock()
-                dm_interaction.response.send_message = unittest.mock.AsyncMock()
-                await bot.interaction_upload(dm_interaction, attachment)
-                view_factory.assert_not_called()
-                self.assertNotIn("view", dm_interaction.followup.send.await_args.kwargs)
+                        interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+                        result = interaction.followup.send.await_args.kwargs
+                        self.assertTrue(result["ephemeral"])
+                        self.assertIsInstance(result["embed"], discord.Embed)
+                        self.assertEqual(result["embed"].image.url, link)
+                        view = result["view"]
+                        self.assertIsInstance(view, PublicGifView)
+                        self.assertEqual(view.link, link)
+                        self.assertEqual(
+                            [child.label for child in view.children],
+                            ["Share in this chat", "Copy Link"],
+                        )
         finally:
             await bot.close()
+
+    async def test_share_button_posts_visibly_in_server_and_private_channels(self) -> None:
+        """Share as a public follow-up in either a server or a user-installed DM."""
+        embed = discord.Embed(title="Your GIF is ready")
+        embed.set_image(url="https://gifs.example.test/u/reaction.gif")
+
+        contexts = (
+            (123, discord.app_commands.AppCommandContext(guild=True)),
+            (None, discord.app_commands.AppCommandContext(dm_channel=True)),
+            (None, discord.app_commands.AppCommandContext(private_channel=True)),
+        )
+        for guild_id, context in contexts:
+            with self.subTest(guild_id=guild_id, context=context):
+                view = PublicGifView(123, embed, "https://gifs.example.test/u/reaction.gif")
+                share_button = next(child for child in view.children if child.label == "Share in this chat")
+                interaction = Mock()
+                interaction.user.id = 123
+                interaction.guild_id = guild_id
+                interaction.context = context
+                interaction.guild = Mock() if guild_id is not None else None
+                interaction.channel = Mock() if guild_id is not None else None
+                interaction.app_permissions.send_messages = True
+                interaction.app_permissions.embed_links = True
+                interaction.response.send_message = unittest.mock.AsyncMock()
+                interaction.response.defer = unittest.mock.AsyncMock()
+                interaction.followup.send = unittest.mock.AsyncMock()
+                interaction.edit_original_response = unittest.mock.AsyncMock()
+
+                await view.share_in_chat.callback(interaction)
+
+                interaction.response.defer.assert_awaited_once_with()
+                self.assertEqual(interaction.followup.send.await_count, 1)
+                shared_kwargs = interaction.followup.send.await_args.kwargs
+                self.assertIs(shared_kwargs["embed"], embed)
+                self.assertFalse(shared_kwargs["ephemeral"])
+                self.assertFalse(shared_kwargs["allowed_mentions"].everyone)
+                self.assertEqual(interaction.edit_original_response.await_count, 1)
+                self.assertIs(interaction.edit_original_response.await_args.kwargs["view"], view)
+                self.assertTrue(view.posted)
+                self.assertTrue(share_button.disabled)
+                self.assertEqual(share_button.label, "Shared")
+                copy_button = next(child for child in view.children if child.label == "Copy Link")
+                self.assertFalse(copy_button.disabled)
+
+    async def test_share_button_is_owner_only_and_checks_guild_permissions(self) -> None:
+        """Keep sharing requester-only and enforce server posting permissions."""
+        embed = discord.Embed(title="Your GIF is ready")
+        view = PublicGifView(123, embed, "https://gifs.example.test/u/reaction.gif")
+        share_button = next(child for child in view.children if child.label == "Share in this chat")
+
+        unauthorized = Mock()
+        unauthorized.user.id = 456
+        unauthorized.response.send_message = unittest.mock.AsyncMock()
+        await view.share_in_chat.callback(unauthorized)
+        unauthorized.response.send_message.assert_awaited_once_with(
+            "Only the person who requested this GIF can share it.", ephemeral=True
+        )
+
+        denied = Mock()
+        denied.user.id = 123
+        denied.guild_id = 123
+        denied.guild = Mock()
+        denied.channel = Mock()
+        denied.app_permissions.send_messages = False
+        denied.app_permissions.embed_links = True
+        denied.response.send_message = unittest.mock.AsyncMock()
+        denied.response.defer = unittest.mock.AsyncMock()
+        await view.share_in_chat.callback(denied)
+        denied.response.send_message.assert_awaited_once()
+        self.assertIn("Send Messages and Embed Links", denied.response.send_message.await_args.args[0])
+        denied.response.defer.assert_not_awaited()
+        self.assertFalse(view.posted)
+
+    async def test_copy_button_reveals_direct_link_ephemerally_to_requester(self) -> None:
+        """Return the direct URL privately; Discord has no native clipboard component."""
+        link = "https://gifs.example.test/u/reaction.gif"
+        view = PublicGifView(123, discord.Embed(title="GIF"), link)
+        copy_button = next(child for child in view.children if child.label == "Copy Link")
+
+        unauthorized = Mock()
+        unauthorized.user.id = 456
+        unauthorized.response.send_message = unittest.mock.AsyncMock()
+        await view.copy_link.callback(unauthorized)
+        unauthorized.response.send_message.assert_awaited_once_with(
+            "Only the person who requested this GIF can copy its link.", ephemeral=True
+        )
+
+        interaction = Mock()
+        interaction.user.id = 123
+        interaction.response.send_message = unittest.mock.AsyncMock()
+        await view.copy_link.callback(interaction)
+        copy_args = interaction.response.send_message.await_args
+        self.assertEqual(copy_args.args, (link,))
+        self.assertTrue(copy_args.kwargs["ephemeral"])
+        self.assertTrue(copy_args.kwargs["suppress_embeds"])
+        mentions = copy_args.kwargs["allowed_mentions"]
+        self.assertFalse(mentions.everyone)
+        self.assertFalse(mentions.users)
+        self.assertFalse(mentions.roles)
 
     async def test_public_gif_button_is_owner_only_single_use_and_posts_embed(self) -> None:
         """Post the polished GIF embed once to the clicked server channel."""
         embed = discord.Embed(title="Your GIF is ready")
         embed.set_image(url="https://gifs.example.test/u/reaction.gif")
-        view = PublicGifView(123, embed)
-        button = next(item for item in view.children if isinstance(item, discord.ui.Button))
+        view = PublicGifView(123, embed, "https://gifs.example.test/u/reaction.gif")
+        button = next(item for item in view.children if isinstance(item, discord.ui.Button) and item.label == "Share in this chat")
         channel = Mock()
         channel.send = unittest.mock.AsyncMock()
-
         unauthorized = Mock()
         unauthorized.user.id = 456
         unauthorized.response.send_message = unittest.mock.AsyncMock()
-        await view.send_public.callback(unauthorized)
+        await view.share_in_chat.callback(unauthorized)
         unauthorized.response.send_message.assert_awaited_once()
-        channel.send.assert_not_awaited()
 
         interaction = Mock()
         interaction.user.id = 123
         interaction.guild = Mock()
         interaction.channel = channel
+        interaction.guild_id = 123
         interaction.app_permissions.send_messages = True
         interaction.app_permissions.embed_links = True
         interaction.response.send_message = unittest.mock.AsyncMock()
         interaction.response.defer = unittest.mock.AsyncMock()
+        interaction.followup.send = unittest.mock.AsyncMock()
         interaction.edit_original_response = unittest.mock.AsyncMock()
-        await view.send_public.callback(interaction)
-        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
-        channel.send.assert_awaited_once()
-        sent_embed = channel.send.await_args.kwargs["embed"]
-        self.assertIs(sent_embed, embed)
-        allowed_mentions = channel.send.await_args.kwargs["allowed_mentions"]
-        self.assertFalse(allowed_mentions.everyone)
-        self.assertFalse(allowed_mentions.users)
-        self.assertFalse(allowed_mentions.roles)
-        interaction.edit_original_response.assert_awaited_once()
+        await view.share_in_chat.callback(interaction)
+        interaction.response.defer.assert_awaited_once_with()
+        interaction.followup.send.assert_awaited_once()
+        self.assertEqual(interaction.edit_original_response.await_count, 1)
+        self.assertIs(interaction.edit_original_response.await_args.kwargs["view"], view)
         self.assertTrue(view.posted)
         self.assertTrue(button.disabled)
 
         repeat = Mock()
         repeat.user.id = 123
         repeat.response.send_message = unittest.mock.AsyncMock()
-        await view.send_public.callback(repeat)
-        repeat.response.send_message.assert_awaited_once_with("This GIF was already posted.", ephemeral=True)
-        channel.send.assert_awaited_once()
+        await view.share_in_chat.callback(repeat)
+        repeat.response.send_message.assert_awaited_once_with("This GIF was already shared.", ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
 
     async def test_public_gif_button_checks_channel_permissions(self) -> None:
         """Explain missing message/embed permissions instead of failing the click."""
-        view = PublicGifView(123, discord.Embed(title="GIF"))
+        view = PublicGifView(123, discord.Embed(title="GIF"), "https://gifs.example.test/u/reaction.gif")
         button = next(item for item in view.children if isinstance(item, discord.ui.Button))
         interaction = Mock()
         interaction.user.id = 123
@@ -721,7 +817,7 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message = unittest.mock.AsyncMock()
         interaction.response.defer = unittest.mock.AsyncMock()
 
-        await view.send_public.callback(interaction)
+        await view.share_in_chat.callback(interaction)
 
         interaction.response.send_message.assert_awaited_once()
         self.assertIn("Send Messages and Embed Links", interaction.response.send_message.await_args.args[0])
