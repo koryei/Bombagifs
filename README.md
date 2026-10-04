@@ -1,6 +1,6 @@
 # Bombagifs
 <img width="800" height="429" alt="BombaGif Tutorial" src="https://github.com/user-attachments/assets/7d58900f-f757-45bc-ab14-1d31066a783d" /><br>
-Bombagif converts WEBP, PNG, SVG, MP4, and WebM uploads into optimized GIFs, uploads them to **your own Zipline instance**, then replies with its link. People add your Discord application to their user account once and run `/gif` in DMs, group DMs, or servers; they do not need to install a bot in each server.
+Bombagif converts JPG/JPEG, AVIF, WEBP, PNG, SVG, MP4, and WebM uploads into optimized GIFs, uploads them to **your own Zipline instance**, then replies with a link. The `/gif` command accepts up to five files at a time and aims for GIFs around or below 1 MB when quality allows. People add your Discord application to their user account once and run `/gif` in DMs, group DMs, or servers; they do not need to install a bot in each server.
 ## Quick install
 
 One script installs, updates, inspects, and removes Bombagif. It prompts privately for **your own** Discord bot token, Zipline token, and Zipline URL, and never prints those values or places them in the command line. As with any `curl | bash` installer, the command executes the downloaded script; inspect it first if you want to review the code before running it.
@@ -45,7 +45,7 @@ You can customize the repository, branch, install path, and mode with `BOMBAGIF_
 
    `https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&scope=applications.commands&integration_type=1`
 
-Users choose **Add to my apps**, authorize, then use `/gif` and select a WEBP, PNG, SVG, MP4, or WebM file (maximum 15 MB). Video uploads are trimmed to their first 10 seconds and converted at 15 fps, scaled to fit within 480×480. Global command propagation after first startup may take a short while.
+Users choose **Add to my apps**, authorize, then use `/gif` and select up to five JPG/JPEG, AVIF, WEBP, PNG, SVG, MP4, or WebM files (maximum 15 MB each). Video uploads are trimmed to their first 10 seconds. GIF compression targets 1 MB using bounded reductions in dimensions and frame rate/count; if the target cannot be met at the lowest quality step, Bombagif returns the smallest candidate it produced instead, subject to the existing 25 MB hard ceiling. Global command propagation after first startup may take a short while.
 
 ## Zipline and environment
 
@@ -57,7 +57,7 @@ Leave `ALLOWED_GUILDS` blank to allow public use in all server contexts and DMs.
 
 ## Manual Python setup
 
-Requires Python 3.11+; MP4/WebM video conversion requires FFmpeg, and SVG conversion additionally needs Cairo. The bot starts and handles WEBP/PNG images without either. Install FFmpeg on macOS with `brew install ffmpeg` or Ubuntu with `sudo apt-get install ffmpeg`; install Cairo with `brew install cairo` or `sudo apt-get install libcairo2`.
+Requires Python 3.11+; MP4/WebM video conversion requires FFmpeg, and SVG conversion additionally needs Cairo. JPG/JPEG, AVIF, WEBP, and PNG decoding use the installed Pillow build; when Pillow has no AVIF codec, AVIF decoding can fall back to FFmpeg if present. Install FFmpeg on macOS with `brew install ffmpeg` or Ubuntu with `sudo apt-get install ffmpeg`; install Cairo with `brew install cairo` or `sudo apt-get install libcairo2`.
 
 ```bash
 python3 -m venv .venv
@@ -71,7 +71,7 @@ python -m pip install -r requirements.txt
 
 Keep the process running on your machine/VPS/container. Discord sends interactions over the bot's existing gateway connection, so no inbound web port is needed.
 
-The `/gif` command accepts MP4 and WebM video attachments up to 15 MB. FFmpeg probes the file container rather than forcing a guessed demuxer, including MP4s whose index (`moov`) atom is at the end. It converts only the first 10 seconds at 15 fps and scales frames to fit within 480×480. FFmpeg conversion runs with a 45-second timeout; the output GIF is capped at 25 MB, and temporary input/output files are deleted after processing. Install FFmpeg on the host for Python mode; Docker and Ubuntu systemd installs include it automatically. Python mode also requires Cairo for SVG conversion; Docker and Ubuntu systemd installs include Cairo, while macOS Python installs need `brew install cairo`.
+The `/gif` command accepts JPG/JPEG, AVIF, WEBP, PNG, SVG, MP4, and WebM attachments, up to five files per command and 15 MB per file. FFmpeg probes video containers, converts up to the first 10 seconds, and makes bounded attempts at progressively smaller GIF dimensions/frame rates toward 1 MB. If the target is unrealistic, the smallest candidate is returned; all outputs remain capped at 25 MB. Temporary video input/output files are deleted after processing. Install FFmpeg on the host for Python mode; Docker and Ubuntu systemd installs include it automatically. Python mode also requires Cairo for SVG conversion; Docker and Ubuntu systemd installs include Cairo, while macOS Python installs need `brew install cairo`.
 
 ## Docker Compose (manual)
 
