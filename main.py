@@ -79,57 +79,82 @@ class UploadFailure(UserFacingError):
 
 
 class PublicGifView(discord.ui.View):
-    """Single-use control for posting the invoking user's GIF in its server channel."""
+    """Single-use share control and private direct-link copy reply."""
 
-    def __init__(self, requester_id: int, embed: discord.Embed) -> None:
+    def __init__(self, requester_id: int, embed: discord.Embed, link: str) -> None:
         super().__init__(timeout=15 * 60)
         self.requester_id = requester_id
         self.embed = embed
+        self.link = link
         self.posted = False
         self._post_lock = asyncio.Lock()
 
     @discord.ui.button(
-        label="Send in public chat",
+        label="Share in this chat",
         style=discord.ButtonStyle.primary,
         emoji="📣",
     )
-    async def send_public(self, interaction: discord.Interaction, button: discord.ui.Button["PublicGifView"]) -> None:
-        """Post the GIF embed once, only to the channel where it was requested."""
+    async def share_in_chat(self, interaction: discord.Interaction, button: discord.ui.Button["PublicGifView"]) -> None:
+        """Post the GIF into the same server, DM, or group DM once."""
         if interaction.user.id != self.requester_id:
             await interaction.response.send_message(
-                "Only the person who requested this GIF can post it.", ephemeral=True
+                "Only the person who requested this GIF can share it.", ephemeral=True
             )
             return
 
         async with self._post_lock:
             if self.posted:
-                await interaction.response.send_message("This GIF was already posted.", ephemeral=True)
-                return
-            if interaction.guild is None or interaction.channel is None:
-                await interaction.response.send_message(
-                    "Public posting is only available in a server channel.", ephemeral=True
-                )
-                return
-            if not interaction.app_permissions.send_messages or not interaction.app_permissions.embed_links:
-                await interaction.response.send_message(
-                    "I need Send Messages and Embed Links permission in this channel to post the GIF.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("This GIF was already shared.", ephemeral=True)
                 return
 
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            await interaction.channel.send(
+            if interaction.guild_id is not None:
+                if interaction.guild is None or interaction.channel is None:
+                    await interaction.response.send_message(
+                        "I couldn't access this server channel to share the GIF.", ephemeral=True
+                    )
+                    return
+                if not interaction.app_permissions.send_messages or not interaction.app_permissions.embed_links:
+                    await interaction.response.send_message(
+                        "I need Send Messages and Embed Links permission in this channel to share the GIF.",
+                        ephemeral=True,
+                    )
+                    return
+
+            # A component defer-update keeps the original (possibly ephemeral)
+            # result intact; its follow-up is a new, visible message in this chat.
+            await interaction.response.defer()
+            await interaction.followup.send(
                 embed=self.embed,
+                ephemeral=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             self.posted = True
-            for item in self.children:
-                item.disabled = True
+            button.disabled = True
+            button.label = "Shared"
             await interaction.edit_original_response(
-                content="Posted your GIF in this channel.",
                 view=self,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    @discord.ui.button(
+        label="Copy Link",
+        style=discord.ButtonStyle.secondary,
+        emoji="📋",
+    )
+    async def copy_link(self, interaction: discord.Interaction, button: discord.ui.Button["PublicGifView"]) -> None:
+        """Show the direct GIF URL privately so the requester can copy it."""
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who requested this GIF can copy its link.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            self.link,
+            ephemeral=True,
+            suppress_embeds=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1128,19 +1153,12 @@ class BombagifBot(commands.Bot):
             embed.set_image(url=link)
             embed.add_field(name="Open GIF", value=f"[View or copy the direct link]({link})")
             embed.set_footer(text="Converted by Bombagif")
-            if guild_id is not None:
-                await interaction.followup.send(
-                    embed=embed,
-                    view=PublicGifView(interaction.user.id, embed),
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                await interaction.followup.send(
-                    embed=embed,
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+            await interaction.followup.send(
+                embed=embed,
+                view=PublicGifView(interaction.user.id, embed, link),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except UserFacingError as exc:
             await interaction.followup.send(
                 str(exc), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
