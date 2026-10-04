@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import aiohttp
 import discord
 from aiohttp import web
-from PIL import Image
+from PIL import Image, features
 
 from main import (
     InvalidImage,
@@ -24,7 +24,11 @@ from main import (
     UserFacingError,
     MAX_INPUT_BYTES,
     MAX_OUTPUT_BYTES,
+    MAX_GIF_BATCH,
+    GIF_TARGET_BYTES,
     PRESENCE_REASSERT_TICKS,
+    _CandidateTooLarge,
+    _convert_image_to_target,
     _extract_zipline_file_url,
     _presence_signature,
     _read_settings,
@@ -102,6 +106,71 @@ class ImageTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidImage, "contents do not match"):
             convert_image(encoded.getvalue(), ".webp", (255, 255, 255))
 
+    def test_converts_jpg_jpeg_and_avif_images(self) -> None:
+        """Decode new raster formats and emit valid GIFs."""
+        jpeg = io.BytesIO()
+        Image.new("RGB", (40, 25), (90, 140, 210)).save(jpeg, format="JPEG")
+        for suffix in (".jpg", ".jpeg"):
+            with self.subTest(suffix=suffix):
+                converted = convert_image(jpeg.getvalue(), suffix, (255, 255, 255))
+                with Image.open(io.BytesIO(converted)) as gif:
+                    self.assertEqual(gif.format, "GIF")
+                    self.assertEqual(gif.size, (40, 25))
+
+    def test_converts_avif_when_supported(self) -> None:
+        """Decode a real AVIF fixture if Pillow and the host encoder support it."""
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            self.skipTest("FFmpeg is required to generate the AVIF test fixture")
+        with tempfile.TemporaryDirectory(prefix="bombagif-avif-test-") as work_dir:
+            input_path = Path(work_dir) / "fixture.avif"
+            generated = subprocess.run(
+                [
+                    ffmpeg,
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=green:s=40x24:d=0.1",
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "libsvtav1",
+                    "-preset",
+                    "12",
+                    "-crf",
+                    "45",
+                    "-y",
+                    str(input_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=30,
+            )
+            if generated.returncode != 0:
+                self.skipTest("FFmpeg lacks an AVIF-capable encoder")
+            converted = convert_image(input_path.read_bytes(), ".avif", (255, 255, 255))
+        with Image.open(io.BytesIO(converted)) as gif:
+            self.assertEqual(gif.format, "GIF")
+            self.assertLessEqual(gif.width, 40)
+            self.assertLessEqual(gif.height, 40)
+
+    def test_rejects_png_content_named_as_jpeg_or_avif(self) -> None:
+        """Keep extension/content validation strict for the newly allowed suffixes."""
+        png = io.BytesIO()
+        Image.new("RGB", (2, 2), (0, 0, 0)).save(png, format="PNG")
+        for suffix in (".jpg", ".jpeg"):
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(InvalidImage, "contents do not match"):
+                convert_image(png.getvalue(), suffix, (255, 255, 255))
+        if features.check("avif"):
+            with self.assertRaises(InvalidImage):
+                convert_image(png.getvalue(), ".avif", (255, 255, 255))
+
     def test_validates_suffix_mime_and_size(self) -> None:
         """Accept a valid image and reject mismatches and oversized inputs."""
         self.assertEqual(validate_image_metadata("input.PNG", "image/png", 20), ".png")
@@ -110,12 +179,62 @@ class ImageTests(unittest.TestCase):
         # Discord's content_type can be absent or incorrectly generic for uploads.
         self.assertEqual(validate_image_metadata("input.png", None, 20), ".png")
         self.assertEqual(validate_image_metadata("input.png", "application/octet-stream", 20), ".png")
-        with self.assertRaises(InvalidImage):
-            validate_image_metadata("input.jpg", "image/jpeg", 20)
+        self.assertEqual(validate_image_metadata("input.jpg", "image/jpeg", 20), ".jpg")
+        self.assertEqual(validate_image_metadata("input.jpeg", "image/jpeg", 20), ".jpeg")
+        self.assertEqual(validate_image_metadata("input.avif", "image/avif", 20), ".avif")
         with self.assertRaisesRegex(UserFacingError, "too large"):
             validate_image_metadata("large.png", "image/png", 15 * 1024 * 1024 + 1)
         with self.assertRaisesRegex(UserFacingError, "too large"):
             validate_image_metadata("large.mp4", "video/mp4", 15 * 1024 * 1024 + 1)
+
+    def test_still_image_output_uses_target_or_smallest_fallback(self) -> None:
+        """Produce valid GIFs and prefer a candidate under the 1 MB soft target."""
+        source = Image.new("RGB", (64, 48), (120, 80, 200))
+        png = io.BytesIO()
+        source.save(png, format="PNG")
+        converted = convert_image(png.getvalue(), ".png", (255, 255, 255))
+        with Image.open(io.BytesIO(converted)) as gif:
+            self.assertEqual(gif.format, "GIF")
+        self.assertLessEqual(len(converted), MAX_OUTPUT_BYTES)
+        self.assertLessEqual(len(converted), GIF_TARGET_BYTES)
+
+    def test_image_attempts_fall_back_to_smallest_successful_candidate(self) -> None:
+        """Continue after a candidate exceeds the hard cap and keep the smallest."""
+        with patch(
+            "main._convert_image_once",
+            side_effect=[b"a" * (GIF_TARGET_BYTES + 1), _CandidateTooLarge("too large"), b"b" * 900_000],
+        ) as convert_once:
+            candidate = _convert_image_to_target(b"source", ".png", (255, 255, 255))
+        self.assertEqual(candidate, b"b" * 900_000)
+        self.assertEqual(convert_once.call_count, 3)
+
+    def test_image_uses_smallest_candidate_when_target_is_unreachable(self) -> None:
+        """Return the smallest bounded candidate when all successful outputs exceed 1 MB."""
+        candidates = [
+            b"a" * 1_400_000,
+            b"b" * 1_200_000,
+            b"c" * 1_300_000,
+            b"d" * 1_500_000,
+            b"e" * 1_600_000,
+        ]
+        with patch("main._convert_image_once", side_effect=candidates):
+            self.assertEqual(
+                _convert_image_to_target(b"source", ".png", (255, 255, 255)), candidates[1]
+            )
+
+    def test_video_uses_smallest_candidate_when_target_is_unreachable(self) -> None:
+        """Try each bounded video profile and return the smallest valid GIF candidate."""
+        candidates = [
+            b"a" * 1_400_000,
+            b"b" * 1_200_000,
+            b"c" * 1_300_000,
+            b"d" * 1_500_000,
+            b"e" * 1_600_000,
+        ]
+        with patch("main._convert_video_once", side_effect=candidates) as convert_once:
+            result = convert_video(b"source", ".mp4")
+        self.assertEqual(result, candidates[1])
+        self.assertEqual(convert_once.call_count, 5)
 
     def test_video_conversion_uses_bounded_ffmpeg_pipeline_and_cleans_tempfiles(self) -> None:
         """Trim and optimize video with a shell-free FFmpeg command and clean temp files."""
@@ -145,7 +264,8 @@ class ImageTests(unittest.TestCase):
                 run.assert_called_once()
                 self.assertTrue(run.call_args.kwargs["stdin"] is subprocess.DEVNULL)
                 self.assertFalse(run.call_args.kwargs["shell"])
-                self.assertEqual(run.call_args.kwargs["timeout"], 45)
+                self.assertGreater(run.call_args.kwargs["timeout"], 0)
+                self.assertLessEqual(run.call_args.kwargs["timeout"], 45)
                 self.assertFalse(workdirs[-1].exists())
 
         for command in commands:
@@ -154,12 +274,12 @@ class ImageTests(unittest.TestCase):
             self.assertEqual(command[command.index("-max_pixels") + 1], str(20_000_000))
             self.assertEqual(command[command.index("-protocol_whitelist") + 1], "file")
             self.assertNotIn("-f", command)  # let FFmpeg detect MP4/MOV and Matroska/WebM variants
-            self.assertIn("fps=15", command[command.index("-filter_complex") + 1])
+            self.assertIn("fps=", command[command.index("-filter_complex") + 1])
             self.assertIn("palettegen", command[command.index("-filter_complex") + 1])
-            self.assertIn("scale=480:480:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos", command[command.index("-filter_complex") + 1])
+            self.assertIn("scale=", command[command.index("-filter_complex") + 1])
             self.assertIn("-an", command)
             self.assertIn("-autorotate", command)
-            self.assertEqual(command[command.index("-frames:v") + 1], "150")
+            self.assertIn("-frames:v", command)
             self.assertEqual(command[command.index("-loop") + 1], "0")
             self.assertEqual(command[command.index("-fs") + 1], str(MAX_OUTPUT_BYTES))
 
@@ -199,9 +319,11 @@ class ImageTests(unittest.TestCase):
 
         with Image.open(io.BytesIO(converted)) as gif:
             self.assertEqual(gif.format, "GIF")
-            self.assertEqual(gif.size, (480, 360))
+            self.assertLessEqual(gif.width, 480)
+            self.assertLessEqual(gif.height, 480)
             self.assertGreater(gif.n_frames, 1)
             self.assertLessEqual(gif.n_frames, 150)
+            self.assertLessEqual(len(converted), MAX_OUTPUT_BYTES)
 
     def test_video_conversion_reports_missing_ffmpeg_and_invalid_outputs(self) -> None:
         """Report missing FFmpeg, timeout, failed decodes, and oversized output clearly."""
@@ -246,17 +368,31 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(logs.records[0].trace_id, "test-trace")
         self.assertFalse(failed_workdirs[-1].exists())
 
-        def oversized_output(command: list[str], **kwargs: object) -> object:
-            Path(command[-1]).write_bytes(b"GIF89a")
-            with Path(command[-1]).open("r+b") as output:
-                output.truncate(MAX_OUTPUT_BYTES + 1)
+        oversized_workdirs: list[Path] = []
+        oversized_attempts = 0
+
+        def oversized_output(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            nonlocal oversized_attempts
+            output_path = Path(command[-1])
+            oversized_workdirs.append(output_path.parent)
+            if oversized_attempts == 0:
+                with output_path.open("wb") as output:
+                    output.truncate(MAX_OUTPUT_BYTES)
+                oversized_attempts += 1
+                return subprocess.CompletedProcess(command, 1)
+            output_path.write_bytes(b"GIF89aframe;")
+            oversized_attempts += 1
             return subprocess.CompletedProcess(command, 0)
 
         with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
             "main.subprocess.run", side_effect=oversized_output
         ):
-            with self.assertRaisesRegex(InvalidImage, "maximum 25 MB"):
-                convert_video(b"video bytes", ".mp4")
+            converted = convert_video(b"video bytes", ".mp4")
+        self.assertEqual(converted, b"GIF89aframe;")
+        self.assertEqual(oversized_attempts, 2)
+        self.assertFalse(any(workdir.exists() for workdir in oversized_workdirs))
 
     def test_converts_png_and_flattens_transparency(self) -> None:
         """Produce a readable GIF with configured background for transparent pixels."""
@@ -552,7 +688,8 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
             message.channel.send.assert_awaited_once()
             response = message.channel.send.await_args.args[0]
             self.assertIn("/gif", response)
-            self.assertIn("photos or videos", response)
+            self.assertIn("JPG/JPEG", response)
+            self.assertIn("up to 5 files", response)
             self.assertIn(
                 "https://discord.com/oauth2/authorize?client_id=123456789"
                 "&scope=applications.commands&integration_type=1",
@@ -662,6 +799,106 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
                             [child.label for child in view.children],
                             ["Share in this chat", "Copy Link"],
                         )
+        finally:
+            await bot.close()
+
+    async def test_batch_command_processes_each_file_and_keeps_share_copy_controls(self) -> None:
+        """Batch results should be sequential per-file outputs with each file's controls."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        attachment_a = Mock(filename="a.jpg")
+        attachment_b = Mock(filename="b.avif")
+        interaction = Mock()
+        interaction.guild_id = None
+        interaction.user.id = 321
+        interaction.response.defer = unittest.mock.AsyncMock()
+        interaction.response.send_message = unittest.mock.AsyncMock()
+        interaction.followup.send = unittest.mock.AsyncMock()
+        interaction.edit_original_response = unittest.mock.AsyncMock()
+
+        async def process(attachment: object, _user_id: int, _guild_id: int | None) -> str:
+            return f"https://gifs.example.test/{attachment.filename}.gif"
+
+        try:
+            with patch.object(bot, "_process_one", side_effect=process):
+                await bot.interaction_upload_batch(interaction, [attachment_a, attachment_b])
+            interaction.response.defer.assert_awaited_once_with(thinking=True, ephemeral=True)
+            interaction.edit_original_response.assert_awaited_once()
+            edit_kwargs = interaction.edit_original_response.await_args.kwargs
+            self.assertEqual(edit_kwargs["content"], "Finished processing 2 files.")
+            self.assertFalse(edit_kwargs["allowed_mentions"].everyone)
+            self.assertEqual(interaction.followup.send.await_count, 2)
+            for result in interaction.followup.send.await_args_list:
+                self.assertTrue(result.kwargs["ephemeral"])
+                self.assertIsInstance(result.kwargs["view"], PublicGifView)
+                self.assertEqual(
+                    [child.label for child in result.kwargs["view"].children],
+                    ["Share in this chat", "Copy Link"],
+                )
+        finally:
+            await bot.close()
+
+    async def test_batch_rejects_more_than_five_files(self) -> None:
+        """Reject oversized internal batches rather than silently dropping files."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        interaction = Mock()
+        interaction.response.send_message = unittest.mock.AsyncMock()
+        try:
+            attachments = [Mock(filename=f"{i}.jpg") for i in range(MAX_GIF_BATCH + 1)]
+            await bot.interaction_upload_batch(interaction, attachments)
+            interaction.response.send_message.assert_awaited_once()
+            self.assertIn(str(MAX_GIF_BATCH), interaction.response.send_message.await_args.args[0])
+            interaction.response.defer.assert_not_called()
+        finally:
+            await bot.close()
+
+    async def test_batch_continues_when_one_file_fails(self) -> None:
+        """Return the successful file and a separate error for the rejected file."""
+        settings = Settings(
+            discord_token="unused",
+            zipline_token="unused",
+            zipline_url="https://self-hosted.example.test",
+            log_level="INFO",
+            allowed_guilds=frozenset(),
+            background=(255, 255, 255),
+        )
+        bot = create_bot(settings)
+        bad, good = Mock(filename="bad.exe"), Mock(filename="good.jpg")
+        interaction = Mock()
+        interaction.guild_id = None
+        interaction.user.id = 321
+        interaction.response.defer = unittest.mock.AsyncMock()
+        interaction.response.send_message = unittest.mock.AsyncMock()
+        interaction.followup.send = unittest.mock.AsyncMock()
+        interaction.edit_original_response = unittest.mock.AsyncMock()
+
+        async def process(attachment: object, _user_id: int, _guild_id: int | None) -> str:
+            if attachment is bad:
+                raise InvalidImage("unsupported file")
+            return "https://gifs.example.test/good.gif"
+
+        try:
+            with patch.object(bot, "_process_one", side_effect=process):
+                await bot.interaction_upload_batch(interaction, [bad, good])
+            self.assertEqual(interaction.followup.send.await_count, 2)
+            self.assertIn("bad.exe", interaction.followup.send.await_args_list[0].args[0])
+            self.assertIsInstance(interaction.followup.send.await_args_list[1].kwargs["embed"], discord.Embed)
+            interaction.edit_original_response.assert_awaited_once()
         finally:
             await bot.close()
 
@@ -904,6 +1141,12 @@ class DiscordCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(command.allowed_contexts.dm_channel)
             self.assertTrue(command.allowed_contexts.private_channel)
             self.assertEqual(command.parameters[0].name, "media")
+            self.assertEqual(
+                [parameter.name for parameter in command.parameters],
+                ["media", "media_2", "media_3", "media_4", "media_5"],
+            )
+            self.assertTrue(command.parameters[0].required)
+            self.assertTrue(all(not parameter.required for parameter in command.parameters[1:]))
         finally:
             await bot.close()
 

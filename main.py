@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from defusedxml import ElementTree as SafeET
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError, features
 
 load_dotenv()
 
@@ -60,10 +61,15 @@ SVG_MAX_TEXT_BYTES: Final[int] = 2_000_000
 ALLOWED_TYPES: Final[dict[str, set[str]]] = {
     ".webp": {"image/webp"},
     ".png": {"image/png"},
+    ".jpg": {"image/jpeg", "image/jpg"},
+    ".jpeg": {"image/jpeg", "image/jpg"},
+    ".avif": {"image/avif"},
     ".svg": {"image/svg+xml", "text/xml", "application/xml"},
     ".mp4": {"video/mp4"},
     ".webm": {"video/webm"},
 }
+GIF_TARGET_BYTES: Final[int] = 1_000_000
+MAX_GIF_BATCH: Final[int] = 5
 
 
 class UserFacingError(Exception):
@@ -72,6 +78,10 @@ class UserFacingError(Exception):
 
 class InvalidImage(UserFacingError):
     """The input image is invalid or exceeds image processing safety limits."""
+
+
+class _CandidateTooLarge(InvalidImage):
+    """A valid conversion may fit after reducing dimensions or frame count."""
 
 
 class UploadFailure(UserFacingError):
@@ -421,7 +431,7 @@ def validate_attachment_metadata(filename: str, content_type: str | None, size: 
     """Validate a supported image or video extension and known declared size."""
     suffix = os.path.splitext(os.path.basename(filename).lower())[1]
     if suffix not in ALLOWED_TYPES:
-        raise InvalidImage("Use a WEBP, PNG, SVG, MP4, or WebM file.")
+        raise InvalidImage("Use a WEBP, PNG, JPG, JPEG, AVIF, SVG, MP4, or WebM file.")
     # Discord can omit or misreport attachment MIME metadata. Validate the
     # extension here and verify the actual decoded format in the converter.
     if size is not None and size > MAX_INPUT_BYTES:
@@ -540,7 +550,7 @@ class _BoundedBytesIO(io.BytesIO):
     def write(self, content: bytes) -> int:
         """Reject writes that would exceed the configured cap."""
         if self.tell() + len(content) > self.limit:
-            raise InvalidImage("The converted GIF is too large to upload.")
+            raise _CandidateTooLarge("The converted GIF is too large to upload.")
         return super().write(content)
 
 
@@ -565,7 +575,55 @@ def _rasterize_svg(data: bytes, width: int, height: int) -> bytes:
 
 
 def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> bytes:
-    """Convert the first 10 seconds of an MP4/WebM to a bounded, optimized GIF."""
+    """Convert video using bounded size-reduction attempts toward a 1 MB GIF."""
+    best_candidate: bytes | None = None
+    deadline = time.monotonic() + VIDEO_CONVERSION_TIMEOUT
+    for max_dimension, fps, max_frames in (
+        (VIDEO_MAX_DIMENSION, 15, MAX_VIDEO_FRAMES),
+        (384, 12, 120),
+        (320, 10, 100),
+        (240, 8, 80),
+        (160, 6, 60),
+    ):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            candidate = _convert_video_once(
+                data, suffix, trace_id,
+                max_dimension=max_dimension,
+                fps=fps,
+                max_frames=max_frames,
+                timeout=remaining,
+            )
+        except _CandidateTooLarge:
+            continue
+        except InvalidImage:
+            if best_candidate is not None:
+                break
+            raise
+        if best_candidate is None or len(candidate) < len(best_candidate):
+            best_candidate = candidate
+        if len(candidate) <= GIF_TARGET_BYTES:
+            return candidate
+    if best_candidate is not None:
+        return best_candidate
+    if time.monotonic() >= deadline:
+        raise InvalidImage("Video conversion took too long. Try a shorter or smaller video.")
+    raise InvalidImage("The converted GIF is too large to upload (maximum 25 MB).")
+
+
+def _convert_video_once(
+    data: bytes,
+    suffix: str,
+    trace_id: str | None = None,
+    *,
+    max_dimension: int = VIDEO_MAX_DIMENSION,
+    fps: int = 15,
+    max_frames: int = MAX_VIDEO_FRAMES,
+    timeout: float = VIDEO_CONVERSION_TIMEOUT,
+) -> bytes:
+    """Convert one MP4/WebM candidate into a bounded GIF."""
     if suffix not in {".mp4", ".webm"}:
         raise InvalidImage("Use an MP4 or WebM video.")
     if len(data) > MAX_INPUT_BYTES:
@@ -575,7 +633,7 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
         raise InvalidImage("Video conversion requires FFmpeg. Ask the bot host to install it and restart Bombagif.")
 
     filter_graph = (
-        f"[0:V:0]fps=15,scale={VIDEO_MAX_DIMENSION}:{VIDEO_MAX_DIMENSION}:"
+        f"[0:V:0]fps={fps},scale={max_dimension}:{max_dimension}:"
         "force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
         "split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
         "[s1][p]paletteuse=dither=bayer[out]"
@@ -614,7 +672,7 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
                 "-sn",
                 "-dn",
                 "-frames:v",
-                str(MAX_VIDEO_FRAMES),
+                str(max_frames),
                 "-map_metadata",
                 "-1",
                 "-loop",
@@ -632,7 +690,7 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
                         stderr=stderr_file,
                         check=False,
                         shell=False,
-                        timeout=VIDEO_CONVERSION_TIMEOUT,
+                        timeout=timeout,
                         cwd=work_dir,
                     )
             except subprocess.TimeoutExpired as exc:
@@ -640,8 +698,10 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
             except OSError as exc:
                 raise InvalidImage("FFmpeg could not start video conversion on this host.") from exc
             output_size = output_path.stat().st_size if output_path.is_file() else 0
+            if output_size >= MAX_OUTPUT_BYTES and result.returncode != 0:
+                raise _CandidateTooLarge("The GIF candidate reached the 25 MB output limit.")
             if output_size > MAX_OUTPUT_BYTES:
-                raise InvalidImage("The converted GIF is too large to upload (maximum 25 MB).")
+                raise _CandidateTooLarge("The converted GIF is too large to upload (maximum 25 MB).")
             if result.returncode != 0:
                 with stderr_path.open("rb") as stderr_file:
                     stderr_size = stderr_file.seek(0, os.SEEK_END)
@@ -667,6 +727,8 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
                 output_file.seek(-1, os.SEEK_END)
                 trailer = output_file.read(1)
                 if signature not in {b"GIF87a", b"GIF89a"} or trailer != b";":
+                    if output_size >= MAX_OUTPUT_BYTES:
+                        raise _CandidateTooLarge("The GIF candidate reached the 25 MB output limit.")
                     raise InvalidImage("FFmpeg did not produce a complete GIF for that video.")
                 output_file.seek(0)
                 return output_file.read(MAX_OUTPUT_BYTES)
@@ -676,8 +738,115 @@ def convert_video(data: bytes, suffix: str, trace_id: str | None = None) -> byte
         raise InvalidImage("Video conversion could not access temporary storage on this host.") from exc
 
 
+def _is_avif_container(data: bytes) -> bool:
+    """Check the ISO-BMFF ftyp box brands before handing a file to AVIF fallback."""
+    if len(data) < 16 or data[4:8] != b"ftyp":
+        return False
+    brands = [data[8:12]]
+    brands.extend(data[offset : offset + 4] for offset in range(16, min(len(data), 64), 4))
+    return any(brand in {b"avif", b"avis"} for brand in brands)
+
+
+def _decode_avif_with_ffmpeg(data: bytes) -> bytes | None:
+    """Decode an AVIF to a bounded first-frame PNG when Pillow lacks its AV1 codec."""
+    if not _is_avif_container(data):
+        return None
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="bombagif-avif-") as work_dir:
+            input_path = Path(work_dir) / "input.avif"
+            output_path = Path(work_dir) / "frame.png"
+            input_path.write_bytes(data)
+            command = [
+                ffmpeg,
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-threads", "1", "-max_pixels", str(MAX_PIXELS),
+                "-protocol_whitelist", "file", "-i", str(input_path),
+                "-frames:v", "1", "-map_metadata", "-1",
+                "-f", "image2", "-fs", str(MAX_INPUT_BYTES), str(output_path),
+            ]
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                shell=False,
+                timeout=15,
+                cwd=work_dir,
+            )
+            if result.returncode != 0 or not output_path.is_file():
+                return None
+            if output_path.stat().st_size > MAX_INPUT_BYTES:
+                return None
+            png = output_path.read_bytes()
+            if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                return None
+            return png
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _convert_image_to_target(
+    data: bytes, suffix: str, background: tuple[int, int, int]
+) -> bytes:
+    """Try bounded downscale/frame-reduction steps for a 1 MB GIF target."""
+    if len(data) > MAX_INPUT_BYTES:
+        raise InvalidImage("That image is too large. The maximum upload size is 15 MB.")
+    if suffix == ".avif" and not features.check("avif"):
+        decoded = _decode_avif_with_ffmpeg(data)
+        if decoded is not None:
+            data, suffix = decoded, ".png"
+    best_candidate: bytes | None = None
+    attempts = (
+        (MAX_DIMENSION, MAX_FRAMES, 20),
+        (768, 75, 40),
+        (512, 50, 67),
+        (384, 30, 100),
+        (256, 15, 150),
+    )
+    for max_dimension, max_frames, duration_floor_ms in attempts:
+        try:
+            candidate = _convert_image_once(
+                data,
+                suffix,
+                background,
+                max_dimension=max_dimension,
+                max_frames=max_frames,
+                duration_floor_ms=duration_floor_ms,
+            )
+        except _CandidateTooLarge:
+            continue
+        except InvalidImage:
+            if best_candidate is not None:
+                break
+            raise
+        if best_candidate is None or len(candidate) < len(best_candidate):
+            best_candidate = candidate
+        if len(candidate) <= GIF_TARGET_BYTES:
+            return candidate
+    if best_candidate is None:
+        raise InvalidImage("The converted GIF is too large to upload (maximum 25 MB).")
+    return best_candidate
+
+
 def convert_image(data: bytes, suffix: str, background: tuple[int, int, int]) -> bytes:
-    """Decode/rasterize a supported image and encode an optimized bounded GIF."""
+    """Convert an image toward the 1 MB target, preserving a bounded fallback."""
+    return _convert_image_to_target(data, suffix, background)
+
+
+def _convert_image_once(
+    data: bytes,
+    suffix: str,
+    background: tuple[int, int, int],
+    *,
+    max_dimension: int,
+    max_frames: int,
+    duration_floor_ms: int,
+) -> bytes:
+    """Encode one image candidate under progressively smaller quality settings."""
     if len(data) > MAX_INPUT_BYTES:
         raise InvalidImage("That image is too large. The maximum upload size is 15 MB.")
     if suffix == ".svg":
@@ -686,30 +855,58 @@ def convert_image(data: bytes, suffix: str, background: tuple[int, int, int]) ->
 
     try:
         with Image.open(io.BytesIO(data)) as image:
-            expected_format = {".png": "PNG", ".webp": "WEBP", ".svg": "PNG"}[suffix]
+            expected_format = {
+                ".png": "PNG", ".webp": "WEBP", ".svg": "PNG",
+                ".jpg": "JPEG", ".jpeg": "JPEG", ".avif": "AVIF",
+            }[suffix]
             if image.format != expected_format:
                 raise InvalidImage("The image contents do not match the file extension.")
             if image.width <= 0 or image.height <= 0 or image.width * image.height > MAX_PIXELS:
                 raise InvalidImage("That image has dimensions that are too large to process safely.")
+            avif_fallback: Image.Image | None = None
+            if suffix == ".avif" and features.check("avif"):
+                try:
+                    image.load()
+                except (RuntimeError, OSError):
+                    png_data = _decode_avif_with_ffmpeg(data)
+                    if png_data is None:
+                        raise InvalidImage("AVIF decoder unavailable; enable AVIF codecs in Pillow or install FFmpeg.")
+                    with Image.open(io.BytesIO(png_data)) as decoded_image:
+                        avif_fallback = decoded_image.copy()
+            if avif_fallback is not None and (
+                avif_fallback.width <= 0
+                or avif_fallback.height <= 0
+                or avif_fallback.width * avif_fallback.height > MAX_PIXELS
+            ):
+                raise InvalidImage("That AVIF has dimensions that are too large to process safely.")
             frames: list[Image.Image] = []
             durations: list[int] = []
-            pixel_count = image.width * image.height
-            output_pixels = min(image.width, MAX_DIMENSION) * min(image.height, MAX_DIMENSION)
+            source_width, source_height = (
+                avif_fallback.size if avif_fallback is not None else image.size
+            )
+            pixel_count = source_width * source_height
+            output_pixels = min(source_width, max_dimension) * min(source_height, max_dimension)
             frame_count = min(
                 getattr(image, "n_frames", 1),
-                MAX_FRAMES,
+                max_frames,
                 max(1, MAX_TOTAL_FRAME_PIXELS // pixel_count),
                 max(1, MAX_TOTAL_FRAME_PIXELS // output_pixels),
             )
             for frame_index in range(frame_count):
-                image.seek(frame_index)
-                frame = ImageOps.exif_transpose(image.copy())
-                frame.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.Resampling.LANCZOS)
+                if avif_fallback is None:
+                    image.seek(frame_index)
+                    frame = ImageOps.exif_transpose(image.copy())
+                else:
+                    frame = avif_fallback.copy()
+                frame.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
                 rgba = frame.convert("RGBA")
                 flattened = Image.new("RGB", rgba.size, background)
                 flattened.paste(rgba, mask=rgba.getchannel("A"))
                 frames.append(flattened.quantize(colors=256, method=Image.Quantize.MEDIANCUT))
-                durations.append(min(60_000, max(20, int(image.info.get("duration", 100)))))
+                frame_duration = 100
+                if avif_fallback is None:
+                    frame_duration = int(image.info.get("duration", 100))
+                durations.append(min(60_000, max(duration_floor_ms, frame_duration)))
             if not frames:
                 raise InvalidImage("That image does not contain a usable frame.")
             output = _BoundedBytesIO(MAX_OUTPUT_BYTES)
@@ -726,7 +923,7 @@ def convert_image(data: bytes, suffix: str, background: tuple[int, int, int]) ->
             if len(result) > MAX_OUTPUT_BYTES:
                 raise InvalidImage("The converted GIF is too large to upload.")
             return result
-    except (InvalidImage, UnidentifiedImageError, OSError, ValueError, EOFError, SyntaxError, Image.DecompressionBombError) as exc:
+    except (InvalidImage, UnidentifiedImageError, OSError, ValueError, EOFError, SyntaxError, RuntimeError, Image.DecompressionBombError) as exc:
         if isinstance(exc, InvalidImage):
             raise
         raise InvalidImage("That image could not be decoded. Please try another file.") from exc
@@ -1008,7 +1205,7 @@ class BombagifBot(commands.Bot):
 
         install_url = _user_install_url(self.application_id)
         response = (
-            "Yo! I'm Bombagif. Use `/gif` and attach photos or videos to get an optimized [GIF link](https://gifs.bombaclat.wtf/u/T1XJjE.gif)."
+            "Yo! I'm Bombagif. Use `/gif` and attach JPG/JPEG, AVIF, WEBP, PNG, SVG, or a video to get an optimized [GIF link](https://gifs.bombaclat.wtf/u/T1XJjE.gif). You can add up to 5 files at once."
         )
         if install_url:
             response += f"\n[**Click this hyper-link to add Bombagif to your apps.**](<{install_url}>)"
@@ -1084,9 +1281,15 @@ class BombagifBot(commands.Bot):
             converter = convert_video if suffix in {".mp4", ".webm"} else convert_image
             if converter is convert_video:
                 conversion_args = (data, suffix, trace_id)
+                gif_data = await loop.run_in_executor(self.image_executor, converter, *conversion_args)
             else:
-                conversion_args = (data, suffix, self.settings.background)
-            gif_data = await loop.run_in_executor(self.image_executor, converter, *conversion_args)
+                gif_data = await loop.run_in_executor(
+                    self.image_executor,
+                    _convert_image_to_target,
+                    data,
+                    suffix,
+                    self.settings.background,
+                )
         except InvalidImage:
             raise
         except Exception as exc:
@@ -1129,6 +1332,63 @@ class BombagifBot(commands.Bot):
                     f"**{discord.utils.escape_markdown(attachment.filename)}**: Sorry, the media could not be processed.",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+
+    async def interaction_upload_batch(
+        self, interaction: discord.Interaction, attachments: list[discord.Attachment]
+    ) -> None:
+        """Convert selected attachments sequentially and return per-file results."""
+        if len(attachments) > MAX_GIF_BATCH:
+            await interaction.response.send_message(
+                f"You can convert up to {MAX_GIF_BATCH} files per `/gif` command.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        guild_id = interaction.guild_id
+        if self.settings.allowed_guilds and guild_id is not None and guild_id not in self.settings.allowed_guilds:
+            await interaction.response.send_message("This bot is not enabled in this server.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        for attachment in attachments:
+            try:
+                link = await self._process_one(attachment, interaction.user.id, guild_id)
+            except UserFacingError as exc:
+                await interaction.followup.send(
+                    f"{discord.utils.escape_markdown(attachment.filename)}: {exc}",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                continue
+            except Exception:
+                self.logger.exception(
+                    "Unexpected batch processing error",
+                    extra=self._log_context(interaction.user.id, guild_id, uuid.uuid4().hex),
+                )
+                await interaction.followup.send(
+                    f"{discord.utils.escape_markdown(attachment.filename)}: Could not process this file.",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                continue
+
+            embed = discord.Embed(
+                title=discord.utils.escape_markdown(attachment.filename)[:256],
+                description="Your optimized GIF is ready to view or share.",
+                color=discord.Color.blurple(),
+            )
+            embed.set_image(url=link)
+            embed.add_field(name="Open GIF", value=f"[View or copy the direct link]({link})")
+            embed.set_footer(text="Converted by Bombagif")
+            await interaction.followup.send(
+                embed=embed,
+                view=PublicGifView(interaction.user.id, embed, link),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        await interaction.edit_original_response(
+            content=f"Finished processing {len(attachments)} files.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def interaction_upload(
         self, interaction: discord.Interaction, attachment: discord.Attachment
@@ -1179,13 +1439,30 @@ def create_bot(settings: Settings) -> BombagifBot:
     """Create the bot and register the globally available `/gif` command."""
     bot = BombagifBot(settings)
 
-    @bot.tree.command(name="gif", description="Convert an uploaded image or MP4/WebM video to a GIF")
+    @bot.tree.command(name="gif", description="Convert 1–5 images or videos to GIFs under 1 MB when possible")
     @app_commands.allowed_installs(guilds=False, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @app_commands.describe(media="The image or MP4/WebM video to convert")
-    async def gif_command(interaction: discord.Interaction, media: discord.Attachment) -> None:
-        """Convert a slash-command attachment to a GIF and short link."""
-        await bot.interaction_upload(interaction, media)
+    @app_commands.describe(
+        media="The first image (PNG/JPG/JPEG/AVIF/WEBP/SVG) or MP4/WebM video",
+        media_2="Optional second file",
+        media_3="Optional third file",
+        media_4="Optional fourth file",
+        media_5="Optional fifth file",
+    )
+    async def gif_command(
+        interaction: discord.Interaction,
+        media: discord.Attachment,
+        media_2: discord.Attachment | None = None,
+        media_3: discord.Attachment | None = None,
+        media_4: discord.Attachment | None = None,
+        media_5: discord.Attachment | None = None,
+    ) -> None:
+        """Convert one to five uploads to optimized GIFs."""
+        attachments = [item for item in (media, media_2, media_3, media_4, media_5) if item is not None]
+        if len(attachments) == 1:
+            await bot.interaction_upload(interaction, attachments[0])
+        else:
+            await bot.interaction_upload_batch(interaction, attachments)
 
     return bot
 
