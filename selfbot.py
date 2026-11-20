@@ -191,7 +191,10 @@ class SelfBot(discord.Client):
             if not collected.sources and message.reference is not None:
                 collected = collect_media(message, await self._resolve_reference(message))
             if not collected.sources:
-                await self._reply(message, NO_MEDIA_TEXT)
+                # Only complain when the person clearly asked: they pinged us or attached something.
+                # A plain DM reply (e.g. "thanks!" to one of our messages) is just conversation.
+                if message.attachments or self._incoming(message).mentions_me:
+                    await self._reply(message, NO_MEDIA_TEXT)
                 return
             results = [await self._convert_one(source, author_id, guild_id) for source in collected.sources]
             await self._reply(message, format_results(results, collected.skipped))
