@@ -917,3 +917,44 @@ async def convert_and_upload(
         os.path.splitext(os.path.basename(source.filename))[0],
     ).strip("-_")[:64] or "media"
     return await upload_to_zipline(session, settings, gif_data, f"{safe_stem}.gif", trace_id=trace_id)
+
+
+_DISCORD_MEDIA_DOMAINS: Final[tuple[str, ...]] = ("discordapp.net", "discordapp.com")
+
+
+def is_discord_media_url(url: str) -> bool:
+    """True only for https URLs on Discord's own CDN/proxy hosts, with no credentials or odd port.
+
+    Embed media is fetched through Discord's proxy URLs, never the embed's original host, so a
+    message can't make the bot request arbitrary (or internal) addresses.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or not host or parsed.username is not None or parsed.password is not None:
+        return False
+    if port not in (None, 443):
+        return False
+    host = host.lower()
+    return any(host == domain or host.endswith("." + domain) for domain in _DISCORD_MEDIA_DOMAINS)
+
+
+def sniff_suffix(data: bytes) -> str | None:
+    """Guess a supported file extension from magic bytes, or None if unrecognized."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if _is_avif_container(data):
+        return ".avif"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return ".mp4"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".webm"
+    return None
+
