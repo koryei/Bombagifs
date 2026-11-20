@@ -6,12 +6,14 @@ calls ``render_clip``; nothing in here touches the network.
 
 from __future__ import annotations
 
+import datetime
+import io
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
 GROUP_GAP_S = 7 * 60.0  # Discord groups an author's messages sent within 7 minutes of each other
@@ -156,3 +158,110 @@ def group_messages(messages: Sequence[ClipMessage]) -> list[list[ClipMessage]]:
         else:
             groups.append([message])
     return groups
+
+
+# layout, in logical pixels (multiplied by the render scale) ---------------------------------------------------
+
+WIDTH = 520
+PAD = 16
+AVATAR = 40
+TEXT_X = 72  # where names and message text start
+LINE_H = 22
+HEADER_H = 22
+GROUP_GAP = 17
+MAX_HEIGHT = 900
+BASELINE = 16  # text baseline offset inside a 22 px row
+MAX_NAME_CHARS = 28
+_DEFAULT_AVATARS = [(88, 101, 242), (116, 127, 141), (59, 165, 93), (250, 166, 26), (237, 66, 69), (235, 69, 158)]
+
+
+def format_time(epoch: float, tz: datetime.tzinfo | None = None) -> str:
+    """Discord-style clock time such as ``7:09 PM`` (host-local time unless ``tz`` is given)."""
+    moment = datetime.datetime.fromtimestamp(epoch, tz)
+    hour = moment.hour % 12 or 12
+    return f"{hour}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
+
+
+def _circle_mask(size: int) -> Image.Image:
+    """An anti-aliased filled circle mask (drawn at 4x, then reduced)."""
+    big = Image.new("L", (size * 4, size * 4), 0)
+    ImageDraw.Draw(big).ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=255)
+    return big.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def _avatar_image(author: ClipAuthor, size: int, fonts: Fonts) -> Image.Image:
+    """The author's avatar as a circle; a coloured circle with their initial if there is none or it can't be read."""
+    tile: Image.Image | None = None
+    if author.avatar:
+        try:
+            with Image.open(io.BytesIO(author.avatar)) as source:
+                tile = ImageOps.fit(source.convert("RGBA"), (size, size), Image.Resampling.LANCZOS)
+        except (OSError, ValueError, Image.DecompressionBombError):
+            tile = None
+    if tile is None:
+        tile = Image.new("RGBA", (size, size), _DEFAULT_AVATARS[author.id % len(_DEFAULT_AVATARS)] + (255,))
+        initial = (author.name.strip()[:1] or "?").upper()
+        ImageDraw.Draw(tile).text((size / 2, size / 2), initial, font=fonts.bold, fill=(255, 255, 255), anchor="mm")
+    tile.putalpha(_circle_mask(size))
+    return tile
+
+
+def _short_name(name: str) -> str:
+    return name if len(name) <= MAX_NAME_CHARS else name[: MAX_NAME_CHARS - 1] + "…"
+
+
+def render_clip(
+    card: ClipCard,
+    *,
+    scale: int = 2,
+    theme: str = "onyx",
+    emoji: Mapping[str, bytes] | None = None,
+) -> bytes:
+    """Render the card to PNG bytes. Unknown themes fall back to ``onyx``; the image is at most 900 logical px tall."""
+    colours = THEMES.get(theme, THEMES["onyx"])
+    fonts = load_fonts(scale)
+    text_width = (WIDTH - TEXT_X - PAD) * scale
+    groups = group_messages(card.messages)
+
+    laid_out: list[tuple[list[ClipMessage], list[list[str]]]] = []
+    total = PAD
+    for index, group in enumerate(groups):
+        wrapped = [wrap_text(message.text, fonts.body, text_width) for message in group]
+        laid_out.append((group, wrapped))
+        total += HEADER_H + sum(len(lines) for lines in wrapped) * LINE_H
+        total += GROUP_GAP if index < len(groups) - 1 else 0
+    total += PAD
+    height = min(total, MAX_HEIGHT) * scale
+
+    image = Image.new("RGB", (WIDTH * scale, height), colours.bg)
+    draw = ImageDraw.Draw(image)
+    y = PAD
+    for group, wrapped in laid_out:
+        first = group[0]
+        avatar = _avatar_image(first.author, AVATAR * scale, fonts)
+        image.paste(avatar, (PAD * scale, y * scale), avatar)
+
+        header_baseline = (y + BASELINE) * scale
+        x = TEXT_X * scale
+        name_colour = first.author.color or colours.name
+        name = _short_name(first.author.name)
+        draw.text((x, header_baseline), name, font=fonts.name, fill=name_colour, anchor="ls")
+        x += int(fonts.name.getlength(name)) + 6 * scale
+        if first.author.tag:
+            tag_width = int(fonts.tag.getlength(first.author.tag)) + 8 * scale
+            chip = (x, (y + 3) * scale, x + tag_width, (y + 19) * scale)
+            draw.rounded_rectangle(chip, radius=3 * scale, fill=colours.tag_bg)
+            draw.text((x + 4 * scale, header_baseline), first.author.tag, font=fonts.tag, fill=colours.tag_text, anchor="ls")
+            x += tag_width + 6 * scale
+        draw.text((x, header_baseline), format_time(first.at), font=fonts.time, fill=colours.time, anchor="ls")
+
+        line_y = y + HEADER_H
+        for lines in wrapped:
+            for line in lines:
+                draw.text((TEXT_X * scale, (line_y + BASELINE) * scale), line, font=fonts.body, fill=colours.text, anchor="ls")
+                line_y += LINE_H
+        y = line_y + GROUP_GAP
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
