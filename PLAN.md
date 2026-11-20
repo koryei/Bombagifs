@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** implemented on branch `v2-selfbot` (all 16 tasks). Deviations: `SelfBot` keeps `Settings` as `self.config` (the library owns `Client.settings`); Tasks 12 and 14 were split into several commits; `convert_and_upload` takes an optional `log_context`; embeds are fetched only through Discord proxy URLs (bare links in a ping's own text are not); the Dockerfile now copies `bombagif_core.py` (found in final review); plain DM replies with no media get no "no media" answer.
+
 **Goal:** Add a Discord user-account "self-bot" front door: people who DMed it first can ping it with media, or ping it while replying to media, and get the Zipline GIF link back in the same chat.
 
 **Architecture:** Extract the discord-free conversion/upload pipeline into `bombagif_core.py` (shared by the existing `/gif` app and the new self-bot). Decision logic lives in a discord-free `selfbot_logic.py` (unit-tested with fakes); `selfbot.py` is a thin `discord.py-self` adapter run from its own venv.
