@@ -41,6 +41,7 @@ from selfbot_logic import (
     collect_media,
     decide,
     format_results,
+    has_media,
 )
 
 
@@ -98,7 +99,7 @@ class SelfBot(discord.Client):
             channel=channel,
             mentions_me=mentions_me,
             content=message.content or "",
-            has_payload=bool(message.attachments or message.embeds),
+            has_payload=has_media(message),
             is_reply=message.reference is not None,
         )
 

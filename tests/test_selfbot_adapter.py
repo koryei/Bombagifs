@@ -211,6 +211,20 @@ class SelfBotConvertTests(_SelfBotCase):
         self.assertEqual(self.convert.await_count, 5)
         self.assertTrue(message.reply.await_args.args[0].endswith("(+2 skipped, max 5 per message)"))
 
+    async def test_link_preview_embed_is_not_a_trigger(self) -> None:
+        link_preview = SimpleNamespace(type="link", image=None, video=None, thumbnail=None, url="https://example.com")
+        message = make_message(content="look https://example.com", embeds=[link_preview])
+        await self.bot.on_message(message)
+        message.reply.assert_not_awaited()
+
+    async def test_gif_embed_in_member_dm_converts(self) -> None:
+        video = SimpleNamespace(url="https://x", proxy_url="https://images-ext-1.discordapp.net/external/h/https/media.tenor.com/a/tenor")
+        gifv = SimpleNamespace(type="gifv", image=None, video=video, thumbnail=None, url="https://tenor.com/view/x")
+        message = make_message(embeds=[gifv])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], LINK)
+        self.assertTrue(self.convert.await_args.args[3].filename.endswith(".mp4"))
+
     async def test_reply_failure_does_not_raise(self) -> None:
         response = SimpleNamespace(status=403, reason="Forbidden")
         message = make_message(attachments=[attachment()])
