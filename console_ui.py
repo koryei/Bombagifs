@@ -358,7 +358,10 @@ def demo(console: Console | None = None, pause: float = 0.7) -> None:
     console = console or create_console()
     stats = BotStats()
     state: dict[str, Any] = {"status": "connecting", "allowlist": 0}
-    ui = TerminalUi(console, Dashboard(stats, lambda: state["status"], lambda: state["allowlist"]))
+    ui = TerminalUi(
+        console,
+        Dashboard(stats, lambda: state["status"], lambda: state["allowlist"], get_scout=lambda: ("dry-run", "inception", True)),
+    )
 
     log = logging.getLogger("bombagif.demo")
     log.handlers = [PrettyLogHandler(console)]
@@ -377,6 +380,10 @@ def demo(console: Console | None = None, pause: float = 0.7) -> None:
             "allowlist": "0 users (data/allowlist.json)",
             "auto-accept friends": "off",
             "captcha guard": "armed",
+            "scout": "dry-run",
+            "judge": "inception",
+            "scout chats": "2",
+            "reminder": "Inception: turn OFF 'Improve the model for everyone' in its API settings",
             "rate limit": "5 triggers / 60s per user",
             "batch": "up to 5 files per message",
             "python": "3.14",
@@ -402,6 +409,13 @@ def demo(console: Console | None = None, pause: float = 0.7) -> None:
         stats.note("fail", "koryei: huge.png: That file is too large. The maximum upload size is 15 MB.")
         log.warning("Zipline rejected the upload (status=413, body='Payload Too Large')", extra={"trace_id": "9f3a2c71e5"})
 
+    def scouted() -> None:
+        stats.scout_screened += 6
+        stats.scout_passed += 1
+        stats.dry_run_hits += 1
+        stats.note("info", "dry-run: would clip Quill (funny 8.9)")
+        log.info("Scout judged a run", extra={"trace_id": "a1b2c3d4e5"})
+
     def limited() -> None:
         stats.rate_limited += 1
         stats.note("warn", "shan rate limited")
@@ -411,7 +425,7 @@ def demo(console: Console | None = None, pause: float = 0.7) -> None:
         stats.note("warn", "CAPTCHA requested while sending a reply. Paused; see the log to resume.")
         log.error("Discord requested a CAPTCHA during sending a reply: all account actions are paused.")
 
-    for action in (say_hi, convert_ok, convert_ok, too_big, limited, captcha):
+    for action in (say_hi, convert_ok, convert_ok, scouted, too_big, limited, captcha):
         step(action)
     ui.stop(stats)
 

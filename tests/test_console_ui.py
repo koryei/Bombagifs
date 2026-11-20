@@ -323,7 +323,7 @@ class DemoTests(unittest.TestCase):
         console = console_ui.create_console(record=True, width=100, force_terminal=True, color_system=None)
         console_ui.demo(console, pause=0.0)
         text = console.export_text()
-        for expected in ("Bombagif self-bot is online", "converted", "signed off", "CAPTCHA"):
+        for expected in ("Bombagif self-bot is online", "converted", "signed off", "CAPTCHA", "screened", "judge inception", "would clip"):
             self.assertIn(expected, text)
 
 
