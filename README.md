@@ -95,6 +95,41 @@ Nothing needs restarting for a presence change: edit `~/Bombagif/status.config` 
 
 Bombagif supports Zipline JSON responses containing a `files` URL list, legacy objects with a `url` field, a JSON string URL, and the documented plain-text URL response. If Zipline returns an HTTP link for your same host while your configured public URL is HTTPS, Bombagif safely upgrades that link to your configured HTTPS host. If an upload succeeds but no safe URL is returned, Bombagif explains that HTTPS return URLs may need to be enabled in Zipline (`CORE_RETURN_HTTPS_URLS=true`) and warns you to check Zipline before retrying to avoid duplicate uploads.
 
+## Self-bot (v2): ping Bombagif instead of running `/gif`
+
+Besides the `/gif` app, Bombagif can run as a Discord **user account** (a "self-bot", in the style of
+[BombaclatAI](https://github.com/koryei/BombaclatAI)). Anyone who has **DMed that account first** can then:
+
+- **DM it a file** (or a GIF/image link embed): it replies with the GIF link.
+- **`@` it with a file attached**, in any server, DM, or group DM it can see.
+- **Reply to someone's message that has media and `@` it**: it converts the replied-to media.
+
+It replies once to the triggering message, with bare links so Discord embeds the GIF, up to five files per
+message, and at most five triggers per person per minute (excess is ignored silently). Plain link previews are
+not triggers.
+
+**Consent rule.** The first DM from a person registers them (they get a short welcome, and any media in that
+first message is converted). Everyone else is ignored completely: no replies, no error messages. Sending `stop` in
+the DM removes you again. The allowlist is a private JSON file (`$SELFBOT_DATA_DIR/allowlist.json`, mode 600).
+
+> **Warning:** automating a user account violates [Discord's Terms of Service](https://discord.com/terms) and can
+> get the account banned. Use a throwaway or alt account you are willing to lose, never your main one.
+
+It uses `discord.py-self`, which installs as the same `discord` package as `discord.py`, so it needs its **own
+virtualenv**; the conversion pipeline (`bombagif_core.py`) is shared and imports neither library.
+
+```bash
+python3 -m venv .venv-selfbot
+.venv-selfbot/bin/pip install -r requirements-selfbot.txt
+# In .env: SELFBOT_TOKEN (the user-account token), SELFBOT_DATA_DIR (default ./data),
+# plus the same ZIPLINE_URL / ZIPLINE_TOKEN as the app.
+.venv-selfbot/bin/python selfbot.py
+```
+
+The self-bot is run manually for now; the installer, Dockerfile, and compose file only cover the `/gif` app. It
+needs FFmpeg and Cairo on the host for the same formats as the app. Embedded media is only ever fetched through
+Discord's own CDN/proxy URLs.
+
 ## Secret hygiene before publishing
 
 - [`.gitignore`](.gitignore) excludes local env files, virtualenvs, and Python caches. [`.dockerignore`](.dockerignore) keeps env files out of Docker build context.
@@ -103,4 +138,4 @@ Bombagif supports Zipline JSON responses containing a `files` URL list, legacy o
 
 ## Checks
 
-Run `bash tests/test_installer.sh` for installer helper checks and `python -m unittest discover -s tests -v` for offline image/video, presence, and local mock-Zipline behavior tests. They do not contact Discord or your production Zipline host. The SVG rasterization test needs Cairo installed; without it, that single test reports the Cairo prerequisite while the rest pass.
+Run `bash tests/test_installer.sh` for installer helper checks and `python -m unittest discover -s tests -v` for offline image/video, presence, and local mock-Zipline behavior tests. They do not contact Discord or your production Zipline host. The self-bot's adapter tests need `discord.py-self` and run only in its own venv: `.venv-selfbot/bin/python -m unittest tests.test_selfbot_adapter -v` (they are skipped elsewhere); the rest of the self-bot logic is Discord-free and runs in either environment. The SVG rasterization test needs Cairo installed; without it, that single test reports the Cairo prerequisite while the rest pass.
