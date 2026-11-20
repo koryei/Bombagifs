@@ -24,6 +24,7 @@ from selfbot_logic import (
     decide,
     env_flag,
     format_results,
+    resolve_ui_mode,
 )
 
 
@@ -387,6 +388,22 @@ class BotStatsTests(unittest.TestCase):
 
     def test_uptime_never_negative(self) -> None:
         self.assertEqual(BotStats(started_at=50.0).uptime(now=10.0), "0s")
+
+
+class ResolveUiModeTests(unittest.TestCase):
+    def test_auto_follows_the_terminal(self) -> None:
+        for setting in (None, "", "auto", " AUTO "):
+            with self.subTest(setting=setting):
+                self.assertEqual(resolve_ui_mode(setting, is_tty=True), "pretty")
+                self.assertEqual(resolve_ui_mode(setting, is_tty=False), "json")
+
+    def test_explicit_modes_win_over_the_terminal(self) -> None:
+        self.assertEqual(resolve_ui_mode("pretty", is_tty=False), "pretty")
+        self.assertEqual(resolve_ui_mode("JSON", is_tty=True), "json")
+
+    def test_unknown_mode_names_the_variable(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "SELFBOT_UI"):
+            resolve_ui_mode("fancy", is_tty=True)
 
 
 if __name__ == "__main__":

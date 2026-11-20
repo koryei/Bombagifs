@@ -86,6 +86,16 @@ def env_flag(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def resolve_ui_mode(setting: str | None, *, is_tty: bool) -> Literal["pretty", "json"]:
+    """Pick the terminal mode from SELFBOT_UI: ``auto`` is pretty on a terminal and JSON otherwise."""
+    value = (setting or "auto").strip().lower() or "auto"
+    if value == "auto":
+        return "pretty" if is_tty else "json"
+    if value in ("pretty", "json"):
+        return value  # type: ignore[return-value]
+    raise RuntimeError("SELFBOT_UI must be auto, pretty, or json")
+
+
 def _write_private_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically write JSON (temp file + rename) readable only by the owner (mode 600)."""
     path.parent.mkdir(parents=True, exist_ok=True)
