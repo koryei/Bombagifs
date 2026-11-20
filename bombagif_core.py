@@ -613,9 +613,14 @@ async def read_bounded(response: aiohttp.ClientResponse, limit: int) -> bytes:
 async def download_attachment(session: aiohttp.ClientSession, attachment: MediaLike) -> bytes:
     """Download a validated image or video attachment within the hard input cap."""
     validate_attachment_metadata(attachment.filename, attachment.content_type or "", attachment.size)
+    return await download_url(session, attachment.url)
+
+
+async def download_url(session: aiohttp.ClientSession, url: str) -> bytes:
+    """Download a URL within the hard input cap and timeouts (callers validate the URL and type)."""
     timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=20)
     try:
-        async with session.get(attachment.url, timeout=timeout) as response:
+        async with session.get(url, timeout=timeout) as response:
             if response.status != 200:
                 raise UserFacingError("Discord could not provide that attachment. Please try again.")
             if response.content_length is not None and response.content_length > MAX_INPUT_BYTES:
@@ -895,9 +900,19 @@ async def convert_and_upload(
     """Validate, download, convert and upload one media item, returning its GIF link."""
     logger = logging.getLogger("bombagif")
     context = {"trace_id": trace_id, **(log_context or {})}
-    suffix = validate_attachment_metadata(source.filename, source.content_type, source.size)
     logger.info("Processing attachment", extra={**context, "attachment_name": source.filename})
-    data = await download_attachment(session, source)
+    if os.path.splitext(os.path.basename(source.filename).lower())[1] in ALLOWED_TYPES:
+        suffix = validate_attachment_metadata(source.filename, source.content_type, source.size)
+        data = await download_attachment(session, source)
+    else:
+        # Extension-less media (for example a Tenor embed): trust the bytes, not the name.
+        if source.size is not None and source.size > MAX_INPUT_BYTES:
+            raise UserFacingError("That file is too large. The maximum upload size is 15 MB.")
+        data = await download_url(session, source.url)
+        sniffed = sniff_suffix(data)
+        if sniffed is None:
+            raise InvalidImage("Use a WEBP, PNG, JPG, JPEG, AVIF, SVG, MP4, or WebM file.")
+        suffix = sniffed
     try:
         loop = asyncio.get_running_loop()
         if suffix in {".mp4", ".webm"}:
