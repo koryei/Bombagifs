@@ -46,6 +46,32 @@ class UploadLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Invalid token", output)
         self.assertNotIn(settings.zipline_token, output)
 
+    async def _rejected_log(self, status: int) -> str:
+        async def handler(_: web.Request) -> web.Response:
+            return web.json_response({"error": "nope"}, status=status)
+
+        settings = await self._serve(handler)
+        with self.assertLogs("bombagif.zipline", "WARNING") as logs:
+            with self.assertRaises(UploadFailure):
+                await self._upload(settings)
+        return "\n".join(logs.output)
+
+    async def test_auth_failures_point_at_the_token(self) -> None:
+        for status in (401, 403):
+            with self.subTest(status=status):
+                self.assertIn("ZIPLINE_TOKEN", await self._rejected_log(status))
+
+    async def test_not_found_points_at_the_url(self) -> None:
+        self.assertIn("ZIPLINE_URL", await self._rejected_log(404))
+
+    async def test_too_large_points_at_the_size_limit(self) -> None:
+        self.assertIn("size limit", await self._rejected_log(413))
+
+    async def test_other_statuses_get_no_hint(self) -> None:
+        out = await self._rejected_log(400)
+        self.assertNotIn("ZIPLINE_TOKEN", out)
+        self.assertNotIn("check", out)
+
     async def test_exhausted_retries_log_final_status(self) -> None:
         async def handler(_: web.Request) -> web.Response:
             return web.Response(status=503, headers={"Retry-After": "0"})

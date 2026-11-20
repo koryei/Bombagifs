@@ -699,6 +699,14 @@ def _extract_zipline_file_url(payload: Any, zipline_base_url: str) -> str | None
     return file_url
 
 
+_ZIPLINE_HINTS: Final[dict[int, str]] = {
+    401: ": check ZIPLINE_TOKEN (wrong, expired, or from another Zipline user)",
+    403: ": check ZIPLINE_TOKEN and that its user may upload",
+    404: ": check ZIPLINE_URL (it should be your Zipline base URL, not /api/upload)",
+    413: ": the GIF exceeds Zipline's (or your proxy's) size limit",
+}
+
+
 async def _error_snippet(response: aiohttp.ClientResponse, limit: int = 300) -> str:
     """Return a short, printable excerpt of an error body for diagnostics."""
     try:
@@ -747,9 +755,10 @@ async def upload_to_zipline(
                     raise UploadFailure("The file host is temporarily unavailable. Please try again later.")
                 if response.status < 200 or response.status >= 300:
                     logging.getLogger("bombagif.zipline").warning(
-                        "Zipline rejected the upload (status=%s, body=%r)",
+                        "Zipline rejected the upload (status=%s, body=%r)%s",
                         response.status,
                         await _error_snippet(response),
+                        _ZIPLINE_HINTS.get(response.status, ""),
                         extra={"trace_id": trace_id, "attempt": attempt + 1},
                     )
                     raise UploadFailure("The file host rejected the upload. Please try again later.")
