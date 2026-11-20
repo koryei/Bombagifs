@@ -7,6 +7,7 @@ from importlib.util import find_spec
 
 HAS_RICH = find_spec("rich") is not None
 
+import logging
 import re
 import time
 
@@ -141,6 +142,64 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("12 converted", text)
         self.assertIn("1 failed", text)
         self.assertIn("1h 02m 05s", text)
+
+
+@unittest.skipUnless(HAS_RICH, "needs rich (run in .venv-selfbot)")
+class PrettyLogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.console = console_ui.create_console(record=True, width=110, force_terminal=False, color_system=None)
+        self.handler = console_ui.PrettyLogHandler(self.console)
+        self.logger = logging.getLogger("bombagif.test_pretty")
+        self.logger.handlers = [self.handler]
+        self.logger.propagate = False
+        self.logger.setLevel(logging.DEBUG)
+        self.addCleanup(lambda: setattr(self.logger, "handlers", []))
+
+    def output(self) -> str:
+        return self.console.export_text()
+
+    def test_line_has_time_level_short_logger_and_message(self) -> None:
+        self.logger.info("Self-bot connected")
+        line = self.output().strip()
+        self.assertRegex(line, r"^\d\d:\d\d:\d\d\s+INFO\s+test_pretty\s+Self-bot connected$")
+
+    def test_levels_are_labelled(self) -> None:
+        self.logger.warning("w")
+        self.logger.error("e")
+        out = self.output()
+        self.assertIn("WARN", out)
+        self.assertIn("ERROR", out)
+
+    def test_known_extras_are_appended_and_trace_ids_shortened(self) -> None:
+        self.logger.info("Processing", extra={"user_id": 5, "trace_id": "abcdef1234567890", "attachment_name": "a.png"})
+        out = self.output()
+        self.assertIn("user_id=5", out)
+        self.assertIn("trace=abcdef12", out)
+        self.assertNotIn("abcdef1234567890", out)
+        self.assertIn("file=a.png", out)
+
+    def test_square_brackets_are_not_markup(self) -> None:
+        self.logger.info("weird [red]name[/red].png")
+        self.assertIn("weird [red]name[/red].png", self.output())
+
+    def test_exceptions_show_their_type_and_message(self) -> None:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            self.logger.exception("failed")
+        out = self.output()
+        self.assertIn("failed", out)
+        self.assertIn("ValueError", out)
+        self.assertIn("boom", out)
+
+    def test_configure_pretty_logging_replaces_root_handlers(self) -> None:
+        root = logging.getLogger()
+        saved, level = root.handlers[:], root.level
+        self.addCleanup(lambda: (root.handlers.__setitem__(slice(None), saved), root.setLevel(level)))
+        console_ui.configure_pretty_logging(self.console, "INFO")
+        self.assertEqual([type(h) for h in root.handlers], [console_ui.PrettyLogHandler])
+        logging.getLogger("bombagif.selfbot").info("hello pretty")
+        self.assertIn("hello pretty", self.output())
 
 
 if __name__ == "__main__":

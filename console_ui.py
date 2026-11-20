@@ -6,6 +6,7 @@ by rendering to text. Needs ``rich`` (see requirements-selfbot.txt).
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, Literal
@@ -18,6 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+from rich.traceback import Traceback
 
 from selfbot_logic import BotStats
 
@@ -213,3 +215,57 @@ def render_shutdown_panel(stats: BotStats, now: float | None = None) -> Panel:
         style="muted",
     )
     return Panel(line, border_style="brand", box=box.ROUNDED)
+
+
+_LEVEL_STYLES = {
+    "DEBUG": ("DEBUG", "muted"),
+    "INFO": ("INFO", "info"),
+    "WARNING": ("WARN", "warn"),
+    "ERROR": ("ERROR", "bad"),
+    "CRITICAL": ("FATAL", "bold white on red"),
+}
+# record attribute -> label shown in the line (same fields the JSON formatter emits)
+_EXTRA_LABELS = (
+    ("user_id", "user_id"),
+    ("guild_id", "guild_id"),
+    ("attachment_name", "file"),
+    ("attempt", "attempt"),
+    ("trace_id", "trace"),
+)
+
+
+class PrettyLogHandler(logging.Handler):
+    """Print log records as one coloured, human-readable line (``HH:MM:SS LEVEL logger message k=v``)."""
+
+    def __init__(self, console: Console) -> None:
+        super().__init__()
+        self.console = console
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            label, style = _LEVEL_STYLES.get(record.levelname, (record.levelname, "value"))
+            line = Text(no_wrap=False, overflow="fold")
+            line.append(time.strftime("%H:%M:%S", time.localtime(record.created)) + "  ", style="muted")
+            line.append(f"{label:<5}", style=style)
+            line.append("  ")
+            line.append(f"{record.name.removeprefix('bombagif.'):<10}", style="muted")
+            line.append("  ")
+            line.append(record.getMessage())  # Text.append never parses markup
+            for attribute, shown in _EXTRA_LABELS:
+                value = getattr(record, attribute, None)
+                if value is not None:
+                    value = str(value)[:8] if attribute == "trace_id" else value
+                    line.append(f"  {shown}={value}", style="muted")
+            self.console.print(line, highlight=False, soft_wrap=True)
+            if record.exc_info and record.exc_info[0] is not None:
+                self.console.print(Traceback.from_exception(*record.exc_info, max_frames=8, width=min(self.console.width, 110)))
+        except Exception:  # logging must never take the bot down
+            self.handleError(record)
+
+
+def configure_pretty_logging(console: Console, level: str) -> None:
+    """Route all logging to the console as pretty lines (replacing any existing handlers)."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(PrettyLogHandler(console))
+    root.setLevel(getattr(logging, level, logging.INFO))
