@@ -53,8 +53,17 @@ breaking Rich's erase maths), so the live panel is now 3 columns narrower, non-t
 `discord.*` INFO chatter is hidden in pretty mode (shown at LOG_LEVEL=DEBUG). Zipline 401/403/404/413 rejections log a hint.
 Verified with a pty + `pyte` screen emulator harness (kept out of the repo).
 
+## v3 clip scout (branch `v3-scout`, design only so far)
+
+Design: `docs/superpowers/specs/2026-11-19-clip-scout-design.md` (committed, **awaiting operator approval**). Static
+Discord-style PNG clips of funny out-of-context messages (deleted/edited ones too), posted in enabled chats with a
+who-was-clipped + `stop` notice. Judge = Mercury Decide screen + Mercury 3 final call behind a swappable interface
+(Inception's API ends 2026-12-28; fallback = any OpenAI-compatible model with json_schema, else heuristics that never
+auto-post). Scouting is off until the owner runs `!scout on` in a chat; `dry-run` ships before `on`. Stranger pings now
+get a help reply. Next step: operator approves/changes the doc -> writing-plans -> build in atomic commits.
+
 ## Status
 
-v2 implemented on branch `v2-selfbot` (core extraction, allowlist, rate limiter, decision rules, media
+v2, v2.1 (CAPTCHA guard, auto-accept, terminal UI) are merged to `main` and released (tags `v2`, `v2.1`). v2 was implemented on branch `v2-selfbot` (core extraction, allowlist, rate limiter, decision rules, media
 collection, reply copy, adapter, embeds, docs). Live smoke test with a real alt-account token is still manual.
 Known limit: a ping whose own bare link has not been embedded yet at message time gets the no-media reply.
