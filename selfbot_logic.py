@@ -11,6 +11,8 @@ import logging
 import os
 import tempfile
 import time
+from collections import defaultdict, deque
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger("bombagif.selfbot")
@@ -83,3 +85,29 @@ class AllowlistStore:
             except OSError:
                 pass
             raise
+
+
+class RateLimiter:
+    """Per-user sliding-window limiter: ``limit`` triggers per ``window`` seconds."""
+
+    def __init__(
+        self,
+        limit: int = 5,
+        window: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.limit = limit
+        self.window = window
+        self._clock = clock
+        self._hits: defaultdict[int, deque[float]] = defaultdict(deque)
+
+    def allow(self, user_id: int) -> bool:
+        """Record and allow a trigger, or return False without recording when over the limit."""
+        now = self._clock()
+        hits = self._hits[user_id]
+        while hits and now - hits[0] >= self.window:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return False
+        hits.append(now)
+        return True
