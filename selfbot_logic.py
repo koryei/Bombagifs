@@ -6,6 +6,7 @@ with plain fake objects. This module must never import ``discord``.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ import tempfile
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("bombagif.selfbot")
@@ -111,3 +113,67 @@ class RateLimiter:
             return False
         hits.append(now)
         return True
+
+
+class ChannelKind(enum.Enum):
+    """Where a message was sent."""
+
+    DM = "dm"
+    GROUP = "group"
+    GUILD = "guild"
+
+
+class Kind(enum.Enum):
+    """What the self-bot should do with a message."""
+
+    IGNORE = "ignore"
+    REGISTER = "register"
+    UNREGISTER = "unregister"
+    CONVERT = "convert"
+
+
+@dataclass(frozen=True)
+class Incoming:
+    """The facts about a message that trigger decisions depend on."""
+
+    author_id: int
+    author_is_bot: bool
+    is_own: bool
+    is_system: bool
+    channel: ChannelKind
+    mentions_me: bool
+    content: str
+    has_payload: bool  # attachments or embeds present
+    is_reply: bool
+
+
+@dataclass(frozen=True)
+class Decision:
+    """The chosen action; ``convert`` matters only for REGISTER (also convert this message)."""
+
+    kind: Kind
+    convert: bool = False
+
+
+_IGNORE = Decision(Kind.IGNORE)
+
+
+def decide(msg: Incoming, allowlist: AllowlistStore) -> Decision:
+    """Apply the trigger rules: consent comes from DMing the account first."""
+    if msg.is_own or msg.author_is_bot or msg.is_system:
+        return _IGNORE
+    is_member = msg.author_id in allowlist
+    wants_stop = msg.content.strip().lower() == "stop"
+
+    if msg.channel is ChannelKind.DM:
+        if not is_member:
+            return _IGNORE if wants_stop else Decision(Kind.REGISTER, msg.has_payload)
+        if wants_stop:
+            return Decision(Kind.UNREGISTER)
+        if msg.has_payload or msg.is_reply:
+            return Decision(Kind.CONVERT)
+        return _IGNORE
+
+    if msg.mentions_me and is_member:
+        return Decision(Kind.CONVERT)
+    return _IGNORE

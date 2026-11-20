@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from selfbot_logic import AllowlistStore, RateLimiter
+from selfbot_logic import AllowlistStore, ChannelKind, Decision, Incoming, Kind, RateLimiter, decide
 
 
 class AllowlistStoreTests(unittest.TestCase):
@@ -86,6 +86,67 @@ class RateLimiterTests(unittest.TestCase):
         self.assertFalse(self.limiter.allow(1))
         self.clock.now += 31  # 61 s after the first five hits; the blocked try must not count
         self.assertTrue(self.limiter.allow(1))
+
+
+def msg(**overrides: object) -> Incoming:
+    fields: dict[str, object] = dict(
+        author_id=7, author_is_bot=False, is_own=False, is_system=False,
+        channel=ChannelKind.GUILD, mentions_me=False, content="", has_payload=False, is_reply=False,
+    )
+    fields.update(overrides)
+    return Incoming(**fields)  # type: ignore[arg-type]
+
+
+class DecideTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.allowlist = AllowlistStore(Path(self._tmp.name) / "a.json")
+        self.allowlist.add(7)
+
+    def stranger(self, **overrides: object) -> Incoming:
+        return msg(author_id=99, **overrides)
+
+    def test_ignores_own_bot_and_system(self) -> None:
+        for flag in ("is_own", "author_is_bot", "is_system"):
+            with self.subTest(flag=flag):
+                decision = decide(msg(channel=ChannelKind.DM, has_payload=True, **{flag: True}), self.allowlist)
+                self.assertEqual(decision.kind, Kind.IGNORE)
+
+    def test_dm_stranger_registers(self) -> None:
+        self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, content="hi"), self.allowlist), Decision(Kind.REGISTER, False))
+
+    def test_dm_stranger_with_media_registers_and_converts(self) -> None:
+        self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, has_payload=True), self.allowlist), Decision(Kind.REGISTER, True))
+
+    def test_dm_stranger_stop_is_ignored(self) -> None:
+        self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, content="stop"), self.allowlist).kind, Kind.IGNORE)
+
+    def test_dm_member_stop_unregisters(self) -> None:
+        for content in ("stop", " STOP ", "Stop\n"):
+            with self.subTest(content=content):
+                self.assertEqual(decide(msg(channel=ChannelKind.DM, content=content), self.allowlist).kind, Kind.UNREGISTER)
+
+    def test_dm_member_media_converts(self) -> None:
+        self.assertEqual(decide(msg(channel=ChannelKind.DM, has_payload=True), self.allowlist).kind, Kind.CONVERT)
+
+    def test_dm_member_reply_converts(self) -> None:
+        self.assertEqual(decide(msg(channel=ChannelKind.DM, is_reply=True), self.allowlist).kind, Kind.CONVERT)
+
+    def test_dm_member_plain_text_ignored(self) -> None:
+        self.assertEqual(decide(msg(channel=ChannelKind.DM, content="hello"), self.allowlist).kind, Kind.IGNORE)
+
+    def test_guild_mention_from_member_converts(self) -> None:
+        self.assertEqual(decide(msg(mentions_me=True), self.allowlist).kind, Kind.CONVERT)
+
+    def test_guild_mention_from_stranger_ignored(self) -> None:
+        self.assertEqual(decide(self.stranger(mentions_me=True, has_payload=True), self.allowlist).kind, Kind.IGNORE)
+
+    def test_guild_media_without_mention_ignored(self) -> None:
+        self.assertEqual(decide(msg(has_payload=True), self.allowlist).kind, Kind.IGNORE)
+
+    def test_group_mention_from_member_converts(self) -> None:
+        self.assertEqual(decide(msg(channel=ChannelKind.GROUP, mentions_me=True), self.allowlist).kind, Kind.CONVERT)
 
 
 if __name__ == "__main__":
