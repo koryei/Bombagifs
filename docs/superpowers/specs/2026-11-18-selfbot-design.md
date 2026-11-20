@@ -1,6 +1,6 @@
 # Bombagif self-bot — design
 
-Status: awaiting approval. Size: a project (several independent commits, one new runtime).
+Status: approved; implemented as v2 (v1 = the `/gif` app, v3 = the autonomous clip scout). Size: a project (several independent commits, one new runtime).
 
 ## Intent
 
@@ -91,9 +91,12 @@ Inputs: message author id/bot flag, whether it is the self-bot's own message, ch
 
 1. Attachments on the triggering message.
 2. Attachments on the message it replies to (`message.reference`, fetched if not cached).
-3. (Commit 4) Image/video embeds on either message: `embed.type` `image`/`gifv`/`video`, using the
-   embed's media URL (Tenor `gifv` is MP4), plus linked image URLs in content. Remote fetches go
-   through the same bounded downloader with an https-only, size-capped check.
+3. Image/GIF/video embeds on either message (a bare image link, Tenor), only when the message has no
+   attachments. Only Discord's own proxy URLs (`proxy_url` on `discordapp.net`/`discordapp.com`) are
+   fetched, never the embed's original host, so a message cannot point the bot at arbitrary or internal
+   addresses. Plain link previews are not triggers. Known limit: Discord adds embeds to a message
+   a moment after it is sent, so a ping that itself contains a bare link may arrive before its embed;
+   replying to the message that contains the link works.
 
 Capped at `MAX_GIF_BATCH` (5) per trigger; extras are dropped with a note in the reply.
 Unsupported types are skipped; if nothing usable remains, a one-line "no supported image or video
