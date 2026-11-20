@@ -14,6 +14,7 @@ from typing import Any, Literal
 from rich import box
 from rich.columns import Columns
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
+from rich.live import Live
 from rich.measure import Measurement
 from rich.panel import Panel
 from rich.table import Table
@@ -269,3 +270,28 @@ def configure_pretty_logging(console: Console, level: str) -> None:
     root.handlers.clear()
     root.addHandler(PrettyLogHandler(console))
     root.setLevel(getattr(logging, level, logging.INFO))
+
+
+class TerminalUi:
+    """Owns the boot banner and the live status panel; safe to call ``show_boot`` on every reconnect."""
+
+    def __init__(self, console: Console, dashboard: Dashboard) -> None:
+        self.console = console
+        self.dashboard = dashboard
+        self._live: Live | None = None
+
+    def show_boot(self, info: dict[str, str]) -> None:
+        """Print the banner and start the live panel (only the first time)."""
+        if self._live is not None:
+            return
+        self.console.print(render_boot_banner(info))
+        self._live = Live(self.dashboard, console=self.console, refresh_per_second=4, transient=True)
+        self._live.start()
+
+    def stop(self, stats: BotStats) -> None:
+        """Stop the live panel and print the session summary (does nothing if never started)."""
+        if self._live is None:
+            return
+        self._live.stop()
+        self._live = None
+        self.console.print(render_shutdown_panel(stats))

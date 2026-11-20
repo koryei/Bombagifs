@@ -202,5 +202,36 @@ class PrettyLogTests(unittest.TestCase):
         self.assertIn("hello pretty", self.output())
 
 
+@unittest.skipUnless(HAS_RICH, "needs rich (run in .venv-selfbot)")
+class TerminalUiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.console = console_ui.create_console(record=True, width=100, force_terminal=True, color_system=None)
+        self.stats = BotStats(started_at=0.0)
+        dashboard = console_ui.Dashboard(self.stats, lambda: "online", lambda: 2)
+        self.ui = console_ui.TerminalUi(self.console, dashboard)
+        self.addCleanup(self.ui.stop, self.stats)
+
+    def test_show_boot_prints_the_banner_once(self) -> None:
+        info = {"account": "Bombaclat#0001"}
+        self.ui.show_boot(info)
+        self.ui.show_boot(info)
+        text = self.console.export_text()
+        self.assertEqual(text.count("Bombagif self-bot is online"), 1)
+        self.assertIn("Bombaclat#0001", text)
+
+    def test_stop_prints_the_shutdown_summary_and_is_idempotent(self) -> None:
+        self.stats.conversions_ok = 3
+        self.ui.show_boot({"account": "x"})
+        self.ui.stop(self.stats)
+        self.ui.stop(self.stats)
+        text = self.console.export_text()
+        self.assertEqual(text.count("signed off"), 1)
+        self.assertIn("3 converted", text)
+
+    def test_stop_without_boot_prints_nothing(self) -> None:
+        self.ui.stop(self.stats)
+        self.assertNotIn("signed off", self.console.export_text())
+
+
 if __name__ == "__main__":
     unittest.main()
