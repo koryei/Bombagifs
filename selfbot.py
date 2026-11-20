@@ -20,7 +20,16 @@ import discord
 from dotenv import load_dotenv
 
 from bombagif_core import DOWNLOAD_TIMEOUT, Settings, configure_logging, read_settings
-from selfbot_logic import AllowlistStore, RateLimiter
+from selfbot_logic import (
+    STOP_CONFIRMATION,
+    WELCOME_TEXT,
+    AllowlistStore,
+    ChannelKind,
+    Incoming,
+    Kind,
+    RateLimiter,
+    decide,
+)
 
 
 class SelfBot(discord.Client):
@@ -57,6 +66,47 @@ class SelfBot(discord.Client):
 
     async def on_ready(self) -> None:
         self.logger.info("Self-bot connected", extra={"user_id": self.user.id if self.user else None})
+
+    def _incoming(self, message: discord.Message) -> Incoming:
+        """Summarize a Discord message into the facts the decision rules use."""
+        if isinstance(message.channel, discord.DMChannel):
+            channel = ChannelKind.DM
+        elif isinstance(message.channel, discord.GroupChannel):
+            channel = ChannelKind.GROUP
+        else:
+            channel = ChannelKind.GUILD
+        me = self.user
+        # Only a direct user mention counts; @everyone/@here and role pings never trigger.
+        mentions_me = me is not None and any(user.id == me.id for user in message.mentions)
+        return Incoming(
+            author_id=message.author.id,
+            author_is_bot=bool(message.author.bot),
+            is_own=me is not None and message.author.id == me.id,
+            is_system=message.is_system(),
+            channel=channel,
+            mentions_me=mentions_me,
+            content=message.content or "",
+            has_payload=bool(message.attachments or message.embeds),
+            is_reply=message.reference is not None,
+        )
+
+    async def _reply(self, message: discord.Message, text: str) -> None:
+        """Reply once to a message without pinging anyone."""
+        await message.reply(
+            text,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Apply the consent and trigger rules to every message the account can see."""
+        decision = decide(self._incoming(message), self.allowlist)
+        if decision.kind is Kind.REGISTER:
+            self.allowlist.add(message.author.id)
+            await self._reply(message, WELCOME_TEXT)
+        elif decision.kind is Kind.UNREGISTER:
+            self.allowlist.remove(message.author.id)
+            await self._reply(message, STOP_CONFIRMATION)
 
     async def close(self) -> None:
         """Close HTTP resources and drain image work before disconnecting."""
