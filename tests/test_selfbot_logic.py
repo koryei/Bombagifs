@@ -6,8 +6,9 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from selfbot_logic import AllowlistStore, ChannelKind, Decision, Incoming, Kind, RateLimiter, decide
+from selfbot_logic import AllowlistStore, ChannelKind, Decision, Incoming, Kind, RateLimiter, collect_media, decide
 
 
 class AllowlistStoreTests(unittest.TestCase):
@@ -147,6 +148,49 @@ class DecideTests(unittest.TestCase):
 
     def test_group_mention_from_member_converts(self) -> None:
         self.assertEqual(decide(msg(channel=ChannelKind.GROUP, mentions_me=True), self.allowlist).kind, Kind.CONVERT)
+
+
+def att(name: str) -> SimpleNamespace:
+    return SimpleNamespace(filename=name, url=f"https://cdn.discordapp.com/{name}", size=10, content_type=None)
+
+
+def fake_message(*names: str) -> SimpleNamespace:
+    return SimpleNamespace(attachments=[att(n) for n in names], embeds=[])
+
+
+class CollectMediaTests(unittest.TestCase):
+    def test_own_attachments_win_over_referenced(self) -> None:
+        collected = collect_media(fake_message("mine.png"), fake_message("theirs.png"))
+        self.assertEqual([s.filename for s in collected.sources], ["mine.png"])
+
+    def test_falls_back_to_referenced(self) -> None:
+        collected = collect_media(fake_message(), fake_message("theirs.png"))
+        self.assertEqual([s.filename for s in collected.sources], ["theirs.png"])
+
+    def test_unsupported_files_dropped_silently(self) -> None:
+        collected = collect_media(fake_message("notes.txt", "a.png"))
+        self.assertEqual([s.filename for s in collected.sources], ["a.png"])
+        self.assertEqual(collected.skipped, 0)
+
+    def test_unsupported_own_files_fall_back_to_referenced(self) -> None:
+        collected = collect_media(fake_message("notes.txt"), fake_message("theirs.webp"))
+        self.assertEqual([s.filename for s in collected.sources], ["theirs.webp"])
+
+    def test_caps_at_limit_and_counts_skipped(self) -> None:
+        collected = collect_media(fake_message(*[f"{i}.png" for i in range(7)]))
+        self.assertEqual(len(collected.sources), 5)
+        self.assertEqual(collected.skipped, 2)
+
+    def test_no_media_returns_empty(self) -> None:
+        collected = collect_media(fake_message())
+        self.assertEqual((collected.sources, collected.skipped), ([], 0))
+
+    def test_referenced_none_is_fine(self) -> None:
+        self.assertEqual(collect_media(fake_message("a.mp4"), None).sources[0].filename, "a.mp4")
+
+    def test_sources_carry_attachment_fields(self) -> None:
+        source = collect_media(fake_message("a.png")).sources[0]
+        self.assertEqual((source.url, source.size), ("https://cdn.discordapp.com/a.png", 10))
 
 
 if __name__ == "__main__":

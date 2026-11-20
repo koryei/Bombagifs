@@ -16,6 +16,9 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from bombagif_core import ALLOWED_TYPES, MAX_GIF_BATCH, MediaSource
 
 logger = logging.getLogger("bombagif.selfbot")
 
@@ -177,3 +180,35 @@ def decide(msg: Incoming, allowlist: AllowlistStore) -> Decision:
     if msg.mentions_me and is_member:
         return Decision(Kind.CONVERT)
     return _IGNORE
+
+
+@dataclass(frozen=True)
+class Collected:
+    """Media to convert plus how many supported items were dropped by the batch cap."""
+
+    sources: list[MediaSource]
+    skipped: int
+
+
+def _supported_attachments(message: Any) -> list[MediaSource]:
+    found: list[MediaSource] = []
+    for attachment in getattr(message, "attachments", None) or ():
+        suffix = os.path.splitext(attachment.filename.lower())[1]
+        if suffix in ALLOWED_TYPES:
+            found.append(
+                MediaSource(
+                    filename=attachment.filename,
+                    url=attachment.url,
+                    size=attachment.size,
+                    content_type=attachment.content_type,
+                )
+            )
+    return found
+
+
+def collect_media(message: Any, referenced: Any | None = None, limit: int = MAX_GIF_BATCH) -> Collected:
+    """Pick media from the triggering message, else from the message it replies to."""
+    found = _supported_attachments(message)
+    if not found and referenced is not None:
+        found = _supported_attachments(referenced)
+    return Collected(sources=found[:limit], skipped=max(0, len(found) - limit))

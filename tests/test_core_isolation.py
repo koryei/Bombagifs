@@ -23,6 +23,9 @@ class CoreIsolationTests(unittest.TestCase):
     def test_core_does_not_import_discord(self) -> None:
         self.assertFalse(self._imports_discord("bombagif_core"))
 
+    def test_selfbot_logic_does_not_import_discord(self) -> None:
+        self.assertFalse(self._imports_discord("selfbot_logic"))
+
 
 if __name__ == "__main__":
     unittest.main()
