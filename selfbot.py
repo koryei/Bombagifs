@@ -9,6 +9,8 @@ WARNING: automating a user account violates Discord's Terms of Service. Use an a
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import logging
 import os
 import platform
@@ -17,6 +19,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -33,9 +36,13 @@ from bombagif_core import (
     UserFacingError,
     configure_logging,
     convert_and_upload,
+    download_url,
     read_settings,
 )
-from scout import ScoutRuntime
+from clip_assets import asset_url_allowed, build_card, custom_emoji_url, mentioned_ids, twemoji_url
+from clip_render import collect_asset_keys, render_clip
+from scout import ClipPlan, Scout, ScoutRuntime, format_clip_notice
+from scout_judge import build_judge_chain
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
     NO_MEDIA_TEXT,
@@ -78,6 +85,8 @@ class SelfBot(discord.Client):
         self.stats = BotStats()
         self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
         self.scout = scout  # None unless the clip scout is configured
+        self._scout_task: asyncio.Task[None] | None = None
+        self._clip_message_ids: set[int] = set()  # clips we posted, so a reply of `stop` to one can be recognised
         self._booted = False
         self.auto_accept_friends = auto_accept_friends
         self.friend_accept_delay = 3.0  # seconds between accepts, so a burst never looks automated
@@ -95,6 +104,7 @@ class SelfBot(discord.Client):
         timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)
         connector = aiohttp.TCPConnector(limit=32, ttl_dns_cache=300)
         self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        self._start_scout()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -212,6 +222,26 @@ class SelfBot(discord.Client):
                 extra={"user_id": message.author.id, "guild_id": message.guild.id if message.guild else None},
             )
 
+    def _start_scout(self) -> None:
+        """Build the judge chain and start the scout loop (needs the HTTP session)."""
+        runtime = self._scouting()
+        if runtime is None or self.http_session is None:
+            return
+        runtime.judge = build_judge_chain(runtime.cfg, self.http_session)
+        runtime.scout = Scout(
+            runtime.cfg,
+            runtime.buffer,
+            runtime.judge,
+            runtime.optout,
+            runtime.ledger,
+            self._post_clip,
+            stats=self.stats,
+            paused=lambda: self.captcha_guard.blocked,
+            blocklist=runtime.blocklist,
+        )
+        self._clip_message_ids |= runtime.ledger.recent_posted_ids()
+        self._scout_task = asyncio.create_task(runtime.scout.run(), name="clip-scout")
+
     # clip scout: gateway events feed the in-memory buffer ---------------------------------------------------------
 
     def _scouting(self) -> ScoutRuntime | None:
@@ -257,6 +287,119 @@ class SelfBot(discord.Client):
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         self._count_reaction(payload, False)
+
+    # clip scout: rendering and posting ----------------------------------------------------------------------------
+
+    async def _fetch_asset(self, url: str) -> bytes | None:
+        """Download an avatar or emoji image from an allowed host; any failure just means "no image"."""
+        if self.http_session is None or not asset_url_allowed(url):
+            return None
+        try:
+            return await download_url(self.http_session, url)
+        except Exception:
+            self.logger.debug("asset fetch failed", exc_info=True)
+            return None
+
+    async def _fetch_emoji(self, unicode_keys: set[str], custom_ids: set[str]) -> dict[str, bytes]:
+        """Fetch emoji images: custom ones from Discord, unicode ones from the pinned Twemoji host (cached on disk)."""
+        runtime = self.scout
+        cache = runtime.emoji_cache if runtime is not None else None
+        found: dict[str, bytes] = {}
+
+        async def unicode(key: str) -> None:
+            cached = cache / f"{key}.png" if cache is not None else None
+            if cached is not None:
+                with contextlib.suppress(OSError):
+                    found[key] = cached.read_bytes()
+                    return
+            data = await self._fetch_asset(twemoji_url(key))
+            if data is None:
+                return
+            found[key] = data
+            if cached is not None:
+                with contextlib.suppress(OSError):
+                    cached.parent.mkdir(parents=True, exist_ok=True)
+                    cached.write_bytes(data)
+
+        async def custom(emoji_id: str) -> None:
+            data = await self._fetch_asset(custom_emoji_url(emoji_id))
+            if data is not None:
+                found[f"custom:{emoji_id}"] = data
+
+        await asyncio.gather(
+            *(unicode(key) for key in unicode_keys), *(custom(i) for i in custom_ids), return_exceptions=True
+        )
+        return found
+
+    def _mention_names(self, plan: ClipPlan) -> dict[int, str]:
+        names = {m.author_id: m.author_name for m in plan.messages}
+        resolved: dict[int, str] = {}
+        for user_id in mentioned_ids(m.original for m in plan.messages):
+            if user_id in names:
+                resolved[user_id] = names[user_id]
+                continue
+            user = self.get_user(user_id)
+            shown = getattr(user, "display_name", None) or getattr(user, "name", None)
+            if shown:
+                resolved[user_id] = str(shown)
+        return resolved
+
+    async def _send_clip(self, plan: ClipPlan, channel: Any, png: bytes, notice: str, runtime: ScoutRuntime) -> Any:
+        none = discord.AllowedMentions.none()
+
+        def attachment() -> discord.File:
+            return discord.File(io.BytesIO(png), filename="clip.png")
+
+        if plan.to_owner:
+            owner_id = runtime.cfg.owner_id
+            if owner_id is None:
+                self.logger.warning("Deleted clip not sent: SELFBOT_OWNER_ID is not set")
+                return None
+            owner = self.get_user(owner_id) or await self.fetch_user(owner_id)
+            link = channel.get_partial_message(plan.messages[0].id).jump_url
+            return await owner.send(content=f"{notice}\n{link}", file=attachment(), allowed_mentions=none)
+        live = [m for m in plan.messages if not m.deleted]
+        if live:
+            try:
+                return await channel.get_partial_message(live[-1].id).reply(
+                    content=notice, file=attachment(), mention_author=False, allowed_mentions=none
+                )
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as exc:
+                if isinstance(exc, discord.CaptchaRequired) or exc.code not in (10008, 50035):
+                    raise
+        return await channel.send(content=notice, file=attachment(), allowed_mentions=none)
+
+    async def _post_clip(self, plan: ClipPlan) -> int | None:
+        """Render a planned clip and post it (or DM it to the owner). Returns the sent message id, or ``None``."""
+        runtime = self._scouting()
+        if runtime is None or self.http_session is None:
+            return None
+        try:
+            channel = self.get_channel(plan.chat_id) or await self.fetch_channel(plan.chat_id)
+            authors = {m.author_id: m.avatar_url for m in plan.messages}
+            fetched = await asyncio.gather(*(self._fetch_asset(url) for url in authors.values()), return_exceptions=True)
+            avatars = {uid: data for uid, data in zip(authors, fetched) if isinstance(data, bytes)}
+            card = build_card(plan.messages, avatars, self._mention_names(plan))
+            emoji = await self._fetch_emoji(*collect_asset_keys(card))
+            loop = asyncio.get_running_loop()
+            png = await loop.run_in_executor(
+                self.executor, partial(render_clip, card, scale=2, theme=runtime.cfg.theme, emoji=emoji)
+            )
+            notice = format_clip_notice([m.author_name for m in plan.messages], plan.deleted)
+            sent = await self._send_clip(plan, channel, png, notice, runtime)
+        except discord.CaptchaRequired:
+            self._trip_captcha("posting a clip")
+            return None
+        except Exception:
+            self.logger.exception("Could not post a clip")
+            return None
+        if sent is None:
+            return None
+        if not plan.to_owner:
+            self._clip_message_ids.add(sent.id)
+        return int(sent.id)
 
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
@@ -376,6 +519,10 @@ class SelfBot(discord.Client):
             return
         self._shutdown = True
         try:
+            if self._scout_task is not None:
+                self._scout_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._scout_task
             if self.http_session is not None and not self.http_session.closed:
                 await self.http_session.close()
             loop = asyncio.get_running_loop()

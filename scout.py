@@ -13,6 +13,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from scout_buffer import ScoutBuffer, ScoutMessage
@@ -50,6 +51,7 @@ class ScoutRuntime:
     optout: OptOutStore
     ledger: ClipLedger
     blocklist: frozenset[str] = frozenset()
+    emoji_cache: Path | None = None
     judge: JudgeChain | None = None
     scout: "Scout | None" = field(default=None, repr=False)
 

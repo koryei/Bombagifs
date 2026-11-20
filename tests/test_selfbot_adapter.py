@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from bombagif_core import Settings, UserFacingError
-from scout import ScoutRuntime
+from scout import ClipPlan, ScoutRuntime, format_clip_notice
+from scout_buffer import ScoutMessage, Version
+from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
 from scout_config import read_scout_config
 from scout_stores import ClipLedger, OptOutStore, ScoutChatStore
@@ -723,6 +725,204 @@ class SelfBotScoutBufferTests(_SelfBotCase):
                 with self.assertLogs("bombagif.selfbot", "ERROR"):
                     await self.bot.on_message(message)
         message.reply.assert_awaited_once()  # the v2 conversion flow still ran
+
+
+def smsg(id: int, text: str, *, author: int = 10, name: str | None = None, deleted: bool = False, color: int | None = None) -> ScoutMessage:
+    return ScoutMessage(
+        id=id, chat_id=CHAT, author_id=author, author_name=name or f"user{author}",
+        avatar_url=f"https://cdn.discordapp.com/avatars/{author}/h.png?size=128", color=color, tag=None,
+        created_at=NOW + id, versions=[Version(text, NOW + id)], deleted_at=NOW + 99 if deleted else None,
+    )
+
+
+def plan_of(*messages: ScoutMessage, to_owner: bool = False) -> ClipPlan:
+    verdict = Verdict(True, 0, len(messages) - 1, 9.0, True, (), "funny", {"funny": 0.9}, "fake")
+    return ClipPlan(CHAT, tuple(messages), verdict, any(m.deleted for m in messages), to_owner)
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotPostTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        import aiohttp
+        from selfbot import SelfBot
+
+        self.runtime = make_runtime(Path(self._tmp.name), mode="on", SELFBOT_OWNER_ID="4242")
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.bot.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.bot.close)
+        self.partial = Mock()
+        self.partial.reply = AsyncMock(return_value=SimpleNamespace(id=900))
+        self.partial.jump_url = "https://discord.com/channels/1/777/10"
+        self.channel = Mock()
+        self.channel.get_partial_message = Mock(return_value=self.partial)
+        self.channel.send = AsyncMock(return_value=SimpleNamespace(id=901))
+        self.bot.get_channel = Mock(return_value=self.channel)  # type: ignore[method-assign]
+        self.render = patch("selfbot.render_clip", return_value=b"\x89PNG fake").start()
+        self.addCleanup(patch.stopall)
+        self.fetch = patch.object(self.bot, "_fetch_asset", AsyncMock(return_value=None)).start()
+
+    async def test_post_replies_to_last_non_deleted_message_with_png_and_notice(self) -> None:
+        plan = plan_of(smsg(10, "first line"), smsg(11, "second line", deleted=True))
+        self.assertEqual(await self.bot._post_clip(plan), 900)
+        self.channel.get_partial_message.assert_called_once_with(10)
+        kwargs = self.partial.reply.await_args.kwargs
+        self.assertEqual(kwargs["content"], format_clip_notice(["user10", "user10"], True))
+        self.assertIs(kwargs["mention_author"], False)
+        self.assertEqual(kwargs["file"].filename, "clip.png")
+        self.channel.send.assert_not_awaited()
+
+    async def test_clip_is_rendered_at_scale_2_with_the_configured_theme(self) -> None:
+        await self.bot._post_clip(plan_of(smsg(10, "a line")))
+        self.assertEqual(self.render.call_args.kwargs["scale"], 2)
+        self.assertEqual(self.render.call_args.kwargs["theme"], self.runtime.cfg.theme)
+
+    async def test_all_deleted_uses_channel_send(self) -> None:
+        plan = plan_of(smsg(10, "gone", deleted=True), smsg(11, "also gone", deleted=True))
+        self.assertEqual(await self.bot._post_clip(plan), 901)
+        self.partial.reply.assert_not_awaited()
+        self.assertEqual(self.channel.send.await_args.kwargs["file"].filename, "clip.png")
+
+    async def test_unknown_message_error_falls_back_to_send(self) -> None:
+        self.partial.reply.side_effect = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "Unknown Message")
+        self.assertEqual(await self.bot._post_clip(plan_of(smsg(10, "a line"))), 901)
+        self.channel.send.assert_awaited_once()
+
+    async def test_invalid_form_body_reply_error_also_falls_back_to_send(self) -> None:
+        error = discord.HTTPException(SimpleNamespace(status=400, reason="Bad Request"), {"code": 50035, "message": "Invalid Form Body"})
+        self.partial.reply.side_effect = error
+        self.assertEqual(await self.bot._post_clip(plan_of(smsg(10, "a line"))), 901)
+
+    async def test_other_http_errors_return_none_and_are_logged(self) -> None:
+        self.partial.reply.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.assertIsNone(await self.bot._post_clip(plan_of(smsg(10, "a line"))))
+        self.channel.send.assert_not_awaited()
+
+    async def test_notice_names_all_authors_without_mentions(self) -> None:
+        plan = plan_of(smsg(10, "setup", author=10, name="Pranit"), smsg(11, "punch", author=20, name="<@5>"))
+        await self.bot._post_clip(plan)
+        kwargs = self.partial.reply.await_args.kwargs
+        self.assertIn("**Pranit**", kwargs["content"])
+        self.assertNotIn("<@5>", kwargs["content"])
+        allowed = kwargs["allowed_mentions"]
+        self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
+
+    async def test_to_owner_dms_the_owner_only(self) -> None:
+        owner = Mock()
+        owner.send = AsyncMock(return_value=SimpleNamespace(id=777000))
+        self.bot.get_user = Mock(return_value=owner)  # type: ignore[method-assign]
+        plan = plan_of(smsg(10, "regretted", deleted=True), to_owner=True)
+        self.assertEqual(await self.bot._post_clip(plan), 777000)
+        self.bot.get_user.assert_called_once_with(4242)
+        kwargs = owner.send.await_args.kwargs
+        self.assertIn("https://discord.com/channels/1/777/10", kwargs["content"])
+        self.assertIn("**user10**", kwargs["content"])
+        self.partial.reply.assert_not_awaited()
+        self.channel.send.assert_not_awaited()
+        self.assertNotIn(777000, self.bot._clip_message_ids)  # owner DMs are not public clips
+
+    async def test_to_owner_without_an_owner_id_returns_none(self) -> None:
+        self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "on"})
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            self.assertIsNone(await self.bot._post_clip(plan_of(smsg(10, "x", deleted=True), to_owner=True)))
+
+    async def test_captcha_while_posting_trips_the_guard_and_returns_none(self) -> None:
+        self.partial.reply.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.assertIsNone(await self.bot._post_clip(plan_of(smsg(10, "a line"))))
+        self.assertEqual(self.bot.captcha_guard.reason, "posting a clip")
+
+    async def test_asset_fetch_failure_still_posts(self) -> None:
+        self.fetch.side_effect = RuntimeError("cdn down")
+        self.assertEqual(await self.bot._post_clip(plan_of(smsg(10, "a line 😂 <:pog:123>"))), 900)
+
+    async def test_avatars_and_emoji_are_prefetched_and_passed_to_the_renderer(self) -> None:
+        async def fake_fetch(url: str) -> bytes | None:
+            return b"emoji-bytes" if "emojis" in url or "twemoji" in url else b"avatar-bytes"
+
+        self.fetch.side_effect = fake_fetch
+        await self.bot._post_clip(plan_of(smsg(10, "hi 😂 <:pog:123>")))
+        card = self.render.call_args.args[0]
+        self.assertEqual(card.messages[0].author.avatar, b"avatar-bytes")
+        emoji = self.render.call_args.kwargs["emoji"]
+        self.assertEqual(emoji, {"1f602": b"emoji-bytes", "custom:123": b"emoji-bytes"})
+
+    async def test_mentions_are_resolved_from_authors_and_the_user_cache(self) -> None:
+        self.bot.get_user = Mock(side_effect=lambda uid: SimpleNamespace(display_name="Cached") if uid == 3 else None)  # type: ignore[method-assign]
+        await self.bot._post_clip(plan_of(smsg(10, "yo <@20> and <@3> and <@9>", author=10), smsg(11, "hey", author=20, name="Quill")))
+        self.assertEqual(dict(self.render.call_args.args[0].mentions), {20: "Quill", 3: "Cached"})
+
+    async def test_successful_posts_remember_the_message_id(self) -> None:
+        await self.bot._post_clip(plan_of(smsg(10, "a line")))
+        self.assertIn(900, self.bot._clip_message_ids)
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotAssetFetchTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        import aiohttp
+        from selfbot import SelfBot
+
+        self.runtime = make_runtime(Path(self._tmp.name), mode="on")
+        self.runtime.emoji_cache = Path(self._tmp.name) / "emoji-cache"
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.bot.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.bot.close)
+        self.download = patch("selfbot.download_url", new_callable=AsyncMock, return_value=b"image-bytes").start()
+        self.addCleanup(patch.stopall)
+
+    async def test_asset_hosts_are_restricted(self) -> None:
+        self.assertIsNone(await self.bot._fetch_asset("https://evil.example/a.png"))
+        self.assertIsNone(await self.bot._fetch_asset("http://127.0.0.1/a.png"))
+        self.download.assert_not_awaited()
+        self.assertEqual(await self.bot._fetch_asset("https://cdn.discordapp.com/avatars/1/h.png"), b"image-bytes")
+        self.download.assert_awaited_once()
+
+    async def test_download_errors_become_none(self) -> None:
+        self.download.side_effect = RuntimeError("boom")
+        self.assertIsNone(await self.bot._fetch_asset("https://cdn.discordapp.com/avatars/1/h.png"))
+
+    async def test_unicode_emoji_are_cached_on_disk(self) -> None:
+        emoji = await self.bot._fetch_emoji({"1f602"}, {"123"})
+        self.assertEqual(emoji, {"1f602": b"image-bytes", "custom:123": b"image-bytes"})
+        self.assertEqual((self.runtime.emoji_cache / "1f602.png").read_bytes(), b"image-bytes")
+        self.download.reset_mock()
+        again = await self.bot._fetch_emoji({"1f602"}, set())
+        self.assertEqual(again, {"1f602": b"image-bytes"})
+        self.download.assert_not_awaited()  # served from the cache
+
+    async def test_cache_failures_do_not_lose_the_image(self) -> None:
+        self.runtime.emoji_cache = Path("/nonexistent-root/emoji-cache")
+        self.assertEqual(await self.bot._fetch_emoji({"1f602"}, set()), {"1f602": b"image-bytes"})
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotScoutLifecycleTests(_SelfBotCase):
+    async def test_scout_starts_with_the_client_and_stops_on_close(self) -> None:
+        from selfbot import SelfBot
+
+        runtime = make_runtime(Path(self._tmp.name), mode="dry-run")
+        runtime.ledger.append(__import__("scout_stores").ClipRecord(1.0, 1, (1,), (2,), "posted", 9.0, {}, False, "x", posted_message_id=4242))
+        bot = SelfBot(SETTINGS, self.allowlist, scout=runtime)
+        await bot.setup_hook()
+        self.assertIsNotNone(runtime.scout)
+        self.assertEqual(runtime.judge.status, "heuristic (no LLM)")
+        self.assertIn(4242, bot._clip_message_ids)
+        task = bot._scout_task
+        self.assertFalse(task.done())
+        await bot.close()
+        self.assertTrue(task.cancelled() or task.done())
+
+    async def test_no_scout_task_when_scouting_is_off(self) -> None:
+        from selfbot import SelfBot
+
+        for scout in (None, make_runtime(Path(self._tmp.name), mode="off")):
+            bot = SelfBot(SETTINGS, self.allowlist, scout=scout)
+            await bot.setup_hook()
+            self.assertIsNone(bot._scout_task)
+            await bot.close()
 
 
 if __name__ == "__main__":
