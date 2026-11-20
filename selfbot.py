@@ -41,7 +41,7 @@ from bombagif_core import (
 )
 from clip_assets import asset_url_allowed, build_card, custom_emoji_url, mentioned_ids, twemoji_url
 from clip_render import collect_asset_keys, render_clip
-from scout import ClipPlan, Scout, ScoutRuntime, format_clip_notice
+from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, Scout, ScoutRuntime, format_clip_notice, parse_scout_command
 from scout_judge import build_judge_chain
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
@@ -405,8 +405,103 @@ class SelfBot(discord.Client):
             self._clip_message_ids.add(sent.id)
         return int(sent.id)
 
+    # clip scout: owner commands -----------------------------------------------------------------------------------
+
+    async def _owner_say(self, message: discord.Message, text: str) -> None:
+        """Answer the owner privately (a DM), so commands never add noise to a public chat."""
+        try:
+            await message.author.send(text)
+        except discord.CaptchaRequired:
+            self._trip_captcha("answering a !scout command")
+        except discord.HTTPException:
+            self.logger.warning("Could not DM the owner a !scout answer", exc_info=True)
+
+    async def _announce(self, channel: Any, text: str) -> None:
+        try:
+            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except discord.CaptchaRequired:
+            self._trip_captcha("posting a scout announcement")
+        except discord.HTTPException:
+            self.logger.exception("Could not post a scout announcement")
+
+    async def _handle_scout_command(self, message: discord.Message) -> bool:
+        """Run a ``!scout`` command if the owner sent one. Returns True when the message was a command (consumed)."""
+        runtime = self.scout
+        command = parse_scout_command(message.content or "")
+        if runtime is None or command is None or runtime.cfg.owner_id is None or message.author.id != runtime.cfg.owner_id:
+            return False
+        if self.captcha_guard.blocked:
+            return True
+        cfg = runtime.cfg
+        if cfg.mode == "off":
+            await self._owner_say(message, "Scouting is off. Set SELFBOT_SCOUT_MODE=dry-run or on and restart me.")
+            return True
+        in_dm = isinstance(message.channel, discord.DMChannel)
+        if command.action in ("status", "list"):
+            await self._owner_say(message, self._scout_report(command.action, message.channel.id, runtime))
+            return True
+
+        # on / off: this chat, or (from the owner's DM only) a chat id
+        if command.chat_id is not None:
+            if not in_dm:
+                await self._owner_say(message, "Use the chat id form in a DM with me, or run the command inside the chat.")
+                return True
+            channel = self.get_channel(command.chat_id)
+            if channel is None:
+                await self._owner_say(message, "I can't see that chat.")
+                return True
+        elif in_dm:
+            await self._owner_say(message, "Run this inside the chat you want, or send `!scout on <chat id>` here.")
+            return True
+        else:
+            channel = message.channel
+        chat_id = int(channel.id)
+        if command.action == "on":
+            if isinstance(channel, discord.DMChannel):
+                await self._owner_say(message, "I never scout 1:1 DMs.")
+            elif not chat_is_scoutable(channel):
+                await self._owner_say(message, "I never scout NSFW channels.")
+            elif not runtime.chats.enable(chat_id, str(getattr(channel, "name", None) or chat_id)):
+                await self._owner_say(message, "Scouting is already on in that chat.")
+            elif cfg.mode == "dry-run":
+                await self._owner_say(message, "Scouting is on in that chat (dry-run: nothing will be posted, so no announcement).")
+            else:
+                await self._announce(channel, ANNOUNCE_ON)
+            return True
+        # off
+        if runtime.chats.is_seeded(chat_id):
+            await self._owner_say(message, "That chat is enabled by SELFBOT_SCOUT_CHATS; remove it from there and restart.")
+        elif not runtime.chats.disable(chat_id):
+            await self._owner_say(message, "Scouting wasn't on in that chat.")
+        else:
+            runtime.buffer.drop_chat(chat_id)
+            if cfg.mode == "dry-run":
+                await self._owner_say(message, "Scouting is off in that chat.")
+            else:
+                await self._announce(channel, ANNOUNCE_OFF)
+        return True
+
+    def _scout_report(self, action: str, chat_id: int, runtime: ScoutRuntime) -> str:
+        chats = runtime.chats.list()
+        if action == "list":
+            if not chats:
+                return "No chats are enabled for scouting."
+            return "Scouting is on in:\n" + "\n".join(f"• {name or '(unnamed)'} ({cid})" for cid, name in chats)
+        judge = runtime.judge.status if runtime.judge is not None else "not started"
+        here = "on" if runtime.chats.enabled(chat_id) else "off"
+        return (
+            f"Scout mode: {runtime.cfg.mode}. Judge: {judge}. Chats enabled: {len(chats)}. This chat: {here}. "
+            f"Clips posted: {self.stats.clips_posted}, dry-run hits: {self.stats.dry_run_hits}."
+        )
+
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
+        try:
+            if await self._handle_scout_command(message):
+                return
+        except Exception:
+            self.logger.exception("Unhandled !scout command error")
+            return
         try:
             self._buffer_message(message)
         except Exception:

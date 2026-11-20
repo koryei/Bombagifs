@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from bombagif_core import Settings, UserFacingError
-from scout import ClipPlan, ScoutRuntime, format_clip_notice
+from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, ScoutRuntime, format_clip_notice
 from scout_buffer import ScoutMessage, Version
 from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
@@ -1051,6 +1051,202 @@ class SelfBotOptOutTests(_SelfBotCase):
         await bot.on_message(message)
         self.assertIn(222, self.allowlist)
         self.assertEqual(message.reply.await_args.args[0], START_CONFIRMATION)
+
+
+OWNER = 4242
+OTHER_CHAT = 888
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotScoutCommandTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        from selfbot import SelfBot
+
+        self.make_bot = lambda runtime: SelfBot(SETTINGS, self.allowlist, scout=runtime)
+        self.runtime = make_runtime(Path(self._tmp.name), mode="on", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
+        self.bot = self.make_bot(self.runtime)
+        self.addAsyncCleanup(self.bot.close)
+
+    def command(self, text: str, *, author: int = OWNER, channel_cls: type | None = None, channel_id: int = CHAT, **kwargs):
+        message = make_message(author_id=author, channel_cls=channel_cls or discord.TextChannel, content=text, channel_id=channel_id, **kwargs)
+        message.author.send = AsyncMock()
+        message.channel.send = AsyncMock()
+        message.channel.name = "friends"
+        return message
+
+    @staticmethod
+    def sent(mock: AsyncMock) -> str:
+        call = mock.await_args
+        return call.args[0] if call.args else call.kwargs["content"]
+
+    def private_replies(self, message) -> list[str]:
+        return [call.args[0] if call.args else call.kwargs.get("content", "") for call in message.author.send.await_args_list]
+
+    async def test_only_the_owner_can_use_scout_commands(self) -> None:
+        message = self.command("!scout on", author=99)
+        await self.bot.on_message(message)
+        self.assertFalse(self.runtime.chats.enabled(CHAT))
+        message.channel.send.assert_not_awaited()
+        message.author.send.assert_not_awaited()
+        message.reply.assert_not_awaited()
+
+    async def test_scout_on_enables_the_chat_and_posts_the_announcement(self) -> None:
+        message = self.command("!scout on")
+        await self.bot.on_message(message)
+        self.assertTrue(self.runtime.chats.enabled(CHAT))
+        self.assertEqual(self.runtime.chats.list(), [(CHAT, "friends")])
+        message.channel.send.assert_awaited_once()
+        self.assertEqual(self.sent(message.channel.send), ANNOUNCE_ON)
+        allowed = message.channel.send.await_args.kwargs["allowed_mentions"]
+        self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
+
+    async def test_scout_on_in_dry_run_confirms_privately_without_announcing(self) -> None:
+        runtime = make_runtime(Path(self._tmp.name) / "dry", mode="dry-run", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
+        bot = self.make_bot(runtime)
+        self.addAsyncCleanup(bot.close)
+        message = self.command("!scout on")
+        await bot.on_message(message)
+        self.assertTrue(runtime.chats.enabled(CHAT))
+        message.channel.send.assert_not_awaited()
+        self.assertIn("dry-run", self.private_replies(message)[0].lower())
+
+    async def test_scout_off_disables_drops_the_buffer_and_announces(self) -> None:
+        self.runtime.chats.enable(CHAT, "friends")
+        self.runtime.buffer.add(smsg(1, "a line to forget"))
+        message = self.command("!scout off")
+        await self.bot.on_message(message)
+        self.assertFalse(self.runtime.chats.enabled(CHAT))
+        self.assertEqual(self.runtime.buffer.chats(), [])
+        self.assertEqual(self.sent(message.channel.send), ANNOUNCE_OFF)
+
+    async def test_scout_off_for_a_chat_that_was_not_on_says_so_privately(self) -> None:
+        message = self.command("!scout off")
+        await self.bot.on_message(message)
+        message.channel.send.assert_not_awaited()
+        self.assertIn("wasn't on", self.private_replies(message)[0])
+
+    async def test_scout_on_twice_does_not_announce_twice(self) -> None:
+        await self.bot.on_message(self.command("!scout on"))
+        again = self.command("!scout on")
+        await self.bot.on_message(again)
+        again.channel.send.assert_not_awaited()
+        self.assertIn("already on", self.private_replies(again)[0])
+
+    async def test_seeded_chat_cannot_be_disabled(self) -> None:
+        runtime = make_runtime(Path(self._tmp.name) / "seeded", mode="on", enabled=(), SELFBOT_OWNER_ID=str(OWNER), SELFBOT_SCOUT_CHATS=str(CHAT))
+        bot = self.make_bot(runtime)
+        self.addAsyncCleanup(bot.close)
+        message = self.command("!scout off")
+        await bot.on_message(message)
+        self.assertTrue(runtime.chats.enabled(CHAT))
+        message.channel.send.assert_not_awaited()
+        self.assertIn("SELFBOT_SCOUT_CHATS", self.private_replies(message)[0])
+
+    async def test_scout_on_is_refused_in_nsfw_and_in_dm_without_an_id(self) -> None:
+        nsfw = self.command("!scout on", nsfw=True)
+        await self.bot.on_message(nsfw)
+        self.assertFalse(self.runtime.chats.enabled(CHAT))
+        self.assertIn("NSFW", self.private_replies(nsfw)[0])
+        dm = self.command("!scout on", channel_cls=discord.DMChannel)
+        await self.bot.on_message(dm)
+        self.assertIn("chat id", self.private_replies(dm)[0].lower())
+        self.assertEqual(self.runtime.chats.list(), [])
+        nsfw.channel.send.assert_not_awaited()
+
+    async def test_scout_on_with_a_chat_id_from_the_owner_dm(self) -> None:
+        target = Mock(spec=discord.TextChannel)
+        target.id = OTHER_CHAT
+        target.name = "other"
+        target.is_nsfw = Mock(return_value=False)
+        target.send = AsyncMock()
+        self.bot.get_channel = Mock(return_value=target)  # type: ignore[method-assign]
+        message = self.command(f"!scout on {OTHER_CHAT}", channel_cls=discord.DMChannel, channel_id=5)
+        await self.bot.on_message(message)
+        self.assertTrue(self.runtime.chats.enabled(OTHER_CHAT))
+        target.send.assert_awaited_once()
+        self.assertEqual(self.sent(target.send), ANNOUNCE_ON)
+        self.assertEqual(self.runtime.chats.list(), [(OTHER_CHAT, "other")])
+
+    async def test_chat_id_form_is_refused_outside_the_owner_dm_and_for_unknown_or_unscoutable_chats(self) -> None:
+        public = self.command(f"!scout on {OTHER_CHAT}")
+        await self.bot.on_message(public)
+        self.assertFalse(self.runtime.chats.enabled(OTHER_CHAT))
+        self.assertIn("DM", self.private_replies(public)[0])
+        self.bot.get_channel = Mock(return_value=None)  # type: ignore[method-assign]
+        unknown = self.command(f"!scout on {OTHER_CHAT}", channel_cls=discord.DMChannel, channel_id=5)
+        await self.bot.on_message(unknown)
+        self.assertIn("can't see", self.private_replies(unknown)[0])
+        one_to_one = Mock(spec=discord.DMChannel)
+        one_to_one.id = OTHER_CHAT
+        self.bot.get_channel = Mock(return_value=one_to_one)  # type: ignore[method-assign]
+        refused = self.command(f"!scout on {OTHER_CHAT}", channel_cls=discord.DMChannel, channel_id=5)
+        await self.bot.on_message(refused)
+        self.assertFalse(self.runtime.chats.enabled(OTHER_CHAT))
+        self.assertIn("1:1", self.private_replies(refused)[0])
+
+    async def test_scout_status_and_list_reply_to_the_owner_only(self) -> None:
+        from scout_judge import build_judge_chain
+
+        self.runtime.judge = build_judge_chain(self.runtime.cfg, None)  # type: ignore[arg-type]
+        self.runtime.chats.enable(CHAT, "friends")
+        status = self.command("!scout status")
+        await self.bot.on_message(status)
+        text = self.private_replies(status)[0]
+        for needle in ("on", "heuristic", "1", "this chat"):
+            self.assertIn(needle, text.lower())
+        listing = self.command("!scout list")
+        await self.bot.on_message(listing)
+        self.assertIn("friends", self.private_replies(listing)[0])
+        self.assertIn(str(CHAT), self.private_replies(listing)[0])
+        for message in (status, listing):
+            message.channel.send.assert_not_awaited()
+            message.reply.assert_not_awaited()
+
+    async def test_scout_list_when_nothing_is_enabled(self) -> None:
+        message = self.command("!scout list")
+        await self.bot.on_message(message)
+        self.assertIn("no chats", self.private_replies(message)[0].lower())
+
+    async def test_scout_command_when_mode_is_off_is_refused(self) -> None:
+        runtime = make_runtime(Path(self._tmp.name) / "off", mode="off", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
+        bot = self.make_bot(runtime)
+        self.addAsyncCleanup(bot.close)
+        message = self.command("!scout on")
+        await bot.on_message(message)
+        self.assertFalse(runtime.chats.enabled(CHAT))
+        message.channel.send.assert_not_awaited()
+        self.assertIn("SELFBOT_SCOUT_MODE", self.private_replies(message)[0])
+
+    async def test_owner_without_a_configured_scout_is_ignored(self) -> None:
+        bot = self.make_bot(None)
+        self.addAsyncCleanup(bot.close)
+        message = self.command("!scout on")
+        await bot.on_message(message)
+        message.author.send.assert_not_awaited()
+        message.channel.send.assert_not_awaited()
+
+    async def test_command_messages_are_not_buffered_or_converted(self) -> None:
+        self.runtime.chats.enable(CHAT)
+        self.allowlist.add(OWNER)
+        message = self.command("!scout status", attachments=[attachment()], mentions=[self.me])
+        with patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK) as convert:
+            await self.bot.on_message(message)
+        convert.assert_not_awaited()
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_a_captcha_while_announcing_trips_the_guard(self) -> None:
+        message = self.command("!scout on")
+        message.channel.send.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertTrue(self.bot.captcha_guard.blocked)
+
+    async def test_closed_owner_dms_do_not_break_the_command(self) -> None:
+        message = self.command("!scout status")
+        message.author.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages to this user")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            await self.bot.on_message(message)
 
 
 if __name__ == "__main__":
