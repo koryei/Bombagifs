@@ -235,3 +235,15 @@ If a reviewer wants it smaller, split into two commits at the `REGISTER/UNREGIST
 - [ ] **Step 1:** `python3 -m unittest discover -s tests -v` (system) → all pass; `.venv-selfbot/bin/python -m unittest discover -s tests -v` → all pass (core/logic/adapter tests; app tests that need `discord.py` are expected to fail to import there — if so, confirm they are the only failures and that they pass in system python, and make `tests/test_bombagif.py` skip itself with a clear reason when `discord.py-self` is the installed distribution).
 - [ ] **Step 2:** `bash tests/test_installer.sh` → pass. `git status` clean; `git log --oneline` shows one commit per task.
 - [ ] **Step 3:** Live smoke test is **manual** (needs a real alt-account token): DM the account, receive the welcome; DM an image → link; ping with an image in a GC → link; reply-ping on someone's image → link; a non-DMed account pings → silence. Report this as untested by automation.
+
+
+---
+
+## v2.1 addendum (captcha guard and friends)
+
+Built after live testing showed (a) an opaque "file host rejected the upload" with no logged status and (b) no
+protection against Discord CAPTCHAs on a self-bot. Commits, in order: Zipline failure logging (status + snippet) ->
+`CaptchaGuard` (discord-free, persisted, mode 600, fail-safe on unreadable state) -> adapter wiring (replies,
+reference fetches, handler-level catch; paused guard ignores all messages including registration) -> `env_flag`
+-> opt-in `SELFBOT_AUTO_ACCEPT_FRIENDS` (pending sweep on ready capped at 10, 3 s pacing, serialized, guard-aware)
+-> docs. Not solved on purpose: no CAPTCHA solver (`captcha_handler` hook) - deeper ToS territory.

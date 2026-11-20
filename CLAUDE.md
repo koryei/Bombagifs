@@ -33,6 +33,12 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
 - Embedded media is fetched only via Discord proxy URLs (SSRF-safe); bare links in a ping's own text are not fetched.
 - Small atomic commits; every commit keeps the suite green.
 
+## v2.1 (branch `v2.1-captcha-guard`)
+
+Zipline failures now log status + error snippet; `CaptchaGuard` (persisted in `data/captcha-blocked.json`) pauses all
+account actions on `discord.CaptchaRequired` until the file is deleted; opt-in `SELFBOT_AUTO_ACCEPT_FRIENDS` (paced,
+capped, guard-aware, never registers anyone).
+
 ## Status
 
 v2 implemented on branch `v2-selfbot` (core extraction, allowlist, rate limiter, decision rules, media
