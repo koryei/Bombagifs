@@ -25,6 +25,16 @@ class ReadSettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SELFBOT_TOKEN"):
                 read_settings("SELFBOT_TOKEN")
 
+    def test_an_explicit_env_mapping_overrides_the_process_environment(self) -> None:
+        with patch.dict(os.environ, {"SELFBOT_TOKEN": "from-os", **ZIPLINE}, clear=True):
+            settings = read_settings("SELFBOT_TOKEN", {"SELFBOT_TOKEN": "from-mapping", **ZIPLINE})
+        self.assertEqual(settings.discord_token, "from-mapping")
+
+    def test_an_explicit_env_mapping_does_not_read_the_process_environment(self) -> None:
+        with patch.dict(os.environ, {"SELFBOT_TOKEN": "from-os", **ZIPLINE}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "SELFBOT_TOKEN"):
+                read_settings("SELFBOT_TOKEN", {})
+
 
 if __name__ == "__main__":
     unittest.main()

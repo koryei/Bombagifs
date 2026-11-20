@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -823,18 +824,20 @@ async def upload_to_zipline(
     raise UploadFailure("The file host is unavailable. Please try again later.") from last_error
 
 
-def read_settings(token_env: str = "DISCORD_TOKEN") -> Settings:
+def read_settings(token_env: str = "DISCORD_TOKEN", env: Mapping[str, str] | None = None) -> Settings:
     """Read required credentials and validate the optional runtime settings.
 
     ``token_env`` names the Discord login token variable: ``DISCORD_TOKEN`` for the app,
-    ``SELFBOT_TOKEN`` for the self-bot. Neither program requires the other's token.
+    ``SELFBOT_TOKEN`` for the self-bot. Neither program requires the other's token. ``env`` defaults to the
+    process environment (a mapping can be passed instead, which keeps tests and wiring free of global state).
     """
-    discord_token = os.getenv(token_env, "").strip()
-    zipline_token = os.getenv("ZIPLINE_TOKEN", "").strip()
+    environ = os.environ if env is None else env
+    discord_token = environ.get(token_env, "").strip()
+    zipline_token = environ.get("ZIPLINE_TOKEN", "").strip()
     if not discord_token or not zipline_token:
         raise RuntimeError(f"{token_env} and ZIPLINE_TOKEN must be configured")
 
-    zipline_url = os.getenv("ZIPLINE_URL", "").strip().rstrip("/")
+    zipline_url = environ.get("ZIPLINE_URL", "").strip().rstrip("/")
     if not zipline_url:
         raise RuntimeError("ZIPLINE_URL must be set to your own Zipline instance URL")
     parsed_url = urlparse(zipline_url)
@@ -849,7 +852,7 @@ def read_settings(token_env: str = "DISCORD_TOKEN") -> Settings:
         raise RuntimeError("ZIPLINE_URL must be an HTTPS base URL without embedded credentials or query parameters")
 
     guilds: set[int] = set()
-    for guild_value in os.getenv("ALLOWED_GUILDS", "").split(","):
+    for guild_value in environ.get("ALLOWED_GUILDS", "").split(","):
         guild_value = guild_value.strip()
         if guild_value:
             try:
@@ -860,12 +863,12 @@ def read_settings(token_env: str = "DISCORD_TOKEN") -> Settings:
             except ValueError as exc:
                 raise RuntimeError("ALLOWED_GUILDS must contain comma-separated numeric IDs") from exc
 
-    background_text = os.getenv("GIF_BACKGROUND", "#FFFFFF").strip()
+    background_text = environ.get("GIF_BACKGROUND", "#FFFFFF").strip()
     if not re.fullmatch(r"#[0-9A-Fa-f]{6}", background_text):
         raise RuntimeError("GIF_BACKGROUND must be a six-digit hex color such as #FFFFFF")
     background = tuple(int(background_text[index : index + 2], 16) for index in (1, 3, 5))
 
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = environ.get("LOG_LEVEL", "INFO").upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise RuntimeError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
 
