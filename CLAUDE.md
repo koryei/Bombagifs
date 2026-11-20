@@ -46,6 +46,13 @@ capped, guard-aware, never registers anyone).
 Pretty terminal for the self-bot: `BotStats` counters + activity feed in `selfbot_logic.py`, `console_ui.py`
 renderers, `SELFBOT_UI=auto|pretty|json` (auto = pretty only on a TTY, JSON otherwise so systemd/Docker are unchanged).
 
+## v2.2.1 (branch `v2.2.1-ui-fixes`, stacked on v2.2)
+
+Found in the first live run: Ctrl-C left a stray panel border (a full-width live panel makes the terminal's `^C` echo wrap,
+breaking Rich's erase maths), so the live panel is now 3 columns narrower, non-transient, and its last frame stays.
+`discord.*` INFO chatter is hidden in pretty mode (shown at LOG_LEVEL=DEBUG). Zipline 401/403/404/413 rejections log a hint.
+Verified with a pty + `pyte` screen emulator harness (kept out of the repo).
+
 ## Status
 
 v2 implemented on branch `v2-selfbot` (core extraction, allowlist, rate limiter, decision rules, media
