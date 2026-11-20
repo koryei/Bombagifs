@@ -104,14 +104,26 @@ class SelfBot(discord.Client):
 
     async def _reply(self, message: discord.Message, text: str) -> None:
         """Reply once to a message without pinging anyone."""
-        await message.reply(
-            text,
-            mention_author=False,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        try:
+            await message.reply(
+                text,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            self.logger.exception(
+                "Could not send self-bot reply",
+                extra={"user_id": message.author.id, "guild_id": message.guild.id if message.guild else None},
+            )
 
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
+        try:
+            await self._handle_message(message)
+        except Exception:
+            self.logger.exception("Unhandled self-bot message error", extra={"user_id": message.author.id})
+
+    async def _handle_message(self, message: discord.Message) -> None:
         decision = decide(self._incoming(message), self.allowlist)
         if decision.kind is Kind.REGISTER:
             self.allowlist.add(message.author.id)

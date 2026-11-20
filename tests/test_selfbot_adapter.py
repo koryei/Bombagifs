@@ -211,6 +211,26 @@ class SelfBotConvertTests(_SelfBotCase):
         self.assertEqual(self.convert.await_count, 5)
         self.assertTrue(message.reply.await_args.args[0].endswith("(+2 skipped, max 5 per message)"))
 
+    async def test_reply_failure_does_not_raise(self) -> None:
+        response = SimpleNamespace(status=403, reason="Forbidden")
+        message = make_message(attachments=[attachment()])
+        message.reply.side_effect = discord.Forbidden(response, "no")
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+
+    async def test_logs_do_not_contain_token(self) -> None:
+        self.convert.side_effect = RuntimeError("boom")
+        message = make_message(attachments=[attachment()])
+        with self.assertLogs(level="DEBUG") as logs:
+            await self.bot.on_message(message)
+        self.assertNotIn(SETTINGS.discord_token, "\n".join(logs.output))
+
+    async def test_unexpected_handler_bug_does_not_raise(self) -> None:
+        message = make_message(content="hi")
+        with patch.object(type(self.bot), "_incoming", side_effect=ValueError("bug")):
+            with self.assertLogs("bombagif.selfbot", "ERROR"):
+                await self.bot.on_message(message)
+
     async def test_reply_target_media_is_converted(self) -> None:
         target = SimpleNamespace(attachments=[attachment("theirs.png")], embeds=[])
         message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], reference=SimpleNamespace(message_id=42, resolved=target, cached_message=None))
