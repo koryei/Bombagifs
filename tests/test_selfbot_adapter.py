@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import tempfile
 import unittest
 from importlib import metadata
@@ -10,7 +11,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from bombagif_core import Settings, UserFacingError
-from selfbot_logic import NO_MEDIA_TEXT, STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore, CaptchaGuard, RateLimiter
+from scout import ScoutRuntime
+from scout_buffer import ScoutBuffer
+from scout_config import read_scout_config
+from scout_stores import ClipLedger, OptOutStore, ScoutChatStore
+from selfbot_logic import NO_MEDIA_TEXT, STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore, RateLimiter
 
 try:
     metadata.version("discord.py-self")
@@ -74,20 +79,40 @@ def make_message(
     mentions: list | None = None,
     reference: object | None = None,
     mention_everyone: bool = False,
+    channel_id: int = 777,
+    nsfw: bool = False,
+    stickers: list | None = None,
+    message_id: int = 555,
+    created: float = 1_700_000_000.0,
+    author_extra: dict | None = None,
 ) -> SimpleNamespace:
     channel = Mock(spec=channel_cls or discord.DMChannel)
     channel.typing = Mock(return_value=_Typing())
+    channel.id = channel_id
+    channel.is_nsfw = Mock(return_value=nsfw)
+    author = SimpleNamespace(
+        id=author_id,
+        bot=False,
+        name=f"user{author_id}",
+        display_avatar=SimpleNamespace(
+            with_size=lambda size: SimpleNamespace(url=f"https://cdn.discordapp.com/avatars/{author_id}/h.png?size={size}")
+        ),
+    )
+    for key, value in (author_extra or {}).items():
+        setattr(author, key, value)
     message = SimpleNamespace(
-        id=555,
-        author=SimpleNamespace(id=author_id, bot=False, name=f"user{author_id}"),
+        id=message_id,
+        author=author,
         channel=channel,
         guild=None,
         content=content,
         attachments=attachments or [],
         embeds=embeds or [],
+        stickers=stickers or [],
         mentions=mentions or [],
         mention_everyone=mention_everyone,
         reference=reference,
+        created_at=datetime.datetime.fromtimestamp(created, datetime.timezone.utc),
         is_system=lambda: False,
         reply=AsyncMock(),
     )
@@ -520,6 +545,184 @@ class SelfBotTerminalUiTests(_SelfBotCase):
     async def test_close_stops_the_ui(self) -> None:
         await self.bot.close()
         self.ui.stop.assert_called_once_with(self.bot.stats)
+
+
+CHAT = 777
+NOW = 1_700_000_000.0
+
+
+def make_runtime(root: Path, *, mode: str = "dry-run", enabled: tuple[int, ...] = (CHAT,), **env: str) -> ScoutRuntime:
+    cfg = read_scout_config({"SELFBOT_SCOUT_MODE": mode, **env})
+    optout = OptOutStore(root / "optout.json")
+    chats = ScoutChatStore(root / "scout-chats.json", seed=cfg.seed_chats)
+    for chat_id in enabled:
+        chats.enable(chat_id, "test chat")
+    buffer = ScoutBuffer(
+        max_age_s=10**9, max_per_chat=100, is_opted_out=lambda user_id: user_id in optout, clock=lambda: NOW + 10
+    )
+    return ScoutRuntime(cfg=cfg, buffer=buffer, chats=chats, optout=optout, ledger=ClipLedger(root / "clips.jsonl"))
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotScoutBufferTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        from selfbot import SelfBot
+
+        self.runtime = make_runtime(Path(self._tmp.name))
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.addAsyncCleanup(self.bot.close)
+
+    def buffered(self, message_id: int = 555, chat: int = CHAT):
+        return self.runtime.buffer.get(chat, message_id)
+
+    async def test_enabled_guild_message_is_buffered_with_display_fields(self) -> None:
+        color = SimpleNamespace(value=0xFF9632)
+        tag = SimpleNamespace(tag="DNA", identity_enabled=True)
+        message = make_message(
+            channel_cls=discord.TextChannel,
+            content="the better one was me",
+            author_extra={"display_name": "Pranit", "color": color, "primary_guild": tag},
+        )
+        await self.bot.on_message(message)
+        found = self.buffered()
+        self.assertIsNotNone(found)
+        self.assertEqual((found.author_id, found.author_name, found.original, found.eligible), (99, "Pranit", "the better one was me", True))
+        self.assertEqual((found.color, found.tag, found.chat_id, found.created_at), (0xFF9632, "DNA", CHAT, NOW))
+        self.assertEqual(found.avatar_url, "https://cdn.discordapp.com/avatars/99/h.png?size=128")
+
+    async def test_missing_display_fields_fall_back_safely(self) -> None:
+        message = make_message(channel_cls=discord.TextChannel, content="hello there")
+        await self.bot.on_message(message)
+        found = self.buffered()
+        self.assertEqual((found.author_name, found.color, found.tag), ("user99", None, None))
+
+    async def test_zero_colour_and_disabled_tag_mean_none(self) -> None:
+        message = make_message(
+            channel_cls=discord.TextChannel,
+            content="hello there",
+            author_extra={"color": SimpleNamespace(value=0), "primary_guild": SimpleNamespace(tag="X", identity_enabled=False)},
+        )
+        await self.bot.on_message(message)
+        found = self.buffered()
+        self.assertEqual((found.color, found.tag), (None, None))
+
+    async def test_disabled_chat_is_not_buffered(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="hello there", channel_id=123))
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_one_to_one_dm_is_never_buffered(self) -> None:
+        self.runtime.chats.enable(CHAT)
+        await self.bot.on_message(make_message(channel_cls=discord.DMChannel, content="hello there"))
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_nsfw_channel_is_never_buffered(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="hello there", nsfw=True))
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_group_dm_is_buffered_when_enabled(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.GroupChannel, content="hello there"))
+        self.assertIsNotNone(self.buffered())
+
+    async def test_attachment_url_sticker_and_command_messages_are_ineligible_placeholders(self) -> None:
+        cases = {
+            1: make_message(channel_cls=discord.TextChannel, content="look at this", attachments=[attachment()], message_id=1),
+            2: make_message(channel_cls=discord.TextChannel, content="see https://example.com", message_id=2),
+            3: make_message(channel_cls=discord.TextChannel, content="nice sticker", stickers=[object()], message_id=3),
+            4: make_message(channel_cls=discord.TextChannel, content="!scout on", message_id=4),
+            5: make_message(channel_cls=discord.TextChannel, content="ok", message_id=5),
+        }
+        for message in cases.values():
+            await self.bot.on_message(message)
+        self.assertEqual([self.buffered(i).eligible for i in cases], [False, False, False, False, False])
+        self.assertEqual(self.buffered(1).original, "")  # no text is kept for non-text messages
+
+    async def test_opted_out_author_is_not_buffered(self) -> None:
+        self.runtime.optout.add(99)
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="hello there"))
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_bot_and_own_messages_are_not_buffered(self) -> None:
+        bot_message = make_message(channel_cls=discord.TextChannel, content="beep boop here", message_id=1)
+        bot_message.author.bot = True
+        own = make_message(author_id=SELF_ID, channel_cls=discord.TextChannel, content="my own line", message_id=2)
+        await self.bot.on_message(bot_message)
+        await self.bot.on_message(own)
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_buffering_continues_while_the_captcha_guard_is_tripped(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.bot.captcha_guard.trip("test")
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="hello there"))
+        self.assertIsNotNone(self.buffered())
+
+    async def test_raw_edit_appends_version_from_payload_data_content(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="the real joke"))
+        await self.bot.on_raw_message_edit(SimpleNamespace(channel_id=CHAT, message_id=555, data={"content": "nothing here"}))
+        self.assertEqual([v.content for v in self.buffered().versions], ["the real joke", "nothing here"])
+        self.assertEqual(self.buffered().original, "the real joke")
+
+    async def test_raw_edit_without_content_is_ignored(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="the real joke"))
+        await self.bot.on_raw_message_edit(SimpleNamespace(channel_id=CHAT, message_id=555, data={"embeds": []}))
+        self.assertEqual(len(self.buffered().versions), 1)
+
+    async def test_raw_delete_marks_deleted_even_without_cached_message(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="oops wrong chat"))
+        await self.bot.on_raw_message_delete(SimpleNamespace(channel_id=CHAT, message_id=555, cached_message=None))
+        self.assertTrue(self.buffered().deleted)
+        self.assertEqual(self.buffered().original, "oops wrong chat")
+
+    async def test_bulk_delete_marks_all(self) -> None:
+        for i in (1, 2, 3):
+            await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content=f"line number {i}", message_id=i))
+        await self.bot.on_raw_bulk_message_delete(SimpleNamespace(channel_id=CHAT, message_ids={1, 3}, cached_messages=[]))
+        self.assertEqual([self.buffered(i).deleted for i in (1, 2, 3)], [True, False, True])
+
+    async def test_raw_reaction_laugh_emoji_counts(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="a funny line"))
+        payload = lambda emoji, user=5: SimpleNamespace(channel_id=CHAT, message_id=555, user_id=user, emoji=emoji)  # noqa: E731
+        await self.bot.on_raw_reaction_add(payload("😂"))
+        await self.bot.on_raw_reaction_add(payload("💀", user=6))
+        await self.bot.on_raw_reaction_add(payload("❤️"))
+        self.assertEqual(self.buffered().laugh_reactions, 2)
+        await self.bot.on_raw_reaction_remove(payload("😂"))
+        self.assertEqual(self.buffered().laugh_reactions, 1)
+
+    async def test_own_reactions_are_ignored(self) -> None:
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="a funny line"))
+        await self.bot.on_raw_reaction_add(SimpleNamespace(channel_id=CHAT, message_id=555, user_id=SELF_ID, emoji="😂"))
+        self.assertEqual(self.buffered().laugh_reactions, 0)
+
+    async def test_events_for_unbuffered_messages_are_ignored_without_error(self) -> None:
+        await self.bot.on_raw_message_edit(SimpleNamespace(channel_id=CHAT, message_id=404, data={"content": "x"}))
+        await self.bot.on_raw_message_delete(SimpleNamespace(channel_id=CHAT, message_id=404, cached_message=None))
+        await self.bot.on_raw_bulk_message_delete(SimpleNamespace(channel_id=9, message_ids={1}, cached_messages=[]))
+        await self.bot.on_raw_reaction_add(SimpleNamespace(channel_id=CHAT, message_id=404, user_id=5, emoji="😂"))
+        await self.bot.on_raw_reaction_remove(SimpleNamespace(channel_id=CHAT, message_id=404, user_id=5, emoji="😂"))
+        self.assertEqual(self.runtime.buffer.chats(), [])
+
+    async def test_scout_off_means_no_buffering_and_handlers_do_nothing(self) -> None:
+        from selfbot import SelfBot
+
+        for scout in (None, make_runtime(Path(self._tmp.name), mode="off")):
+            bot = SelfBot(SETTINGS, self.allowlist, scout=scout)
+            self.addAsyncCleanup(bot.close)
+            await bot.on_message(make_message(channel_cls=discord.TextChannel, content="hello there"))
+            await bot.on_raw_message_edit(SimpleNamespace(channel_id=CHAT, message_id=555, data={"content": "x"}))
+            await bot.on_raw_message_delete(SimpleNamespace(channel_id=CHAT, message_id=555, cached_message=None))
+            await bot.on_raw_reaction_add(SimpleNamespace(channel_id=CHAT, message_id=555, user_id=5, emoji="😂"))
+            if scout is not None:
+                self.assertEqual(scout.buffer.chats(), [])
+
+    async def test_a_buffering_failure_never_blocks_normal_handling(self) -> None:
+        self.allowlist.add(99)
+        message = make_message(channel_cls=discord.TextChannel, attachments=[attachment()], mentions=[self.me])
+        with patch.object(self.runtime.buffer, "add", side_effect=RuntimeError("boom")):
+            with patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK):
+                with self.assertLogs("bombagif.selfbot", "ERROR"):
+                    await self.bot.on_message(message)
+        message.reply.assert_awaited_once()  # the v2 conversion flow still ran
 
 
 if __name__ == "__main__":

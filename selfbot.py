@@ -35,6 +35,8 @@ from bombagif_core import (
     convert_and_upload,
     read_settings,
 )
+from scout import ScoutRuntime
+from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
     NO_MEDIA_TEXT,
     STOP_CONFIRMATION,
@@ -66,6 +68,7 @@ class SelfBot(discord.Client):
         captcha_guard: CaptchaGuard | None = None,
         auto_accept_friends: bool = False,
         ui: Any | None = None,
+        scout: ScoutRuntime | None = None,
     ) -> None:
         super().__init__()
         self.config = settings
@@ -74,6 +77,7 @@ class SelfBot(discord.Client):
         self.rate_limiter = rate_limiter or RateLimiter()
         self.stats = BotStats()
         self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
+        self.scout = scout  # None unless the clip scout is configured
         self._booted = False
         self.auto_accept_friends = auto_accept_friends
         self.friend_accept_delay = 3.0  # seconds between accepts, so a burst never looks automated
@@ -208,8 +212,58 @@ class SelfBot(discord.Client):
                 extra={"user_id": message.author.id, "guild_id": message.guild.id if message.guild else None},
             )
 
+    # clip scout: gateway events feed the in-memory buffer ---------------------------------------------------------
+
+    def _scouting(self) -> ScoutRuntime | None:
+        runtime = self.scout
+        return runtime if runtime is not None and runtime.cfg.mode != "off" else None
+
+    def _buffer_message(self, message: discord.Message) -> None:
+        """Remember a message for the scout (enabled guild/group chats only; never 1:1 DMs, NSFW, bots, or opt-outs)."""
+        runtime = self._scouting()
+        me = self.user
+        if runtime is None or message.author.bot or (me is not None and message.author.id == me.id):
+            return
+        channel = message.channel
+        if not chat_is_scoutable(channel) or not runtime.chats.enabled(channel.id):
+            return
+        runtime.buffer.add(to_scout_message(message, eligible=message_is_clippable(message)))
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        runtime = self._scouting()
+        content = payload.data.get("content") if runtime is not None else None
+        if isinstance(content, str):
+            runtime.buffer.edit(payload.channel_id, payload.message_id, content)  # type: ignore[union-attr]
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        runtime = self._scouting()
+        if runtime is not None:
+            runtime.buffer.delete(payload.channel_id, payload.message_id)
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        runtime = self._scouting()
+        if runtime is not None:
+            runtime.buffer.delete_many(payload.channel_id, list(payload.message_ids))
+
+    def _count_reaction(self, payload: discord.RawReactionActionEvent, added: bool) -> None:
+        runtime = self._scouting()
+        me = self.user
+        if runtime is None or (me is not None and payload.user_id == me.id):
+            return
+        runtime.buffer.react(payload.channel_id, payload.message_id, str(payload.emoji), added)
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        self._count_reaction(payload, True)
+
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        self._count_reaction(payload, False)
+
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
+        try:
+            self._buffer_message(message)
+        except Exception:
+            self.logger.exception("Could not buffer a message for the scout", extra={"user_id": message.author.id})
         if self.captcha_guard.blocked:
             return
         try:

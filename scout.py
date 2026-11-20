@@ -12,14 +12,14 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from scout_buffer import ScoutBuffer, ScoutMessage
 from scout_config import ScoutConfig
 from scout_judge import JudgeChain, Verdict, build_judge_window
 from scout_safety import check_window
-from scout_stores import ClipLedger, ClipRecord, OptOutStore
+from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
 from selfbot_logic import BotStats
 
 logger = logging.getLogger("bombagif.scout")
@@ -37,6 +37,21 @@ class ClipPlan:
     verdict: Verdict
     deleted: bool
     to_owner: bool
+
+
+@dataclass
+class ScoutRuntime:
+    """Everything the Discord adapter needs to feed and drive the scout. ``judge``/``scout`` are built once the
+    adapter has an HTTP session (see ``selfbot.SelfBot.setup_hook``)."""
+
+    cfg: ScoutConfig
+    buffer: ScoutBuffer
+    chats: ScoutChatStore
+    optout: OptOutStore
+    ledger: ClipLedger
+    blocklist: frozenset[str] = frozenset()
+    judge: JudgeChain | None = None
+    scout: "Scout | None" = field(default=None, repr=False)
 
 
 def _has_signal(run: list[ScoutMessage]) -> bool:
