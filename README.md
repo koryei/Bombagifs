@@ -150,6 +150,60 @@ The self-bot is run manually for now; the installer, Dockerfile, and compose fil
 needs FFmpeg and Cairo on the host for the same formats as the app. Embedded media is only ever fetched through
 Discord's own CDN/proxy URLs.
 
+## Clip scout (v3): catch the funny stuff
+
+A "Medal for chat". The self-bot can watch chats **you turn it on in**, spot a message (or a short run of messages)
+that is genuinely funny with no context, and post it back as a static Discord-style quote card that names who is in
+it. Deleted and edited messages are still clippable: the account keeps its own short-lived copy of recent messages.
+
+> **Think before you turn it on.**
+> - **Privacy:** while a chat is enabled its messages are sent (anonymised: `A`/`B` speaker labels, text only, no
+>   names, ids, or avatars) to a third-party model. The Inception API may train on submissions **unless** you turn off
+>   "Improve the model for everyone" in its API platform settings. Tell the people in the chat.
+> - **Discord's ToS** forbids automating a user account, and a bot that reads everything and posts uninvited is easier
+>   to flag than the converter. Use an alt account you can lose.
+> - Judging is imperfect. Always run **dry-run** first.
+
+**How it works.** Messages in enabled chats sit in an in-memory buffer (15 minutes, never written to disk). After a
+45 second reaction window each run of one person's messages is screened by **Mercury Decide** (cheap probabilities for
+"funny", "funny without context", "sensitive") and, if it passes, judged by **Mercury 3**, which picks the exact
+messages (up to 8 messages, 600 characters, 3 people) and must decline anything that needs context. Then local gates
+run that the model cannot override: no personal info, credentials, invites, links, `@everyone`, or blocklisted words;
+nobody who opted out; per-chat and per-person cooldowns; at most 4 clips an hour. Only then is the card posted.
+
+**Turn it on**
+1. Set `SELFBOT_OWNER_ID` (your own user id), `INCEPTION_API_KEY`, and `SELFBOT_SCOUT_MODE=dry-run` in `.env`
+   (see `.env.example` for every setting), then restart the self-bot.
+2. In a chat the account is in, type `!scout on` (only you can; other people's `!scout` is ignored). The account
+   announces it there: it is clipping funny messages, names whoever is in them, and `stop` opts out. In dry-run there is
+   no announcement, because nothing will be posted.
+3. Watch the terminal: candidates and scores appear in the feed (`dry-run: would clip Maple (funny 8.7)`) and
+   `data/clips.jsonl` records them without text. Adjust the bars, then switch to `SELFBOT_SCOUT_MODE=on`.
+4. `!scout off` stops it in that chat (and drops its buffer); `!scout status` / `!scout list` answer you by DM. From a
+   DM with the account you can also use `!scout on <chat id>` / `!scout off <chat id>`. It never scouts 1:1 DMs or
+   NSFW channels.
+
+**What a clip looks like.** One card per clip, posted as a reply to the last message in it (or a plain message if
+they were all deleted), with ``🎬 Clipped **Name** — DM me `stop` to opt out of clips.`` Names are shown, never
+mentioned. Deleted messages get a stricter bar (and `SELFBOT_CLIP_DELETED=owner` sends those to you privately instead).
+
+**Opting out.** `stop` in a DM with the account (anyone can, even if they never talked to it), or a reply of `stop` to
+a clip, stops clipping that person. A DM `stop` also turns their conversions off; `start` in a DM turns everything back
+on. Opted-out people's messages are never stored or sent to the model.
+
+**Strangers who ping the account** (without DMing it first) now get one short help message (at most once an hour per
+person and once per ten minutes per chat), not silence.
+
+**When Inception shuts down (2026-12-28).** The judge is a chain: Inception, then any OpenAI-compatible model you
+configure (`SCOUT_LLM_BASE_URL`, `SCOUT_LLM_API_KEY`, `SCOUT_LLM_MODEL`; it must support JSON-schema output), then
+"heuristic", which only shows candidates in the terminal and never posts. A provider that is gone (401/402/404/410) or
+failing five times in a row is dropped automatically, with one line in the terminal. To switch, set the `SCOUT_LLM_*`
+variables (or `SCOUT_JUDGE=openai`) and restart.
+
+Preview the card without Discord: `python clip_render.py demo out.png`. Everything the scout stores lives in
+`SELFBOT_DATA_DIR`: `optout.json`, `scout-chats.json`, `clips.jsonl` (all mode 600), `emoji-cache/`, and an optional
+`scout-blocklist.txt` (one term per line, `#` comments). Bundled fonts: Noto Sans (SIL OFL, `assets/fonts/OFL.txt`).
+
 ## Secret hygiene before publishing
 
 - [`.gitignore`](.gitignore) excludes local env files, virtualenvs, and Python caches. [`.dockerignore`](.dockerignore) keeps env files out of Docker build context.
