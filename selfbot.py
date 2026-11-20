@@ -11,11 +11,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 import signal
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import discord
@@ -23,6 +27,7 @@ from dotenv import load_dotenv
 
 from bombagif_core import (
     DOWNLOAD_TIMEOUT,
+    MAX_GIF_BATCH,
     MediaSource,
     Settings,
     UserFacingError,
@@ -46,6 +51,7 @@ from selfbot_logic import (
     env_flag,
     format_results,
     has_media,
+    resolve_ui_mode,
 )
 
 
@@ -59,6 +65,7 @@ class SelfBot(discord.Client):
         rate_limiter: RateLimiter | None = None,
         captcha_guard: CaptchaGuard | None = None,
         auto_accept_friends: bool = False,
+        ui: Any | None = None,
     ) -> None:
         super().__init__()
         self.config = settings
@@ -66,6 +73,8 @@ class SelfBot(discord.Client):
         self.captcha_guard = captcha_guard or CaptchaGuard(allowlist.path.with_name("captcha-blocked.json"))
         self.rate_limiter = rate_limiter or RateLimiter()
         self.stats = BotStats()
+        self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
+        self._booted = False
         self.auto_accept_friends = auto_accept_friends
         self.friend_accept_delay = 3.0  # seconds between accepts, so a burst never looks automated
         self.friend_sweep_limit = 10  # pending requests accepted per (re)connect
@@ -89,8 +98,33 @@ class SelfBot(discord.Client):
             except (NotImplementedError, RuntimeError):
                 pass
 
+    def ui_status(self) -> str:
+        """The connection state shown on the live panel."""
+        if self.captcha_guard.blocked:
+            return "paused"
+        return "online" if self.is_ready() else "connecting"
+
+    def _boot_info(self) -> dict[str, str]:
+        """Facts for the boot banner. Never includes tokens."""
+        guard = self.captcha_guard
+        return {
+            "account": str(self.user),
+            "zipline": urlparse(self.config.zipline_url).netloc,
+            "allowlist": f"{len(self.allowlist)} users ({self.allowlist.path})",
+            "auto-accept friends": "on" if self.auto_accept_friends else "off",
+            "captcha guard": f"paused ({guard.reason})" if guard.blocked else "armed",
+            "rate limit": f"{self.rate_limiter.limit} triggers / {int(self.rate_limiter.window)}s per user",
+            "batch": f"up to {MAX_GIF_BATCH} files per message",
+            "workers": str(self.max_parallel_jobs),
+            "python": platform.python_version(),
+            "discord.py-self": discord.__version__,
+        }
+
     async def on_ready(self) -> None:
         self.logger.info("Self-bot connected", extra={"user_id": self.user.id if self.user else None})
+        if self.ui is not None and not self._booted:
+            self._booted = True  # reconnects fire on_ready again; the banner is printed once
+            self.ui.show_boot(self._boot_info())
         if self.auto_accept_friends:
             pending = [r for r in self.relationships if r.type is discord.RelationshipType.incoming_request]
             for relationship in pending[: self.friend_sweep_limit]:
@@ -293,6 +327,8 @@ class SelfBot(discord.Client):
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: self.executor.shutdown(wait=True, cancel_futures=True))
         finally:
+            if self.ui is not None:
+                self.ui.stop(self.stats)
             await super().close()
 
 
@@ -300,7 +336,7 @@ def main() -> None:
     """Load configuration and run the self-bot until interrupted."""
     load_dotenv()
     settings = read_settings("SELFBOT_TOKEN")
-    configure_logging(settings.log_level)
+    mode = resolve_ui_mode(os.getenv("SELFBOT_UI"), is_tty=sys.stdout.isatty())
     data_dir = Path(os.getenv("SELFBOT_DATA_DIR", "data"))
     bot = SelfBot(
         settings,
@@ -308,6 +344,15 @@ def main() -> None:
         captcha_guard=CaptchaGuard(data_dir / "captcha-blocked.json"),
         auto_accept_friends=env_flag(os.getenv("SELFBOT_AUTO_ACCEPT_FRIENDS")),
     )
+    if mode == "pretty":
+        import console_ui  # rich is only needed for the pretty terminal
+
+        console = console_ui.create_console()
+        console_ui.configure_pretty_logging(console, settings.log_level)
+        dashboard = console_ui.Dashboard(bot.stats, bot.ui_status, lambda: len(bot.allowlist))
+        bot.ui = console_ui.TerminalUi(console, dashboard)
+    else:
+        configure_logging(settings.log_level)
     bot.run(settings.discord_token, log_handler=None)
 
 

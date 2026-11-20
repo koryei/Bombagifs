@@ -21,7 +21,7 @@ except metadata.PackageNotFoundError:
 
 SETTINGS = Settings(
     discord_token="user-token-secret",
-    zipline_token="z",
+    zipline_token="zipline-secret-token",
     zipline_url="https://z.example",
     log_level="INFO",
     allowed_guilds=frozenset(),
@@ -478,6 +478,48 @@ class SelfBotStatsTests(_SelfBotCase):
             await self.bot.on_message(message)
         self.assertEqual(self.bot.stats.activity[-1].level, "warn")
         self.assertIn("CAPTCHA", self.bot.stats.activity[-1].text)
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotTerminalUiTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.ui = Mock()
+        self.bot.ui = self.ui
+
+    async def test_on_ready_shows_the_boot_banner_once(self) -> None:
+        await self.bot.on_ready()
+        await self.bot.on_ready()  # reconnects must not reprint it
+        self.ui.show_boot.assert_called_once()
+
+    async def test_boot_info_has_useful_rows_and_no_secrets(self) -> None:
+        await self.bot.on_ready()
+        info = self.ui.show_boot.call_args.args[0]
+        for label in ("account", "zipline", "allowlist", "auto-accept friends", "captcha guard", "rate limit"):
+            self.assertIn(label, info)
+        blob = " ".join(str(v) for v in info.values())
+        self.assertNotIn(SETTINGS.discord_token, blob)
+        self.assertNotIn(SETTINGS.zipline_token, blob)
+        self.assertIn("z.example", info["zipline"])
+        self.assertNotIn("https://", info["zipline"])
+
+    async def test_boot_info_reflects_a_tripped_guard(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.bot.captcha_guard.trip("sending a reply")
+        await self.bot.on_ready()
+        self.assertIn("paused", self.ui.show_boot.call_args.args[0]["captcha guard"])
+
+    async def test_ui_status_reflects_guard_and_connection(self) -> None:
+        self.assertEqual(self.bot.ui_status(), "connecting")  # not ready: never logged in
+        with patch.object(type(self.bot), "is_ready", return_value=True):
+            self.assertEqual(self.bot.ui_status(), "online")
+            with self.assertLogs("bombagif.selfbot", "ERROR"):
+                self.bot.captcha_guard.trip("x")
+            self.assertEqual(self.bot.ui_status(), "paused")
+
+    async def test_close_stops_the_ui(self) -> None:
+        await self.bot.close()
+        self.ui.stop.assert_called_once_with(self.bot.stats)
 
 
 if __name__ == "__main__":
