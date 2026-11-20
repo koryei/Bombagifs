@@ -699,6 +699,16 @@ def _extract_zipline_file_url(payload: Any, zipline_base_url: str) -> str | None
     return file_url
 
 
+async def _error_snippet(response: aiohttp.ClientResponse, limit: int = 300) -> str:
+    """Return a short, printable excerpt of an error body for diagnostics."""
+    try:
+        raw = await response.content.read(limit)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    return " ".join("".join(char if char.isprintable() else " " for char in text).split())
+
+
 async def upload_to_zipline(
     session: aiohttp.ClientSession,
     settings: Settings,
@@ -722,14 +732,26 @@ async def upload_to_zipline(
                     if attempt + 1 < MAX_UPLOAD_ATTEMPTS:
                         delay = _retry_delay(response, attempt)
                         logging.getLogger("bombagif.zipline").warning(
-                            "Zipline requested retry",
+                            "Zipline requested retry (status=%s)",
+                            response.status,
                             extra={"trace_id": trace_id, "attempt": attempt + 1},
                         )
                         response.release()
                         await asyncio.sleep(delay)
                         continue
+                    logging.getLogger("bombagif.zipline").warning(
+                        "Zipline still unavailable after retries (status=%s)",
+                        response.status,
+                        extra={"trace_id": trace_id, "attempt": attempt + 1},
+                    )
                     raise UploadFailure("The file host is temporarily unavailable. Please try again later.")
                 if response.status < 200 or response.status >= 300:
+                    logging.getLogger("bombagif.zipline").warning(
+                        "Zipline rejected the upload (status=%s, body=%r)",
+                        response.status,
+                        await _error_snippet(response),
+                        extra={"trace_id": trace_id, "attempt": attempt + 1},
+                    )
                     raise UploadFailure("The file host rejected the upload. Please try again later.")
                 try:
                     if response.content_length is not None and response.content_length > 1_000_000:
