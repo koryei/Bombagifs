@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from scout_buffer import ScoutBuffer, ScoutMessage
 from scout_config import ScoutConfig
@@ -206,6 +208,10 @@ class Scout:
             self._reject(chat_id, chosen, verdict, reason)
             return
         deleted = any(m.deleted for m in chosen)
+        if self.cfg.mode == "dry-run":
+            self._commit(chat_id, chosen, now)  # mimic cooldowns so dry-run counts match what "on" would do
+            self._record_dry_run(chat_id, chosen, verdict)
+            return
         plan = ClipPlan(
             chat_id=chat_id,
             messages=chosen,
@@ -213,8 +219,35 @@ class Scout:
             deleted=deleted,
             to_owner=deleted and self.cfg.clip_deleted == "owner",
         )
-        if await self.on_clip(plan) is not None:
-            self._commit(chat_id, chosen, now)
+        posted_id = await self.on_clip(plan)
+        if posted_id is None:
+            self._reject(chat_id, chosen, verdict, "post failed")
+            return
+        self._commit(chat_id, chosen, now)
+        names = ", ".join(dict.fromkeys(m.author_name for m in chosen))
+        if plan.to_owner:
+            self.stats.deleted_rescued += 1
+        else:
+            self.stats.clips_posted += 1
+            if deleted:
+                self.stats.deleted_rescued += 1
+        self.stats.note("ok", f"clipped {names} (funny {verdict.funny:.1f}{', deleted' if deleted else ''})")
+        self._write(
+            ClipRecord(
+                at=now,
+                chat_id=chat_id,
+                message_ids=tuple(m.id for m in chosen),
+                author_ids=tuple(dict.fromkeys(m.author_id for m in chosen)),
+                mode="owner" if plan.to_owner else "posted",
+                funny=verdict.funny,
+                decide=dict(verdict.decide),
+                deleted=deleted,
+                provider=verdict.provider,
+                reason=verdict.reason,
+                posted_message_id=None if plan.to_owner else posted_id,
+                text=tuple(m.original for m in chosen),
+            )
+        )
 
     def _record_dry_run(
         self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict | None, *, reason: str = ""
@@ -235,10 +268,71 @@ class Scout:
         )
         self.stats.dry_run_hits += 1
         names = ", ".join(dict.fromkeys(m.author_name for m in chosen))
-        self.stats.note("info", f"dry-run: candidate from {names} ({reason or 'judged'})")
+        if verdict is None:
+            self.stats.note("info", f"dry-run: candidate from {names} ({reason})")
+        else:
+            deleted = " [deleted]" if any(m.deleted for m in chosen) else ""
+            self.stats.note("info", f"dry-run: would clip {names} (funny {verdict.funny:.1f}){deleted}")
 
     def _write(self, record: ClipRecord) -> None:
         try:
             self.ledger.append(record)
         except OSError:
             logger.exception("could not write the clip ledger")
+
+
+# notice text and owner commands --------------------------------------------------------------------------------
+
+ANNOUNCE_ON = (
+    "🎬 Heads up: I'm clipping messages that are funny out of context in this chat, and I'll name whoever is in "
+    "them. DM me `stop` if you'd rather I didn't clip you."
+)
+ANNOUNCE_OFF = "🎬 Stopped clipping in this chat."
+DELETED_SUFFIX = " (deleted, but not fast enough)"
+MAX_NAME_CHARS = 32
+_MD_SPECIALS = re.compile(r"([\\*_~|>`])")
+
+
+def _notice_name(name: str) -> str:
+    """A display name made safe for the notice: truncated, markdown-escaped, and never a mention."""
+    if len(name) > MAX_NAME_CHARS:
+        name = name[: MAX_NAME_CHARS - 1] + "…"
+    name = _MD_SPECIALS.sub(r"\\\1", name)
+    return name.replace("<", "<\u200b").replace("@", "@\u200b")
+
+
+def format_clip_notice(names: Sequence[str], deleted: bool) -> str:
+    """The text posted with a clip: who is in it, how to opt out, and a snark when something was deleted."""
+    unique = [_notice_name(name) for name in dict.fromkeys(names)]
+    bold = [f"**{name}**" for name in unique]
+    if len(bold) <= 1:
+        who = "".join(bold)
+    else:
+        who = ", ".join(bold[:-1]) + " and " + bold[-1]
+    text = f"🎬 Clipped {who} — DM me `stop` to opt out of clips."
+    return text + DELETED_SUFFIX if deleted else text
+
+
+@dataclass(frozen=True)
+class ScoutCommand:
+    """A parsed owner command: ``!scout on|off [chat id]``, ``!scout status``, ``!scout list``."""
+
+    action: Literal["on", "off", "status", "list"]
+    chat_id: int | None
+
+
+_COMMAND_RE = re.compile(r"^!scout\s+(on|off|status|list)(?:\s+(\d+))?$", re.IGNORECASE)
+
+
+def parse_scout_command(text: str) -> ScoutCommand | None:
+    """Parse a ``!scout`` command; anything that is not exactly a command returns ``None``."""
+    match = _COMMAND_RE.match(text.strip())
+    if match is None:
+        return None
+    action = match.group(1).lower()
+    raw_id = match.group(2)
+    if raw_id is not None:
+        if action not in ("on", "off") or int(raw_id) <= 0:
+            return None
+        return ScoutCommand(action, int(raw_id))  # type: ignore[arg-type]
+    return ScoutCommand(action, None)  # type: ignore[arg-type]

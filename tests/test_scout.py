@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 from dataclasses import replace
 from pathlib import Path
 
-from scout import Scout
+from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, Scout, ScoutCommand, format_clip_notice, parse_scout_command
 from scout_buffer import ScoutBuffer, ScoutMessage, Version
 from scout_config import read_scout_config
 from scout_judge import HeuristicJudge, JudgeChain, JudgeWindow, Verdict
@@ -465,6 +467,153 @@ class GateTests(ScoutCase):
         self.add(2, "retry funny line", author=20)
         await self.settle(scout, 46)
         self.assertEqual(len(self.posted), 2)  # no cooldown was consumed by the failed attempt
+
+
+class ModeAndLedgerTests(ScoutCase):
+    async def settle(self, scout: Scout, seconds: float = 60) -> None:
+        self.clock.now += seconds
+        await scout.tick()
+
+    async def test_dry_run_never_calls_on_clip_but_ledgers_and_counts(self) -> None:
+        scout = self.scout(FakeJudge(approve(funny=8.7)), cfg=replace(self.cfg, mode="dry-run"))
+        message = self.add(1, "the dry run line", author=10)
+        await self.settle(scout)
+        self.assertEqual(self.posted, [])
+        rows = self.ledger_rows()
+        self.assertEqual((len(rows), rows[0]["mode"], rows[0]["funny"], rows[0]["provider"]), (1, "dry-run", 8.7, "fake"))
+        self.assertIsNone(rows[0]["text"])
+        self.assertEqual((self.stats.dry_run_hits, self.stats.clips_posted), (1, 0))
+        self.assertTrue(any("dry-run" in e.text and "user10" in e.text and "8.7" in e.text for e in self.stats.activity))
+        self.assertTrue(message.clipped)
+
+    async def test_dry_run_mimics_cooldowns_so_the_counts_are_realistic(self) -> None:
+        scout = self.scout(FakeJudge(approve()), cfg=replace(self.cfg, mode="dry-run"))
+        self.add(1, author=10)
+        await self.settle(scout)
+        self.add(2, "another one soon after", author=20)
+        await self.settle(scout, 46)
+        self.assertEqual([r["mode"] for r in self.ledger_rows()], ["dry-run", "rejected"])
+        self.assertEqual(self.ledger_rows()[1]["reason"], "chat cooldown")
+
+    async def test_on_posts_and_ledgers_text_and_starts_cooldowns(self) -> None:
+        scout = self.scout(FakeJudge(approve(funny=9.1)))
+        message = self.add(1, "the posted line", author=10)
+        await self.settle(scout)
+        rows = self.ledger_rows()
+        self.assertEqual((rows[0]["mode"], rows[0]["posted_message_id"], rows[0]["text"]), ("posted", 9001, ["the posted line"]))
+        self.assertEqual((rows[0]["chat_id"], rows[0]["message_ids"], rows[0]["author_ids"], rows[0]["deleted"]), (1, [1], [10], False))
+        self.assertEqual((self.stats.clips_posted, self.stats.deleted_rescued, self.stats.scout_rejected), (1, 0, 0))
+        self.assertTrue(message.clipped)
+        self.assertTrue(any(e.level == "ok" and "user10" in e.text for e in self.stats.activity))
+        self.assertEqual(self.ledger.recent_posted_ids(), {9001})
+
+    async def test_a_posted_deleted_clip_counts_as_rescued(self) -> None:
+        scout = self.scout(FakeJudge(approve(funny=9.9)))
+        self.add(1, "regretted line")
+        self.buffer.delete(1, 1)
+        await self.settle(scout)
+        self.assertEqual((self.stats.clips_posted, self.stats.deleted_rescued), (1, 1))
+        self.assertTrue(self.ledger_rows()[0]["deleted"])
+
+    async def test_owner_routed_clips_are_ledgered_as_owner(self) -> None:
+        scout = self.scout(FakeJudge(approve(funny=9.9)), cfg=replace(self.cfg, clip_deleted="owner"))
+        self.add(1, "regretted line")
+        self.buffer.delete(1, 1)
+        await self.settle(scout)
+        row = self.ledger_rows()[0]
+        self.assertEqual((row["mode"], row["text"], row["posted_message_id"]), ("owner", ["regretted line"], None))
+        self.assertEqual((self.stats.clips_posted, self.stats.deleted_rescued), (0, 1))
+
+    async def test_failed_post_is_rejected_without_cooldown(self) -> None:
+        self.post_result = None
+        scout = self.scout(FakeJudge(approve()))
+        message = self.add(1)
+        await self.settle(scout)
+        row = self.ledger_rows()[0]
+        self.assertEqual((row["mode"], row["reason"]), ("rejected", "post failed"))
+        self.assertEqual((self.stats.scout_rejected, self.stats.clips_posted), (1, 0))
+        self.assertFalse(message.clipped)
+
+    async def test_ledger_has_no_text_for_dry_run_or_rejected(self) -> None:
+        scout = self.scout(FakeJudge(approve()), cfg=replace(self.cfg, mode="dry-run"), blocklist=frozenset({"badword"}))
+        self.add(1, "fine funny line", author=10, chat=1)
+        self.add(2, "a badword line", author=20, chat=2)
+        await self.settle(scout)
+        self.assertEqual({row["mode"] for row in self.ledger_rows()}, {"dry-run", "rejected"})
+        self.assertTrue(all(row["text"] is None for row in self.ledger_rows()))
+
+    async def test_ledger_write_failures_do_not_break_posting(self) -> None:
+        scout = self.scout(FakeJudge(approve()))
+        self.add(1)
+        with patch.object(self.ledger, "append", side_effect=OSError("disk full")):
+            with self.assertLogs("bombagif.scout", "ERROR"):
+                await self.settle(scout)
+        self.assertEqual(len(self.posted), 1)
+
+    async def test_run_loop_survives_a_tick_exception(self) -> None:
+        scout = self.scout(FakeJudge(lambda w: no_verdict()))
+        calls: list[int] = []
+
+        async def flaky_tick() -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            if len(calls) == 3:
+                raise asyncio.CancelledError
+
+        scout.tick = flaky_tick  # type: ignore[method-assign]
+        with patch("scout.asyncio.sleep", new=AsyncMock()) as sleep, self.assertLogs("bombagif.scout", "ERROR"):
+            with self.assertRaises(asyncio.CancelledError):
+                await scout.run()
+        self.assertEqual(len(calls), 3)
+        sleep.assert_awaited_with(self.cfg.tick_s)
+
+
+class NoticeAndCommandTests(unittest.TestCase):
+    def test_format_clip_notice(self) -> None:
+        self.assertEqual(format_clip_notice(["Pranit"], False), "🎬 Clipped **Pranit** — DM me `stop` to opt out of clips.")
+        self.assertEqual(format_clip_notice(["A", "B"], False), "🎬 Clipped **A** and **B** — DM me `stop` to opt out of clips.")
+        self.assertEqual(format_clip_notice(["A", "B", "C"], False), "🎬 Clipped **A**, **B** and **C** — DM me `stop` to opt out of clips.")
+
+    def test_names_are_escaped_and_truncated(self) -> None:
+        self.assertIn("**a\\_b\\*c**", format_clip_notice(["a_b*c"], False))
+        long_name = format_clip_notice(["x" * 50], False)
+        self.assertIn("**" + "x" * 31 + "…**", long_name)
+
+    def test_names_never_become_mentions(self) -> None:
+        self.assertNotIn("<@", format_clip_notice(["<@123>", "@everyone"], False))
+
+    def test_duplicate_names_are_listed_once(self) -> None:
+        self.assertIn("**A** and **B**", format_clip_notice(["A", "B", "A"], False))
+
+    def test_deleted_suffix(self) -> None:
+        self.assertTrue(format_clip_notice(["A"], True).endswith(" (deleted, but not fast enough)"))
+        self.assertNotIn("deleted", format_clip_notice(["A"], False))
+
+    def test_announcements(self) -> None:
+        self.assertIn("`stop`", ANNOUNCE_ON)
+        self.assertIn("clipping", ANNOUNCE_ON.lower())
+        self.assertIn("stopped", ANNOUNCE_OFF.lower())
+
+    def test_parse_scout_command(self) -> None:
+        self.assertEqual(parse_scout_command("!scout on"), ScoutCommand("on", None))
+        self.assertEqual(parse_scout_command("  !SCOUT   OFF  "), ScoutCommand("off", None))
+        self.assertEqual(parse_scout_command("!scout status"), ScoutCommand("status", None))
+        self.assertEqual(parse_scout_command("!scout list"), ScoutCommand("list", None))
+        self.assertEqual(parse_scout_command("!scout on 123456789"), ScoutCommand("on", 123456789))
+        self.assertEqual(parse_scout_command("!scout off 42"), ScoutCommand("off", 42))
+
+    def test_parse_scout_command_rejects_everything_else(self) -> None:
+        for text in ("!scoutx on", "scout on", "!scout", "!scout maybe", "!scout on abc", "!scout status 1", "!scout on 1 2", "hello !scout on", "!scout on 0", "!scout on -5", ""):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_scout_command(text))
+
+
+class ClipPlanTests(unittest.TestCase):
+    def test_clip_plan_is_immutable(self) -> None:
+        plan = ClipPlan(1, (), good_verdict(), False, False)
+        with self.assertRaises(Exception):
+            plan.chat_id = 2  # type: ignore[misc]
 
 
 if __name__ == "__main__":
