@@ -23,26 +23,26 @@ from bombagif_core import (
     MAX_INPUT_BYTES,
     MAX_OUTPUT_BYTES,
     InvalidImage,
+    Settings,
     UploadFailure,
     UserFacingError,
     _CandidateTooLarge,
     _convert_image_to_target,
+    _extract_zipline_file_url,
     _rasterize_svg,
     convert_image,
     convert_video,
+    upload_to_zipline,
     validate_image_metadata,
 )
 from main import (
     PublicGifView,
-    Settings,
     PRESENCE_REASSERT_TICKS,
-    _extract_zipline_file_url,
     _presence_signature,
     _read_settings,
     create_bot,
     load_presence_config,
     load_presence_or_default,
-    upload_to_zipline,
 )
 
 

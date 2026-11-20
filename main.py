@@ -11,9 +11,7 @@ import re
 import signal
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlparse
@@ -27,15 +25,15 @@ from dotenv import load_dotenv
 from bombagif_core import (
     DOWNLOAD_TIMEOUT,
     MAX_GIF_BATCH,
-    MAX_INPUT_BYTES,
-    MAX_UPLOAD_ATTEMPTS,
-    UPLOAD_TIMEOUT,
     InvalidImage,
+    Settings,
     UploadFailure,
     UserFacingError,
     _convert_image_to_target,
     convert_image,
     convert_video,
+    download_attachment,
+    upload_to_zipline,
     validate_attachment_metadata,
 )
 
@@ -127,18 +125,6 @@ class PublicGifView(discord.ui.View):
             suppress_embeds=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class Settings:
-    """Validated runtime configuration loaded from the environment."""
-
-    discord_token: str
-    zipline_token: str
-    zipline_url: str
-    log_level: str
-    allowed_guilds: frozenset[int]
-    background: tuple[int, int, int]
 
 
 def _read_settings() -> Settings:
@@ -387,193 +373,6 @@ def _presence_signature() -> tuple[int, int] | None:
     except OSError:
         return None
     return stat.st_mtime_ns, stat.st_size
-
-
-async def read_bounded(response: aiohttp.ClientResponse, limit: int) -> bytes:
-    """Read an HTTP response body with an enforced streaming byte limit."""
-    chunks = bytearray()
-    async for chunk in response.content.iter_chunked(64 * 1024):
-        chunks.extend(chunk)
-        if len(chunks) > limit:
-            raise UserFacingError("That file is too large. The maximum upload size is 15 MB.")
-    return bytes(chunks)
-
-
-async def download_attachment(session: aiohttp.ClientSession, attachment: discord.Attachment) -> bytes:
-    """Download a validated image or video attachment within the hard input cap."""
-    validate_attachment_metadata(attachment.filename, attachment.content_type or "", attachment.size)
-    timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=10, sock_read=20)
-    try:
-        async with session.get(attachment.url, timeout=timeout) as response:
-            if response.status != 200:
-                raise UserFacingError("Discord could not provide that attachment. Please try again.")
-            if response.content_length is not None and response.content_length > MAX_INPUT_BYTES:
-                raise UserFacingError("That file is too large. The maximum upload size is 15 MB.")
-            return await read_bounded(response, MAX_INPUT_BYTES)
-    except asyncio.TimeoutError as exc:
-        raise UserFacingError("Downloading that file timed out. Please try again.") from exc
-    except aiohttp.ClientError as exc:
-        raise UserFacingError("Discord could not provide that attachment. Please try again.") from exc
-
-
-def _retry_delay(response: aiohttp.ClientResponse, attempt: int) -> float:
-    """Return a bounded Retry-After or exponential-backoff delay."""
-    retry_after = response.headers.get("Retry-After")
-    if retry_after:
-        try:
-            return min(8.0, max(0.0, float(retry_after)))
-        except ValueError:
-            try:
-                retry_at = parsedate_to_datetime(retry_after)
-                if retry_at.tzinfo is None:
-                    retry_at = retry_at.replace(tzinfo=timezone.utc)
-                return min(8.0, max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds()))
-            except (TypeError, ValueError, OverflowError):
-                pass
-    return min(8.0, 0.5 * (2**attempt))
-
-
-def _extract_zipline_file_url(payload: Any, zipline_base_url: str) -> str | None:
-    """Read a Zipline file URL and upgrade same-host HTTP links behind TLS proxies."""
-    configured_url = urlparse(zipline_base_url)
-    candidate: Any = payload
-    if isinstance(payload, list):
-        candidate = payload[0] if payload else None
-    elif isinstance(payload, dict):
-        files = payload.get("files")
-        if isinstance(files, list):
-            candidate = files[0] if files else None
-        elif isinstance(files, (str, dict)):
-            candidate = files
-        else:
-            candidate = payload.get("url")
-    if isinstance(candidate, dict):
-        candidate = candidate.get("url")
-    if not isinstance(candidate, str):
-        return None
-
-    file_url = candidate.strip()
-    try:
-        parsed_url = urlparse(file_url)
-        configured_host = configured_url.hostname
-        returned_host = parsed_url.hostname
-        if (
-            not configured_host
-            or not returned_host
-            or parsed_url.username is not None
-            or parsed_url.password is not None
-        ):
-            return None
-        # Accessing .port also validates malformed authority suffixes.
-        _ = parsed_url.port
-        if parsed_url.scheme.lower() == "http":
-            # Upgrade only when the bot's configured public URL is HTTPS and
-            # Zipline's returned hostname matches it (ignoring an internal
-            # port, which often differs behind a TLS-terminating proxy).
-            if (
-                configured_url.scheme.lower() != "https"
-                or returned_host.casefold() != configured_host.casefold()
-            ):
-                return None
-            file_url = parsed_url._replace(scheme="https", netloc=configured_url.netloc).geturl()
-        elif parsed_url.scheme.lower() != "https":
-            return None
-    except ValueError:
-        return None
-    return file_url
-
-
-async def upload_to_zipline(
-    session: aiohttp.ClientSession,
-    settings: Settings,
-    content: bytes,
-    filename: str,
-    *,
-    trace_id: str,
-) -> str:
-    """Upload a GIF to Zipline with bounded retries and parse its returned URL."""
-    url = f"{settings.zipline_url}/api/upload"
-    headers = {"Authorization": settings.zipline_token}
-    timeout = aiohttp.ClientTimeout(total=UPLOAD_TIMEOUT, connect=10, sock_read=30)
-    last_error: Exception | None = None
-
-    for attempt in range(MAX_UPLOAD_ATTEMPTS):
-        form = aiohttp.FormData()
-        form.add_field("file", content, filename=filename, content_type="image/gif")
-        try:
-            async with session.post(url, headers=headers, data=form, timeout=timeout) as response:
-                if response.status == 429 or response.status >= 500:
-                    if attempt + 1 < MAX_UPLOAD_ATTEMPTS:
-                        delay = _retry_delay(response, attempt)
-                        logging.getLogger("bombagif.zipline").warning(
-                            "Zipline requested retry",
-                            extra={"trace_id": trace_id, "attempt": attempt + 1},
-                        )
-                        response.release()
-                        await asyncio.sleep(delay)
-                        continue
-                    raise UploadFailure("The file host is temporarily unavailable. Please try again later.")
-                if response.status < 200 or response.status >= 300:
-                    raise UploadFailure("The file host rejected the upload. Please try again later.")
-                try:
-                    if response.content_length is not None and response.content_length > 1_000_000:
-                        raise ValueError("Zipline response exceeded its size limit")
-                    response_body = bytearray()
-                    async for chunk in response.content.iter_chunked(64 * 1024):
-                        response_body.extend(chunk)
-                        if len(response_body) > 1_000_000:
-                            raise ValueError("Zipline response exceeded its size limit")
-                except (aiohttp.ClientError, ValueError) as exc:
-                    raise UploadFailure("The file host returned an invalid response. Please try again later.") from exc
-
-                try:
-                    payload = json.loads(response_body)
-                except (UnicodeDecodeError, ValueError, RecursionError):
-                    # Some Zipline deployments (and reverse proxies) return the
-                    # file URL as plain text instead of JSON.
-                    payload = bytes(response_body).decode("utf-8", errors="replace").strip()
-                returned_url = _extract_zipline_file_url(payload, settings.zipline_url)
-                if returned_url is None:
-                    logging.getLogger("bombagif.zipline").warning(
-                        "Zipline returned success without a readable file URL "
-                        "(content_type=%s, payload_type=%s)",
-                        response.content_type,
-                        type(payload).__name__,
-                        extra={"trace_id": trace_id},
-                    )
-                    raise UploadFailure(
-                        "Zipline accepted the upload, but Bombagif couldn't read a safe file URL. "
-                        "For Zipline behind HTTPS, enable its Return HTTPS URLs setting "
-                        "(CORE_RETURN_HTTPS_URLS=true) and confirm the returned link uses your configured Zipline host. "
-                        "Check Zipline before retrying to avoid a duplicate upload."
-                    )
-                return returned_url
-        except asyncio.TimeoutError as exc:
-            last_error = exc
-            if attempt + 1 < MAX_UPLOAD_ATTEMPTS:
-                await asyncio.sleep(min(8.0, 0.5 * (2**attempt)))
-                continue
-        except (aiohttp.ClientError, OSError) as exc:
-            last_error = exc
-            if attempt + 1 < MAX_UPLOAD_ATTEMPTS:
-                await asyncio.sleep(min(8.0, 0.5 * (2**attempt)))
-                continue
-        except UploadFailure:
-            raise
-
-    error_info = (
-        (type(last_error), last_error, last_error.__traceback__)
-        if last_error is not None
-        else None
-    )
-    logging.getLogger("bombagif.zipline").error(
-        "Zipline upload failed after retries",
-        extra={"trace_id": trace_id},
-        exc_info=error_info,
-    )
-    if isinstance(last_error, asyncio.TimeoutError):
-        raise UserFacingError("Uploading to the file host timed out. Please try again.") from last_error
-    raise UploadFailure("The file host is unavailable. Please try again later.") from last_error
 
 
 class BombagifBot(commands.Bot):
