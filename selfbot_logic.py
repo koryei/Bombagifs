@@ -140,6 +140,29 @@ class CaptchaGuard:
         return True
 
 
+class Cooldown:
+    """A per-key "at most once per ``seconds``" gate. ``is_ready``/``mark`` let a caller check several gates first."""
+
+    def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self.seconds = seconds
+        self._clock = clock
+        self._last: dict[object, float] = {}
+
+    def is_ready(self, key: object) -> bool:
+        last = self._last.get(key)
+        return last is None or self._clock() - last >= self.seconds
+
+    def mark(self, key: object) -> None:
+        self._last[key] = self._clock()
+
+    def ready(self, key: object) -> bool:
+        """Check and record in one step: True (and starts the cooldown) only if the key is not cooling."""
+        if not self.is_ready(key):
+            return False
+        self.mark(key)
+        return True
+
+
 class RateLimiter:
     """Per-user sliding-window limiter: ``limit`` triggers per ``window`` seconds."""
 
@@ -333,6 +356,22 @@ def welcome_text(scout_on: bool = False, *, opted_out: bool = False) -> str:
     if opted_out:
         return WELCOME_TEXT + _WELCOME_OPTED_OUT
     return WELCOME_TEXT + (_WELCOME_CLIPS if scout_on else "")
+
+
+_HELP_BASE = (
+    "Hi! I turn images and videos into GIF links, but I only help people who have DMed me first. "
+    "DM me `hi` (add me as a friend if you can't message me), then ping me on any image or video. "
+    "Send `stop` in that DM any time and I'll leave you alone."
+)
+_HELP_CLIPS = (
+    "\nI also clip messages that are funny out of context in chats where that is turned on, and name who said "
+    "them; `stop` in a DM opts you out."
+)
+
+
+def help_text(scout_on: bool = False) -> str:
+    """What a stranger who pings the account gets: how to start using it (and the clipping note when it is live)."""
+    return _HELP_BASE + (_HELP_CLIPS if scout_on else "")
 
 
 STOP_CONFIRMATION = (

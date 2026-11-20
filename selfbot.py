@@ -53,6 +53,7 @@ from selfbot_logic import (
     BotStats,
     CaptchaGuard,
     ChannelKind,
+    Cooldown,
     Incoming,
     Kind,
     RateLimiter,
@@ -61,6 +62,7 @@ from selfbot_logic import (
     env_flag,
     format_results,
     has_media,
+    help_text,
     resolve_ui_mode,
     welcome_text,
 )
@@ -88,6 +90,8 @@ class SelfBot(discord.Client):
         self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
         self.scout = scout  # None unless the clip scout is configured
         self._scout_task: asyncio.Task[None] | None = None
+        self._help_user_cooldown = Cooldown(3600.0)  # a stranger gets the help text at most once an hour...
+        self._help_chat_cooldown = Cooldown(600.0)  # ...and a chat at most once every 10 minutes
         self._clip_message_ids: set[int] = set()  # clips we posted, so a reply of `stop` to one can be recognised
         self._booted = False
         self.auto_accept_friends = auto_accept_friends
@@ -548,6 +552,14 @@ class SelfBot(discord.Client):
             await self._reply(message, CLIP_OPT_OUT_CONFIRMATION)
         elif decision.kind is Kind.CONVERT:
             await self._convert_and_reply(message)
+        elif decision.kind is Kind.HELP:
+            chat_id = message.channel.id
+            opted_out = runtime is not None and author in runtime.optout
+            if not opted_out and self._help_user_cooldown.is_ready(author) and self._help_chat_cooldown.is_ready(chat_id):
+                self._help_user_cooldown.mark(author)
+                self._help_chat_cooldown.mark(chat_id)
+                self.stats.note("info", f"{self._who(message.author)} pinged without DMing first: sent help")
+                await self._reply(message, help_text(clipping_live))
 
     async def _resolve_reference(self, message: discord.Message) -> discord.Message | None:
         """Return the message this one replies to, or None if deleted or unreachable."""

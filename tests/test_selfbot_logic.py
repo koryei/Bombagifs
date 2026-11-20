@@ -18,6 +18,7 @@ from selfbot_logic import (
     BotStats,
     CaptchaGuard,
     ChannelKind,
+    Cooldown,
     Decision,
     Incoming,
     Kind,
@@ -26,6 +27,7 @@ from selfbot_logic import (
     decide,
     env_flag,
     format_results,
+    help_text,
     resolve_ui_mode,
     welcome_text,
 )
@@ -478,6 +480,51 @@ class ResolveUiModeTests(unittest.TestCase):
     def test_unknown_mode_names_the_variable(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "SELFBOT_UI"):
             resolve_ui_mode("fancy", is_tty=True)
+
+
+class CooldownTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.cooldown = Cooldown(60.0, clock=self.clock)
+
+    def test_cooldown_blocks_until_elapsed_per_key(self) -> None:
+        self.assertTrue(self.cooldown.ready("a"))
+        self.assertFalse(self.cooldown.ready("a"))
+        self.assertTrue(self.cooldown.ready("b"))  # keys are independent
+        self.clock.now += 59
+        self.assertFalse(self.cooldown.ready("a"))
+        self.clock.now += 1
+        self.assertTrue(self.cooldown.ready("a"))
+
+    def test_is_ready_does_not_record_and_mark_does(self) -> None:
+        self.assertTrue(self.cooldown.is_ready("a"))
+        self.assertTrue(self.cooldown.is_ready("a"))
+        self.cooldown.mark("a")
+        self.assertFalse(self.cooldown.is_ready("a"))
+        self.clock.now += 60
+        self.assertTrue(self.cooldown.is_ready("a"))
+
+    def test_blocked_attempts_do_not_extend_the_cooldown(self) -> None:
+        self.cooldown.ready("a")
+        self.clock.now += 30
+        self.assertFalse(self.cooldown.ready("a"))
+        self.clock.now += 30
+        self.assertTrue(self.cooldown.ready("a"))
+
+
+class HelpTextTests(unittest.TestCase):
+    def test_help_text_explains_the_dm_first_rule(self) -> None:
+        for scout_on in (False, True):
+            text = help_text(scout_on)
+            with self.subTest(scout_on=scout_on):
+                self.assertIn("DM me", text)
+                self.assertIn("`hi`", text)
+                self.assertLessEqual(len(text), 600)
+
+    def test_clipping_is_mentioned_only_when_the_scout_is_on(self) -> None:
+        self.assertNotIn("clip", help_text(False).lower())
+        self.assertIn("clip", help_text(True).lower())
+        self.assertIn("`stop`", help_text(True))
 
 
 if __name__ == "__main__":

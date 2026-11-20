@@ -25,6 +25,7 @@ from selfbot_logic import (
     WELCOME_TEXT,
     AllowlistStore,
     RateLimiter,
+    help_text,
     welcome_text,
 )
 
@@ -164,10 +165,10 @@ class SelfBotMessageTests(_SelfBotCase):
         self.assertEqual(message.reply.await_args.args[0], STOP_CONFIRMATION)
         self.assertNotIn(99, self.allowlist)
 
-    async def test_stranger_ping_in_guild_is_silent(self) -> None:
+    async def test_stranger_ping_in_guild_gets_help_and_is_not_registered(self) -> None:
         message = make_message(channel_cls=discord.TextChannel, mentions=[self.me])
         await self.bot.on_message(message)
-        message.reply.assert_not_awaited()
+        self.assertEqual(message.reply.await_args.args[0], help_text(False))
         self.assertNotIn(99, self.allowlist)
 
     async def test_everyone_and_role_mentions_do_not_trigger(self) -> None:
@@ -1247,6 +1248,98 @@ class SelfBotScoutCommandTests(_SelfBotCase):
         message.author.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages to this user")
         with self.assertLogs("bombagif.selfbot", "WARNING"):
             await self.bot.on_message(message)
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotHelpTests(_SelfBotCase):
+    def ping(self, *, author: int = 99, chat: int = CHAT, **kwargs):
+        return make_message(author_id=author, channel_cls=discord.TextChannel, mentions=[self.me], channel_id=chat, **kwargs)
+
+    async def test_stranger_ping_gets_help_once_per_hour_per_person(self) -> None:
+        first, second = self.ping(chat=1), self.ping(chat=2)
+        await self.bot.on_message(first)
+        await self.bot.on_message(second)
+        first.reply.assert_awaited_once()
+        second.reply.assert_not_awaited()  # same person, different chat, still within the hour
+
+    async def test_help_is_available_again_after_an_hour(self) -> None:
+        clock = [1000.0]
+        from selfbot_logic import Cooldown
+
+        self.bot._help_user_cooldown = Cooldown(3600, clock=lambda: clock[0])
+        first, second = self.ping(chat=1), self.ping(chat=2)
+        await self.bot.on_message(first)
+        clock[0] += 3600
+        await self.bot.on_message(second)
+        first.reply.assert_awaited_once()
+        second.reply.assert_awaited_once()
+
+    async def test_help_is_throttled_per_chat(self) -> None:
+        first, second, other_chat = self.ping(author=1), self.ping(author=2), self.ping(author=3, chat=999)
+        for message in (first, second, other_chat):
+            await self.bot.on_message(message)
+        first.reply.assert_awaited_once()
+        second.reply.assert_not_awaited()  # a different stranger, but the chat just got help
+        other_chat.reply.assert_awaited_once()
+
+    async def test_a_throttled_chat_does_not_use_up_the_persons_hour(self) -> None:
+        await self.bot.on_message(self.ping(author=1))  # chat now cooling
+        blocked = self.ping(author=2)
+        await self.bot.on_message(blocked)
+        blocked.reply.assert_not_awaited()
+        elsewhere = self.ping(author=2, chat=999)
+        await self.bot.on_message(elsewhere)
+        elsewhere.reply.assert_awaited_once()  # author 2's own cooldown was never consumed
+
+    async def test_help_never_registers_or_converts(self) -> None:
+        message = self.ping(attachments=[attachment()])
+        with patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK) as convert:
+            await self.bot.on_message(message)
+        convert.assert_not_awaited()
+        self.assertNotIn(99, self.allowlist)
+        self.assertEqual(message.reply.await_args.args[0], help_text(False))
+
+    async def test_help_silent_when_captcha_paused(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.bot.captcha_guard.trip("test")
+        message = self.ping()
+        await self.bot.on_message(message)
+        message.reply.assert_not_awaited()
+
+    async def test_help_silent_for_an_opted_out_author(self) -> None:
+        from selfbot import SelfBot
+
+        runtime = make_runtime(Path(self._tmp.name), mode="on")
+        runtime.optout.add(99)
+        bot = SelfBot(SETTINGS, self.allowlist, scout=runtime)
+        self.addAsyncCleanup(bot.close)
+        message = self.ping()
+        await bot.on_message(message)
+        message.reply.assert_not_awaited()
+
+    async def test_help_mentions_clipping_only_when_clips_are_live(self) -> None:
+        from selfbot import SelfBot
+
+        live = SelfBot(SETTINGS, self.allowlist, scout=make_runtime(Path(self._tmp.name) / "live", mode="on"))
+        self.addAsyncCleanup(live.close)
+        message = self.ping()
+        await live.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], help_text(True))
+
+    async def test_help_is_counted_in_the_feed(self) -> None:
+        await self.bot.on_message(self.ping())
+        self.assertTrue(any("help" in entry.text for entry in self.bot.stats.activity))
+
+    async def test_member_ping_without_media_still_gets_the_no_media_text(self) -> None:
+        self.allowlist.add(99)
+        message = self.ping()
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], NO_MEDIA_TEXT)
+
+    async def test_a_ping_in_a_one_to_one_dm_is_not_a_stranger_ping(self) -> None:
+        message = make_message(channel_cls=discord.DMChannel, content="hi", mentions=[self.me])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], WELCOME_TEXT)  # registered, not helped
 
 
 if __name__ == "__main__":
