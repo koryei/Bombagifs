@@ -134,6 +134,16 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("7 allowlisted", text)
         self.assertIn("uptime 1m 01s", text)
 
+    def test_live_dashboard_leaves_room_for_a_echoed_ctrl_c(self) -> None:
+        # A full-width panel makes the terminal's "^C" echo wrap below it, which breaks Rich's cursor maths.
+        stats = self.stats()
+        stats.note("ok", "y" * 300, now=1.0)
+        for width in (60, 100, 150):
+            with self.subTest(width=width):
+                dashboard = console_ui.Dashboard(stats, lambda: "online", lambda: 1, clock=lambda: 2.0)
+                text = render(dashboard, width=width)
+                self.assertLessEqual(max(len(line) for line in text.splitlines()), width - 3)
+
     def test_shutdown_panel_summarizes_the_session(self) -> None:
         stats = self.stats()
         stats.conversions_ok, stats.conversions_failed = 12, 1
@@ -218,6 +228,14 @@ class TerminalUiTests(unittest.TestCase):
         text = self.console.export_text()
         self.assertEqual(text.count("Bombagif self-bot is online"), 1)
         self.assertIn("Bombaclat#0001", text)
+
+    def test_the_last_live_frame_stays_on_screen_after_stop(self) -> None:
+        self.stats.conversions_ok = 4
+        self.ui.show_boot({"account": "x"})
+        self.ui.stop(self.stats)
+        text = self.console.export_text()
+        self.assertIn("recent activity", text)  # the final dashboard frame was not erased
+        self.assertLess(text.index("recent activity"), text.index("signed off"))
 
     def test_stop_prints_the_shutdown_summary_and_is_idempotent(self) -> None:
         self.stats.conversions_ok = 3

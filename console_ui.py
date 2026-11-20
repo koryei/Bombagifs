@@ -134,7 +134,14 @@ def _stat(label: str, value: int) -> Text:
     return text
 
 
-def render_dashboard(stats: BotStats, *, status: Status, allowlist_size: int, now: float | None = None) -> Panel:
+def render_dashboard(
+    stats: BotStats,
+    *,
+    status: Status,
+    allowlist_size: int,
+    now: float | None = None,
+    width: int | None = None,
+) -> Panel:
     """The live status panel: state line, counters, then the recent activity feed."""
     icon, label, style = _STATUS_VIEW[status]
     header = Text()
@@ -180,6 +187,7 @@ def render_dashboard(stats: BotStats, *, status: Status, allowlist_size: int, no
         border_style="brand",
         box=box.ROUNDED,
         padding=(1, 2),
+        width=width,
     )
 
 
@@ -198,12 +206,15 @@ class Dashboard:
         self.get_allowlist_size = get_allowlist_size
         self.clock = clock
 
-    def __rich__(self) -> Panel:
-        return render_dashboard(
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        # Stay a few columns narrower than the terminal: a full-width panel makes the "^C" echoed on
+        # Ctrl-C wrap onto the next line, which throws off Rich's cursor maths for the live region.
+        yield render_dashboard(
             self.stats,
             status=self.get_status(),
             allowlist_size=self.get_allowlist_size(),
             now=self.clock(),
+            width=max(30, options.max_width - 3),
         )
 
 
@@ -285,7 +296,7 @@ class TerminalUi:
         if self._live is not None:
             return
         self.console.print(render_boot_banner(info))
-        self._live = Live(self.dashboard, console=self.console, refresh_per_second=4, transient=True)
+        self._live = Live(self.dashboard, console=self.console, refresh_per_second=4, transient=False)
         self._live.start()
 
     def refresh(self) -> None:
@@ -294,7 +305,7 @@ class TerminalUi:
             self._live.refresh()
 
     def stop(self, stats: BotStats) -> None:
-        """Stop the live panel and print the session summary (does nothing if never started)."""
+        """Stop the live panel (its last frame stays on screen) and print the session summary."""
         if self._live is None:
             return
         self._live.stop()
