@@ -96,6 +96,10 @@ class ScoutBuffer:
         self.prune()
         return list(self._chats)
 
+    def drop_chat(self, chat_id: int) -> None:
+        """Forget every buffered message of a chat (used when the owner turns scouting off there)."""
+        self._chats.pop(chat_id, None)
+
     def get(self, chat_id: int, message_id: int) -> ScoutMessage | None:
         self.prune()
         return self._chats.get(chat_id, {}).get(message_id)

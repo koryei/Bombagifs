@@ -360,6 +360,12 @@ class BotStats:
     registered: int = 0
     unregistered: int = 0
     friends_accepted: int = 0
+    scout_screened: int = 0
+    scout_passed: int = 0
+    clips_posted: int = 0
+    deleted_rescued: int = 0
+    dry_run_hits: int = 0
+    scout_rejected: int = 0
     activity: deque[ActivityEntry] = field(init=False)
 
     def __post_init__(self) -> None:

@@ -113,6 +113,14 @@ class BufferCoreTests(unittest.TestCase):
         self.assertIsNotNone(self.buffer.get(1, 3))
         self.assertIsNotNone(self.buffer.get(1, 7))
 
+    def test_drop_chat_forgets_everything_in_that_chat_only(self) -> None:
+        self.buffer.add(msg(1, chat=1))
+        self.buffer.add(msg(2, chat=2))
+        self.buffer.drop_chat(1)
+        self.buffer.drop_chat(404)  # unknown chats are ignored
+        self.assertEqual(self.buffer.chats(), [2])
+        self.assertIsNone(self.buffer.get(1, 1))
+
     def test_chats_are_independent(self) -> None:
         self.buffer.add(msg(1, chat=1))
         self.buffer.add(msg(1, chat=2))

@@ -371,6 +371,13 @@ class BotStatsTests(unittest.TestCase):
         )
         self.assertEqual(len(stats.activity), 0)
 
+    def test_scout_counters_default_to_zero(self) -> None:
+        stats = BotStats(started_at=0.0)
+        self.assertEqual(
+            (stats.scout_screened, stats.scout_passed, stats.clips_posted, stats.deleted_rescued, stats.dry_run_hits, stats.scout_rejected),
+            (0, 0, 0, 0, 0, 0),
+        )
+
     def test_note_keeps_newest_entries_in_order(self) -> None:
         stats = BotStats(started_at=0.0, activity_size=3)
         for index in range(5):
