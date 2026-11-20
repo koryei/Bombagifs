@@ -211,6 +211,41 @@ class SelfBotConvertTests(_SelfBotCase):
         self.assertEqual(self.convert.await_count, 5)
         self.assertTrue(message.reply.await_args.args[0].endswith("(+2 skipped, max 5 per message)"))
 
+    async def test_reply_target_media_is_converted(self) -> None:
+        target = SimpleNamespace(attachments=[attachment("theirs.png")], embeds=[])
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], reference=SimpleNamespace(message_id=42, resolved=target, cached_message=None))
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], LINK)
+        self.assertEqual(self.convert.await_args.args[3].filename, "theirs.png")
+
+    async def test_uncached_reply_target_is_fetched(self) -> None:
+        target = SimpleNamespace(attachments=[attachment("fetched.png")], embeds=[])
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], reference=SimpleNamespace(message_id=42, resolved=None, cached_message=None))
+        message.channel.fetch_message = AsyncMock(return_value=target)
+        await self.bot.on_message(message)
+        message.channel.fetch_message.assert_awaited_once_with(42)
+        self.assertEqual(self.convert.await_args.args[3].filename, "fetched.png")
+
+    async def test_deleted_reference_falls_back_to_own_media(self) -> None:
+        response = SimpleNamespace(status=404, reason="Not Found")
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], attachments=[attachment("mine.png")], reference=SimpleNamespace(message_id=42, resolved=None, cached_message=None))
+        message.channel.fetch_message = AsyncMock(side_effect=discord.NotFound(response, "gone"))
+        await self.bot.on_message(message)
+        self.assertEqual(self.convert.await_args.args[3].filename, "mine.png")
+
+    async def test_deleted_reference_without_media_says_none_found(self) -> None:
+        response = SimpleNamespace(status=404, reason="Not Found")
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], reference=SimpleNamespace(message_id=42, resolved=None, cached_message=None))
+        message.channel.fetch_message = AsyncMock(side_effect=discord.NotFound(response, "gone"))
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], NO_MEDIA_TEXT)
+
+    async def test_deleted_marker_resolved_value_is_not_media(self) -> None:
+        deleted_marker = SimpleNamespace(id=42)  # discord.DeletedReferencedMessage has no attachments
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], attachments=[attachment("mine.png")], reference=SimpleNamespace(message_id=42, resolved=deleted_marker, cached_message=None))
+        await self.bot.on_message(message)
+        self.assertEqual(self.convert.await_args.args[3].filename, "mine.png")
+
 
 if __name__ == "__main__":
     unittest.main()

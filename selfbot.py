@@ -124,6 +124,23 @@ class SelfBot(discord.Client):
         elif decision.kind is Kind.CONVERT:
             await self._convert_and_reply(message)
 
+    async def _resolve_reference(self, message: discord.Message) -> discord.Message | None:
+        """Return the message this one replies to, or None if deleted or unreachable."""
+        reference = message.reference
+        if reference is None:
+            return None
+        for candidate in (reference.resolved, reference.cached_message):
+            if candidate is not None and hasattr(candidate, "attachments"):
+                return candidate
+        if reference.resolved is not None or reference.message_id is None:
+            return None  # Discord reported the original as deleted.
+        if getattr(reference, "channel_id", None) not in (None, message.channel.id):
+            return None
+        try:
+            return await message.channel.fetch_message(reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
     async def _convert_one(
         self, source: MediaSource, user_id: int, guild_id: int | None
     ) -> tuple[str, str, bool]:
@@ -158,6 +175,8 @@ class SelfBot(discord.Client):
         guild_id = message.guild.id if message.guild is not None else None
         async with message.channel.typing():
             collected = collect_media(message)
+            if not collected.sources and message.reference is not None:
+                collected = collect_media(message, await self._resolve_reference(message))
             if not collected.sources:
                 await self._reply(message, NO_MEDIA_TEXT)
                 return
