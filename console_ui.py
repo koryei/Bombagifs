@@ -6,15 +6,20 @@ by rendering to text. Needs ``rich`` (see requirements-selfbot.txt).
 
 from __future__ import annotations
 
-from typing import Any
+import time
+from collections.abc import Callable
+from typing import Any, Literal
 
 from rich import box
+from rich.columns import Columns
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.measure import Measurement
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+
+from selfbot_logic import BotStats
 
 BLURPLE = "#5865F2"  # the colour of Bombagif's embeds
 BOMB = "#FF8A3D"
@@ -102,3 +107,109 @@ def measure_renderable(console: Console, options: ConsoleOptions, renderable: Re
 def render_boot_banner(info: dict[str, str]) -> BootBanner:
     """A neofetch-style startup panel: logo on the left, key facts on the right."""
     return BootBanner(info)
+
+
+Status = Literal["connecting", "online", "paused"]
+
+_STATUS_VIEW: dict[str, tuple[str, str, str]] = {
+    "connecting": ("\u25cc", "connecting", "warn"),
+    "online": ("\u25cf", "online", "ok"),
+    "paused": ("\u23f8", "CAPTCHA pause, see the log", "bad"),
+}
+_LEVEL_VIEW: dict[str, tuple[str, str]] = {
+    "ok": ("\u2714", "ok"),
+    "fail": ("\u2716", "bad"),
+    "warn": ("!", "warn"),
+    "info": ("\u2022", "info"),
+}
+
+
+def _stat(label: str, value: int) -> Text:
+    text = Text()
+    text.append(f"{label} ", style="muted")
+    text.append(str(value), style="accent")
+    return text
+
+
+def render_dashboard(stats: BotStats, *, status: Status, allowlist_size: int, now: float | None = None) -> Panel:
+    """The live status panel: state line, counters, then the recent activity feed."""
+    icon, label, style = _STATUS_VIEW[status]
+    header = Text()
+    header.append(f"{icon} {label}", style=style)
+    header.append("   uptime ", style="muted")
+    header.append(stats.uptime(now), style="value")
+    header.append("   ")
+    header.append(str(allowlist_size), style="accent")
+    header.append(" allowlisted", style="muted")
+
+    counters = Columns(
+        [
+            _stat("converted", stats.conversions_ok),
+            _stat("failed", stats.conversions_failed),
+            _stat("triggers", stats.triggers),
+            _stat("rate limited", stats.rate_limited),
+            _stat("new users", stats.registered),
+            _stat("friends", stats.friends_accepted),
+        ],
+        padding=(0, 3),
+        expand=True,
+    )
+
+    feed = Table.grid(padding=(0, 1), expand=True)
+    feed.add_column(style="muted", no_wrap=True)
+    feed.add_column(no_wrap=True)
+    feed.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
+    if not stats.activity:
+        feed_body: RenderableType = Text("Waiting for the first DM or ping\u2026", style="muted")
+    else:
+        for entry in stats.activity:
+            glyph, glyph_style = _LEVEL_VIEW[entry.level]
+            feed.add_row(
+                time.strftime("%H:%M:%S", time.localtime(entry.at)),
+                Text(glyph, style=glyph_style),
+                Text(entry.text, overflow="ellipsis", no_wrap=True),
+            )
+        feed_body = feed
+
+    return Panel(
+        Group(header, Text(""), counters, Text(""), Text("recent activity", style="label"), feed_body),
+        title="[brand]live status[/brand]",
+        border_style="brand",
+        box=box.ROUNDED,
+        padding=(1, 2),
+    )
+
+
+class Dashboard:
+    """A Rich renderable that reads fresh in-memory state each time it is drawn (for ``rich.live.Live``)."""
+
+    def __init__(
+        self,
+        stats: BotStats,
+        get_status: Callable[[], Status],
+        get_allowlist_size: Callable[[], int],
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.stats = stats
+        self.get_status = get_status
+        self.get_allowlist_size = get_allowlist_size
+        self.clock = clock
+
+    def __rich__(self) -> Panel:
+        return render_dashboard(
+            self.stats,
+            status=self.get_status(),
+            allowlist_size=self.get_allowlist_size(),
+            now=self.clock(),
+        )
+
+
+def render_shutdown_panel(stats: BotStats, now: float | None = None) -> Panel:
+    """A one-line goodbye with the session totals."""
+    line = Text(justify="center")
+    line.append("Bombagif signed off", style="brand")
+    line.append(
+        f"  \u2022  {stats.conversions_ok} converted, {stats.conversions_failed} failed  \u2022  up {stats.uptime(now)}",
+        style="muted",
+    )
+    return Panel(line, border_style="brand", box=box.ROUNDED)
