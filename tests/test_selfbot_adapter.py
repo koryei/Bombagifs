@@ -364,5 +364,68 @@ class SelfBotCaptchaGuardTests(_SelfBotCase):
         self.assertFalse(self.bot.captcha_guard.blocked)
 
 
+def make_relationship(kind: object, user_id: int = 5) -> SimpleNamespace:
+    return SimpleNamespace(type=kind, user=SimpleNamespace(id=user_id), accept=AsyncMock())
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotFriendRequestTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.bot.auto_accept_friends = True
+        self.bot.friend_accept_delay = 0
+        self.incoming = discord.RelationshipType.incoming_request
+
+    async def test_incoming_request_is_accepted_when_enabled(self) -> None:
+        relationship = make_relationship(self.incoming)
+        await self.bot.on_relationship_add(relationship)
+        relationship.accept.assert_awaited_once()
+
+    async def test_disabled_by_default(self) -> None:
+        self.bot.auto_accept_friends = False
+        relationship = make_relationship(self.incoming)
+        await self.bot.on_relationship_add(relationship)
+        relationship.accept.assert_not_awaited()
+
+    async def test_only_incoming_requests_are_accepted(self) -> None:
+        for kind in (discord.RelationshipType.friend, discord.RelationshipType.outgoing_request, discord.RelationshipType.blocked):
+            with self.subTest(kind=kind):
+                relationship = make_relationship(kind)
+                await self.bot.on_relationship_add(relationship)
+                relationship.accept.assert_not_awaited()
+
+    async def test_accepting_does_not_register_the_user(self) -> None:
+        await self.bot.on_relationship_add(make_relationship(self.incoming, user_id=5))
+        self.assertNotIn(5, self.allowlist)
+
+    async def test_captcha_on_accept_trips_guard_and_stops(self) -> None:
+        relationship = make_relationship(self.incoming)
+        relationship.accept.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_relationship_add(relationship)
+        self.assertEqual(self.bot.captcha_guard.reason, "accepting a friend request")
+        later = make_relationship(self.incoming, user_id=6)
+        await self.bot.on_relationship_add(later)
+        later.accept.assert_not_awaited()
+
+    async def test_other_errors_are_logged_without_tripping(self) -> None:
+        relationship = make_relationship(self.incoming)
+        relationship.accept.side_effect = discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_relationship_add(relationship)
+        self.assertFalse(self.bot.captcha_guard.blocked)
+
+    async def test_ready_sweeps_pending_requests_up_to_the_cap(self) -> None:
+        from selfbot import SelfBot
+
+        pending = [make_relationship(self.incoming, user_id=i) for i in range(15)]
+        friend = make_relationship(discord.RelationshipType.friend, user_id=99)
+        with patch.object(SelfBot, "relationships", new_callable=PropertyMock, return_value=[friend, *pending]):
+            await self.bot.on_ready()
+        accepted = [r for r in pending if r.accept.await_count == 1]
+        self.assertEqual(len(accepted), self.bot.friend_sweep_limit)
+        friend.accept.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

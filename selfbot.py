@@ -41,6 +41,7 @@ from selfbot_logic import (
     RateLimiter,
     collect_media,
     decide,
+    env_flag,
     format_results,
     has_media,
 )
@@ -55,12 +56,17 @@ class SelfBot(discord.Client):
         allowlist: AllowlistStore,
         rate_limiter: RateLimiter | None = None,
         captcha_guard: CaptchaGuard | None = None,
+        auto_accept_friends: bool = False,
     ) -> None:
         super().__init__()
         self.config = settings
         self.allowlist = allowlist
         self.captcha_guard = captcha_guard or CaptchaGuard(allowlist.path.with_name("captcha-blocked.json"))
         self.rate_limiter = rate_limiter or RateLimiter()
+        self.auto_accept_friends = auto_accept_friends
+        self.friend_accept_delay = 3.0  # seconds between accepts, so a burst never looks automated
+        self.friend_sweep_limit = 10  # pending requests accepted per (re)connect
+        self._friend_lock = asyncio.Lock()
         self.http_session: aiohttp.ClientSession | None = None
         self.max_parallel_jobs = max(1, min(2, os.cpu_count() or 1))
         self.executor = ThreadPoolExecutor(max_workers=self.max_parallel_jobs)
@@ -82,6 +88,34 @@ class SelfBot(discord.Client):
 
     async def on_ready(self) -> None:
         self.logger.info("Self-bot connected", extra={"user_id": self.user.id if self.user else None})
+        if self.auto_accept_friends:
+            pending = [r for r in self.relationships if r.type is discord.RelationshipType.incoming_request]
+            for relationship in pending[: self.friend_sweep_limit]:
+                if self.captcha_guard.blocked:
+                    break
+                await self._accept_friend(relationship)
+
+    async def on_relationship_add(self, relationship: discord.Relationship) -> None:
+        """Accept a new incoming friend request when the operator opted in."""
+        if self.auto_accept_friends:
+            await self._accept_friend(relationship)
+
+    async def _accept_friend(self, relationship: discord.Relationship) -> None:
+        """Accept one incoming request, paced and CAPTCHA-aware. Accepting never registers anyone."""
+        if relationship.type is not discord.RelationshipType.incoming_request:
+            return
+        async with self._friend_lock:
+            if self.captcha_guard.blocked:
+                return
+            try:
+                await relationship.accept()
+                self.logger.info("Accepted a friend request", extra={"user_id": relationship.user.id})
+            except discord.CaptchaRequired:
+                self.captcha_guard.trip("accepting a friend request")
+                return
+            except discord.HTTPException:
+                self.logger.exception("Could not accept a friend request", extra={"user_id": relationship.user.id})
+            await asyncio.sleep(self.friend_accept_delay)
 
     def _incoming(self, message: discord.Message) -> Incoming:
         """Summarize a Discord message into the facts the decision rules use."""
@@ -237,6 +271,7 @@ def main() -> None:
         settings,
         AllowlistStore(data_dir / "allowlist.json"),
         captcha_guard=CaptchaGuard(data_dir / "captcha-blocked.json"),
+        auto_accept_friends=env_flag(os.getenv("SELFBOT_AUTO_ACCEPT_FRIENDS")),
     )
     bot.run(settings.discord_token, log_handler=None)
 
