@@ -280,7 +280,11 @@ def configure_pretty_logging(console: Console, level: str) -> None:
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(PrettyLogHandler(console))
-    root.setLevel(getattr(logging, level, logging.INFO))
+    numeric = getattr(logging, level, logging.INFO)
+    root.setLevel(numeric)
+    # discord.py-self announces its login, user agent and TLS fingerprint at INFO: noise in a terminal.
+    # Warnings and errors still show, and LOG_LEVEL=DEBUG brings everything back.
+    logging.getLogger("discord").setLevel(logging.NOTSET if numeric <= logging.DEBUG else max(numeric, logging.WARNING))
 
 
 class TerminalUi:

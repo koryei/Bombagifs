@@ -202,6 +202,27 @@ class PrettyLogTests(unittest.TestCase):
         self.assertIn("ValueError", out)
         self.assertIn("boom", out)
 
+    def test_discord_library_chatter_is_hidden_but_warnings_show(self) -> None:
+        root = logging.getLogger()
+        discord_logger = logging.getLogger("discord")
+        saved, level, discord_level = root.handlers[:], root.level, discord_logger.level
+        self.addCleanup(lambda: (root.handlers.__setitem__(slice(None), saved), root.setLevel(level), discord_logger.setLevel(discord_level)))
+        console_ui.configure_pretty_logging(self.console, "INFO")
+        logging.getLogger("discord.http").info("Found user agent Mozilla")
+        logging.getLogger("discord.gateway").warning("Gateway hiccup")
+        out = self.output()
+        self.assertNotIn("Found user agent", out)
+        self.assertIn("Gateway hiccup", out)
+
+    def test_debug_level_keeps_discord_logs(self) -> None:
+        root = logging.getLogger()
+        discord_logger = logging.getLogger("discord")
+        saved, level, discord_level = root.handlers[:], root.level, discord_logger.level
+        self.addCleanup(lambda: (root.handlers.__setitem__(slice(None), saved), root.setLevel(level), discord_logger.setLevel(discord_level)))
+        console_ui.configure_pretty_logging(self.console, "DEBUG")
+        logging.getLogger("discord.http").info("Found user agent Mozilla")
+        self.assertIn("Found user agent", self.output())
+
     def test_configure_pretty_logging_replaces_root_handlers(self) -> None:
         root = logging.getLogger()
         saved, level = root.handlers[:], root.level
