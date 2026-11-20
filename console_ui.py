@@ -288,6 +288,11 @@ class TerminalUi:
         self._live = Live(self.dashboard, console=self.console, refresh_per_second=4, transient=True)
         self._live.start()
 
+    def refresh(self) -> None:
+        """Redraw the live panel now (it also redraws itself a few times a second)."""
+        if self._live is not None:
+            self._live.refresh()
+
     def stop(self, stats: BotStats) -> None:
         """Stop the live panel and print the session summary (does nothing if never started)."""
         if self._live is None:
@@ -295,3 +300,70 @@ class TerminalUi:
         self._live.stop()
         self._live = None
         self.console.print(render_shutdown_panel(stats))
+
+
+def demo(console: Console | None = None, pause: float = 0.7) -> None:
+    """Preview the terminal UI with made-up activity (``python console_ui.py``). Touches no network."""
+    console = console or create_console()
+    stats = BotStats()
+    state: dict[str, Any] = {"status": "connecting", "allowlist": 0}
+    ui = TerminalUi(console, Dashboard(stats, lambda: state["status"], lambda: state["allowlist"]))
+
+    log = logging.getLogger("bombagif.demo")
+    log.handlers = [PrettyLogHandler(console)]
+    log.propagate = False
+    log.setLevel(logging.DEBUG)
+
+    def step(action: Callable[[], None]) -> None:
+        action()
+        ui.refresh()
+        time.sleep(pause)
+
+    ui.show_boot(
+        {
+            "account": "Bombaclat#0001",
+            "zipline": "gifs.example.com",
+            "allowlist": "0 users (data/allowlist.json)",
+            "auto-accept friends": "off",
+            "captcha guard": "armed",
+            "rate limit": "5 triggers / 60s per user",
+            "batch": "up to 5 files per message",
+            "python": "3.14",
+        }
+    )
+    log.info("Self-bot connected", extra={"user_id": 1000})
+
+    def say_hi() -> None:
+        state["status"], state["allowlist"] = "online", 1
+        stats.registered += 1
+        stats.note("info", "pranit said hi: registered")
+        log.info("Registered a new user", extra={"user_id": 4242})
+
+    def convert_ok() -> None:
+        stats.triggers += 1
+        stats.conversions_ok += 1
+        stats.note("ok", "pranit: image.png converted (1.2s)")
+        log.info("Processing attachment", extra={"user_id": 4242, "attachment_name": "image.png", "trace_id": "9f3a2c71e5"})
+
+    def too_big() -> None:
+        stats.triggers += 1
+        stats.conversions_failed += 1
+        stats.note("fail", "koryei: huge.png: That file is too large. The maximum upload size is 15 MB.")
+        log.warning("Zipline rejected the upload (status=413, body='Payload Too Large')", extra={"trace_id": "9f3a2c71e5"})
+
+    def limited() -> None:
+        stats.rate_limited += 1
+        stats.note("warn", "shan rate limited")
+
+    def captcha() -> None:
+        state["status"] = "paused"
+        stats.note("warn", "CAPTCHA requested while sending a reply. Paused; see the log to resume.")
+        log.error("Discord requested a CAPTCHA during sending a reply: all account actions are paused.")
+
+    for action in (say_hi, convert_ok, convert_ok, too_big, limited, captcha):
+        step(action)
+    ui.stop(stats)
+
+
+if __name__ == "__main__":
+    demo()

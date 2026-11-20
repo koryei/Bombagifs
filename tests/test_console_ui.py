@@ -233,5 +233,15 @@ class TerminalUiTests(unittest.TestCase):
         self.assertNotIn("signed off", self.console.export_text())
 
 
+@unittest.skipUnless(HAS_RICH, "needs rich (run in .venv-selfbot)")
+class DemoTests(unittest.TestCase):
+    def test_demo_runs_and_shows_every_piece(self) -> None:
+        console = console_ui.create_console(record=True, width=100, force_terminal=True, color_system=None)
+        console_ui.demo(console, pause=0.0)
+        text = console.export_text()
+        for expected in ("Bombagif self-bot is online", "converted", "signed off", "CAPTCHA"):
+            self.assertIn(expected, text)
+
+
 if __name__ == "__main__":
     unittest.main()
