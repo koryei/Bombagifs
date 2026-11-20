@@ -8,7 +8,23 @@ import unittest
 
 from PIL import Image
 
-from clip_render import THEMES, ClipAuthor, ClipCard, ClipMessage, format_time, group_messages, load_fonts, render_clip, wrap_text
+from clip_render import (
+    BASELINE,
+    HEADER_H,
+    PAD,
+    THEMES,
+    TEXT_X,
+    ClipAuthor,
+    ClipCard,
+    ClipMessage,
+    Span,
+    format_time,
+    group_messages,
+    load_fonts,
+    render_clip,
+    tokenize_markdown,
+    wrap_text,
+)
 
 T0 = 1_700_000_000.0
 
@@ -25,7 +41,7 @@ class FontTests(unittest.TestCase):
     def test_fonts_load_at_scale(self) -> None:
         for scale in (1, 2):
             fonts = load_fonts(scale)
-            for name in ("body", "bold", "italic", "mono", "name", "time", "tag"):
+            for name in ("body", "bold", "italic", "bold_italic", "mono", "name", "time", "tag"):
                 with self.subTest(scale=scale, font=name):
                     self.assertGreater(getattr(fonts, name).getlength("Hello"), 0)
         self.assertGreater(load_fonts(2).body.getlength("Hello"), load_fonts(1).body.getlength("Hello") * 1.9)
@@ -191,6 +207,152 @@ class RenderTests(unittest.TestCase):
 
     def test_empty_card_still_renders_a_valid_image(self) -> None:
         self.assertGreater(render(card_of(), scale=1).size[1], 0)
+
+
+def flags(span: Span) -> str:
+    return ("b" if span.bold else "") + ("i" if span.italic else "") + ("u" if span.underline else "") + ("s" if span.strike else "")
+
+
+def shape(text: str, mentions: dict[int, str] | None = None) -> list[tuple[str, str, str]]:
+    return [(s.kind, s.text, flags(s)) for s in tokenize_markdown(text, mentions)]
+
+
+class MarkdownTokenizerTests(unittest.TestCase):
+    def test_plain_text(self) -> None:
+        self.assertEqual(shape("just words"), [("text", "just words", "")])
+        self.assertEqual(shape(""), [])
+
+    def test_basic_styles(self) -> None:
+        self.assertEqual(shape("**bold**"), [("text", "bold", "b")])
+        self.assertEqual(shape("*it*"), [("text", "it", "i")])
+        self.assertEqual(shape("_it_"), [("text", "it", "i")])
+        self.assertEqual(shape("__under__"), [("text", "under", "u")])
+        self.assertEqual(shape("~~gone~~"), [("text", "gone", "s")])
+
+    def test_styles_inside_text(self) -> None:
+        self.assertEqual(shape("a **b** c"), [("text", "a ", ""), ("text", "b", "b"), ("text", " c", "")])
+
+    def test_nested_styles(self) -> None:
+        self.assertEqual(shape("***both***"), [("text", "both", "bi")])
+        self.assertEqual(shape("**bold *italic* bold**"), [("text", "bold ", "b"), ("text", "italic", "bi"), ("text", " bold", "b")])
+        self.assertEqual(shape("__under **bold**__"), [("text", "under ", "u"), ("text", "bold", "bu")])
+
+    def test_inline_code_is_not_parsed_further(self) -> None:
+        self.assertEqual(shape("run `**x**` now"), [("text", "run ", ""), ("code", "**x**", ""), ("text", " now", "")])
+        self.assertEqual(shape("``a ` b``"), [("code", "a ` b", "")])
+
+    def test_fenced_code_blocks(self) -> None:
+        self.assertEqual(shape("```\nline1\nline2\n```"), [("codeblock", "line1\nline2", "")])
+        self.assertEqual(shape("```py\nprint(1)\n```"), [("codeblock", "print(1)", "")])
+        self.assertEqual(shape("before ```x = 1``` after"), [("text", "before ", ""), ("codeblock", "x = 1", ""), ("text", " after", "")])
+
+    def test_unmatched_markers_stay_literal(self) -> None:
+        for text in ("**oops", "a * b", "2 * 3 * 4", "~~nope", "`open", "snake_case_name", "lone _ underscore", "** **"):
+            with self.subTest(text=text):
+                self.assertEqual(shape(text), [("text", text, "")])
+
+    def test_escaped_markers_are_literal(self) -> None:
+        self.assertEqual(shape("\\*not italic\\*"), [("text", "*not italic*", "")])
+        self.assertEqual(shape("a \\\\ b"), [("text", "a \\ b", "")])  # an escaped backslash
+        self.assertEqual(shape("trailing \\"), [("text", "trailing \\", "")])
+
+    def test_mentions_resolve_from_the_mapping_else_unknown(self) -> None:
+        names = {1: "Koryei"}
+        self.assertEqual(shape("hi <@1>", names), [("text", "hi ", ""), ("mention", "@Koryei", "")])
+        self.assertEqual(shape("<@!1>", names), [("mention", "@Koryei", "")])
+        self.assertEqual(shape("<@2>", names), [("mention", "@unknown", "")])
+        self.assertEqual(shape("<#9>", names), [("mention", "#channel", "")])
+        self.assertEqual(shape("<@&7>", names), [("mention", "@role", "")])
+
+    def test_timestamps_become_plain_text(self) -> None:
+        spans = tokenize_markdown("at <t:1700000000:R> ok")
+        self.assertTrue(all(s.kind == "text" for s in spans))
+        self.assertNotIn("<t:", "".join(s.text for s in spans))
+
+    def test_custom_emoji_spans(self) -> None:
+        spans = tokenize_markdown("a <:pog:123> b <a:wave:456>")
+        custom = [(s.kind, s.text, s.ref) for s in spans if s.kind == "custom_emoji"]
+        self.assertEqual(custom, [("custom_emoji", "pog", "123"), ("custom_emoji", "wave", "456")])
+
+    def test_unclosed_angle_brackets_stay_literal(self) -> None:
+        self.assertEqual(shape("a < b <@ c"), [("text", "a < b <@ c", "")])
+
+
+class MarkdownRenderTests(unittest.TestCase):
+    BODY_Y = (PAD + HEADER_H + BASELINE) * 2  # baseline of the first body line at scale 2
+
+    def text_row_max(self, image: Image.Image, y0: int, y1: int, x1: int) -> int:
+        best = 0
+        for y in range(y0, y1):
+            row = image.crop((TEXT_X * 2, y, x1, y + 1))
+            best = max(best, count_close(row, THEMES["onyx"].text))
+        return best
+
+    def test_code_block_draws_a_panel_in_the_code_colour(self) -> None:
+        plain = render(card_of(message("x = 1")), scale=2)
+        block = render(card_of(message("```\nx = 1\ny = 2\n```")), scale=2)
+        self.assertEqual(count_close(plain, THEMES["onyx"].code_bg, tolerance=0), 0)
+        self.assertGreater(count_close(block, THEMES["onyx"].code_bg, tolerance=0), 2000)
+
+    def test_inline_code_draws_a_background(self) -> None:
+        image = render(card_of(message("run `ls -la` now")), scale=2)
+        self.assertGreater(count_close(image, THEMES["onyx"].code_bg, tolerance=0), 200)
+
+    def test_mention_draws_a_pill_with_mention_colours(self) -> None:
+        image = render(ClipCard(messages=(message("hey <@1>"),), mentions={1: "Koryei"}), scale=2)
+        self.assertGreater(count_close(image, THEMES["onyx"].mention_bg, tolerance=0), 200)
+        self.assertGreater(count_close(image, THEMES["onyx"].mention_text), 40)
+
+    def test_underline_draws_a_line_under_the_text(self) -> None:
+        font = load_fonts(2).body
+        width = int(font.getlength("word"))
+        x1 = TEXT_X * 2 + width
+        plain = render(card_of(message("word")), scale=2)
+        under = render(card_of(message("__word__")), scale=2)
+        y0, y1 = self.BODY_Y + 1, self.BODY_Y + 6
+        self.assertGreaterEqual(self.text_row_max(under, y0, y1, x1), width * 0.9)
+        self.assertLess(self.text_row_max(plain, y0, y1, x1), width * 0.3)
+
+    def test_strikethrough_draws_a_line_through_the_text(self) -> None:
+        font = load_fonts(2).body
+        width = int(font.getlength("word"))
+        x1 = TEXT_X * 2 + width
+        plain = render(card_of(message("word")), scale=2)
+        struck = render(card_of(message("~~word~~")), scale=2)
+        y0, y1 = self.BODY_Y - 14, self.BODY_Y - 4
+        self.assertGreaterEqual(self.text_row_max(struck, y0, y1, x1), width * 0.9)
+        self.assertLess(self.text_row_max(plain, y0, y1, x1), width * 0.8)
+
+    def test_bold_changes_the_rendering(self) -> None:
+        self.assertNotEqual(render_clip(card_of(message("word")), scale=2), render_clip(card_of(message("**word**")), scale=2))
+
+    def test_markdown_markers_are_not_drawn(self) -> None:
+        asterisks = render(card_of(message("**word**")), scale=2)
+        bare = render(card_of(message("word")), scale=2)
+        # bold glyphs are wider than regular, but markers must not add width equivalent to four asterisks
+        font = load_fonts(2)
+        self.assertLess(font.bold.getlength("word") + 4, font.bold.getlength("**word**"))
+        self.assertEqual(asterisks.size[1], bare.size[1])
+
+    def test_styled_text_wraps_inside_the_card(self) -> None:
+        text = " ".join(["**bold**", "_italic_", "plain", "`code`", "~~strike~~"] * 8)
+        image = render(card_of(message(text)), scale=2)
+        right_padding = image.crop(((520 - PAD + 2) * 2, 0, 520 * 2, image.size[1]))
+        self.assertEqual(count_close(right_padding, THEMES["onyx"].bg, tolerance=0), right_padding.size[0] * right_padding.size[1])
+        self.assertGreater(image.size[1], render(card_of(message("short")), scale=2).size[1] + 40)
+
+    def test_very_long_unbroken_words_do_not_overflow(self) -> None:
+        image = render(card_of(message("**" + "w" * 200 + "**")), scale=2)
+        right_padding = image.crop(((520 - PAD + 2) * 2, 0, 520 * 2, image.size[1]))
+        self.assertEqual(count_close(right_padding, THEMES["onyx"].bg, tolerance=0), right_padding.size[0] * right_padding.size[1])
+
+    def test_explicit_newlines_inside_styles_make_new_lines(self) -> None:
+        one = render(card_of(message("**a b**")), scale=1).size[1]
+        two = render(card_of(message("**a\nb**")), scale=1).size[1]
+        self.assertEqual(two - one, 22)
+
+    def test_empty_message_still_takes_a_line(self) -> None:
+        self.assertEqual(render(card_of(message("")), scale=1).size[1], render(card_of(message("x")), scale=1).size[1])
 
 
 if __name__ == "__main__":
