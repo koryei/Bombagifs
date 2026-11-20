@@ -17,6 +17,9 @@ LAUGH_EMOJI = frozenset({"😂", "🤣", "💀", "😭"})
 _LAUGH_RE = re.compile(r"\b(?:lm+a+o+|lmfao|rofl|dead|dying|crying|screaming)\b|[💀😭😂🤣]", re.IGNORECASE)
 LAUGH_REPLY_WINDOW_S = 60.0
 LAUGH_REPLY_LOOKBACK = 3
+RUN_MAX_GAP_S = 7 * 60.0  # Discord groups one author's messages sent within 7 minutes
+RUN_MAX_MESSAGES = 8
+RUN_MAX_CHARS = 600
 
 
 def has_laughter(text: str) -> bool:
@@ -137,3 +140,53 @@ class ScoutBuffer:
     def delete_many(self, chat_id: int, message_ids: list[int], at: float | None = None) -> None:
         for message_id in message_ids:
             self.delete(chat_id, message_id, at)
+
+    def runs(self, chat_id: int) -> list[list[ScoutMessage]]:
+        """Candidate runs, oldest first: one author's consecutive eligible messages (7 minute gaps at most).
+
+        Another author's message, an ineligible message, or an opted-out author ends a run. Runs are split
+        at 8 messages or 600 characters. Deleted messages stay in their runs.
+        """
+        self.prune()
+        found: list[list[ScoutMessage]] = []
+        current: list[ScoutMessage] = []
+        chars = 0
+
+        def finish() -> None:
+            nonlocal current, chars
+            if current:
+                found.append(current)
+            current, chars = [], 0
+
+        for message in self._chats.get(chat_id, {}).values():
+            if not message.eligible or self.is_opted_out(message.author_id):
+                finish()
+                continue
+            text_len = len(message.original)
+            fits = (
+                current
+                and message.author_id == current[-1].author_id
+                and message.created_at - current[-1].created_at <= RUN_MAX_GAP_S
+                and len(current) < RUN_MAX_MESSAGES
+                and chars + text_len <= RUN_MAX_CHARS
+            )
+            if not fits:
+                finish()
+            current.append(message)
+            chars += text_len
+        finish()
+        return found
+
+    def window(self, chat_id: int, run: list[ScoutMessage], before: int = 5, after: int = 3) -> list[ScoutMessage]:
+        """The run plus up to ``before``/``after`` neighbouring messages, minus opted-out authors.
+
+        Ineligible neighbours stay in the list (as placeholders for the judge) so adjacency is visible.
+        """
+        self.prune()
+        ordered = list(self._chats.get(chat_id, {}).values())
+        positions = {message.id: index for index, message in enumerate(ordered)}
+        if not run or run[0].id not in positions or run[-1].id not in positions:
+            return []
+        start = max(0, positions[run[0].id] - before)
+        end = min(len(ordered), positions[run[-1].id] + after + 1)
+        return [m for m in ordered[start:end] if not self.is_opted_out(m.author_id)]

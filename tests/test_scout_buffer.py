@@ -178,5 +178,111 @@ class LaughSignalTests(unittest.TestCase):
         self.assertEqual(self.buffer.get(1, 1).laugh_replies, 0)
 
 
+class RunAndWindowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.opted_out: set[int] = set()
+        self.buffer = ScoutBuffer(
+            max_age_s=3600, max_per_chat=100, is_opted_out=lambda user_id: user_id in self.opted_out, clock=self.clock
+        )
+        self.t0 = self.clock.now - 1000
+
+    def add(self, id: int, text: str = "some words", *, author: int = 10, dt: float = 0, **kwargs) -> ScoutMessage:
+        message = msg(id, text, author=author, at=self.t0 + dt, **kwargs)
+        self.assertTrue(self.buffer.add(message))
+        return message
+
+    def ids(self, run: list[ScoutMessage]) -> list[int]:
+        return [m.id for m in run]
+
+    def test_run_groups_consecutive_messages_by_one_author_within_7_minutes(self) -> None:
+        for i, dt in enumerate((0, 60, 120), start=1):
+            self.add(i, dt=dt)
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [[1, 2, 3]])
+
+    def test_other_author_between_splits_runs(self) -> None:
+        self.add(1, author=10, dt=0)
+        self.add(2, author=20, dt=10)
+        self.add(3, author=10, dt=20)
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [[1], [2], [3]])
+
+    def test_gap_over_7_minutes_splits_runs(self) -> None:
+        self.add(1, dt=0)
+        self.add(2, dt=420)  # exactly 7 minutes still groups
+        self.add(3, dt=841)  # 421 s after the previous message splits
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [[1, 2], [3]])
+
+    def test_ineligible_messages_break_runs_and_are_excluded(self) -> None:
+        self.add(1, dt=0)
+        self.add(2, "", dt=5, eligible=False)
+        self.add(3, dt=10)
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [[1], [3]])
+
+    def test_long_runs_are_split_at_8_messages(self) -> None:
+        for i in range(1, 11):
+            self.add(i, dt=i)
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [list(range(1, 9)), [9, 10]])
+
+    def test_long_runs_are_split_at_600_characters(self) -> None:
+        for i in range(1, 5):
+            self.add(i, "x" * 200, dt=i)
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [[1, 2, 3], [4]])
+
+    def test_deleted_messages_stay_in_runs(self) -> None:
+        self.add(1, dt=0)
+        self.add(2, dt=5)
+        self.buffer.delete(1, 2)
+        runs = self.buffer.runs(1)
+        self.assertEqual([self.ids(r) for r in runs], [[1, 2]])
+        self.assertTrue(runs[0][1].deleted)
+
+    def test_runs_skip_authors_who_opted_out_after_buffering(self) -> None:
+        self.add(1, author=10, dt=0)
+        self.add(2, author=20, dt=5)
+        self.opted_out.add(10)
+        self.assertEqual([self.ids(r) for r in self.buffer.runs(1)], [[2]])
+
+    def test_runs_of_an_unknown_chat_are_empty(self) -> None:
+        self.assertEqual(self.buffer.runs(99), [])
+
+    def test_window_has_up_to_5_before_and_3_after_contiguous(self) -> None:
+        for i in range(1, 13):
+            self.add(i, author=10 + (i % 2), dt=i)  # alternating authors: every run is one message
+        run = self.buffer.runs(1)[5]
+        self.assertEqual(self.ids(run), [6])
+        self.assertEqual(self.ids(self.buffer.window(1, run)), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+    def test_window_is_shorter_at_the_edges(self) -> None:
+        for i in range(1, 4):
+            self.add(i, author=10 + (i % 2), dt=i)
+        run = self.buffer.runs(1)[0]
+        self.assertEqual(self.ids(self.buffer.window(1, run)), [1, 2, 3])
+
+    def test_window_covers_a_multi_message_run(self) -> None:
+        self.add(1, author=20, dt=0)
+        self.add(2, author=10, dt=5)
+        self.add(3, author=10, dt=6)
+        self.add(4, author=20, dt=10)
+        run = self.buffer.runs(1)[1]
+        self.assertEqual(self.ids(run), [2, 3])
+        self.assertEqual(self.ids(self.buffer.window(1, run)), [1, 2, 3, 4])
+
+    def test_window_drops_authors_who_opted_out_after_buffering(self) -> None:
+        self.add(1, author=20, dt=0)
+        self.add(2, author=10, dt=5)
+        self.add(3, author=30, dt=10)
+        self.opted_out.add(20)
+        run = [self.buffer.get(1, 2)]
+        self.assertEqual(self.ids(self.buffer.window(1, run)), [2, 3])
+
+    def test_window_keeps_ineligible_messages_as_placeholders(self) -> None:
+        self.add(1, "", author=20, dt=0, eligible=False)
+        self.add(2, author=10, dt=5)
+        run = [self.buffer.get(1, 2)]
+        window = self.buffer.window(1, run)
+        self.assertEqual(self.ids(window), [1, 2])
+        self.assertFalse(window[0].eligible)
+
+
 if __name__ == "__main__":
     unittest.main()
