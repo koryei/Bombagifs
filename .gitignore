@@ -9,3 +9,5 @@ __pycache__/
 # Written by install.sh inside the install directory.
 .install-mode
 bombagif.log
+.venv-selfbot/
+data/

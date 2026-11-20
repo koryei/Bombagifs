@@ -1,0 +1,8 @@
+# Self-bot only (selfbot.py). Do NOT install into the same environment as requirements.txt:
+# discord.py-self and discord.py both provide the `discord` package.
+discord.py-self==2.1.0
+aiohttp==3.14.3
+Pillow==12.3.0
+CairoSVG==2.9.0
+defusedxml==0.7.1
+python-dotenv==1.2.4
