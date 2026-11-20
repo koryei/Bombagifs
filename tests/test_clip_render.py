@@ -18,6 +18,8 @@ from clip_render import (
     ClipCard,
     ClipMessage,
     Span,
+    collect_asset_keys,
+    demo_card,
     format_time,
     group_messages,
     load_fonts,
@@ -353,6 +355,100 @@ class MarkdownRenderTests(unittest.TestCase):
 
     def test_empty_message_still_takes_a_line(self) -> None:
         self.assertEqual(render(card_of(message("")), scale=1).size[1], render(card_of(message("x")), scale=1).size[1])
+
+
+class EmojiTokenTests(unittest.TestCase):
+    def emoji_spans(self, text: str) -> list[tuple[str, str | None]]:
+        return [(s.text, s.ref) for s in tokenize_markdown(text) if s.kind == "emoji"]
+
+    def test_unicode_emoji_are_tokenised_including_zwj_skin_tone_and_flags(self) -> None:
+        text = "a 👍🏽 b 👨‍👩‍👧 c 🇨🇦 d ❤️ e 😂 f 1️⃣"
+        self.assertEqual(
+            self.emoji_spans(text),
+            [
+                ("👍🏽", "1f44d-1f3fd"),
+                ("👨‍👩‍👧", "1f468-200d-1f469-200d-1f467"),
+                ("🇨🇦", "1f1e8-1f1e6"),
+                ("❤️", "2764"),
+                ("😂", "1f602"),
+                ("1️⃣", "31-20e3"),
+            ],
+        )
+
+    def test_text_between_emoji_is_kept_with_its_style(self) -> None:
+        spans = [(s.kind, s.text, s.bold) for s in tokenize_markdown("**hi 😂 there**")]
+        self.assertEqual(spans, [("text", "hi ", True), ("emoji", "😂", False), ("text", " there", True)])
+
+    def test_plain_text_and_digits_are_not_emoji(self) -> None:
+        self.assertEqual(self.emoji_spans("hello 123 #tag * ok"), [])
+
+    def test_emoji_inside_code_is_left_alone(self) -> None:
+        self.assertEqual(self.emoji_spans("`😂` and ```😂```"), [])
+
+    def test_collect_asset_keys(self) -> None:
+        card = card_of(message("hi 😂 <:pog:123> <a:wave:456> 😂"), message("🇨🇦", who=author(2), at=T0 + 1))
+        self.assertEqual(collect_asset_keys(card), ({"1f602", "1f1e8-1f1e6"}, {"123", "456"}))
+
+    def test_collect_asset_keys_ignores_code_and_plain_text(self) -> None:
+        self.assertEqual(collect_asset_keys(card_of(message("plain `😂` text"))), (set(), set()))
+
+
+class EmojiRenderTests(unittest.TestCase):
+    RED, GREEN = (255, 0, 0), (0, 255, 0)
+
+    def test_render_uses_supplied_emoji_images_inline(self) -> None:
+        card = card_of(message("hi 😂 there"))
+        image = render(card, scale=2, emoji={"1f602": solid_png(self.RED, 72)})
+        self.assertGreater(count_close(image, self.RED, tolerance=5), 1000)  # about 20x20 logical px at 2x
+        self.assertEqual(count_close(render(card, scale=2), self.RED, tolerance=5), 0)
+
+    def test_custom_emoji_images_are_used(self) -> None:
+        card = card_of(message("yo <:pog:123>"))
+        image = render(card, scale=2, emoji={"custom:123": solid_png(self.GREEN, 64)})
+        self.assertGreater(count_close(image, self.GREEN, tolerance=5), 1000)
+
+    def test_missing_custom_emoji_falls_back_to_its_name(self) -> None:
+        image = render(card_of(message("yo <:pog:123>")), scale=2)
+        self.assertGreater(count_close(image, THEMES["onyx"].text, box=(100 * 2, 38 * 2, 300 * 2, 62 * 2)), 30)
+
+    def test_missing_emoji_asset_falls_back_to_glyph_without_error(self) -> None:
+        image = render(card_of(message("hi 😂 there 🇨🇦")), scale=2, emoji={})
+        self.assertGreater(image.size[1], 0)
+
+    def test_undecodable_emoji_asset_is_ignored(self) -> None:
+        image = render(card_of(message("hi 😂")), scale=2, emoji={"1f602": b"not a png"})
+        self.assertGreater(image.size[1], 0)
+
+    def test_emoji_only_message_is_rendered_larger(self) -> None:
+        assets = {"1f602": solid_png(self.RED, 72)}
+        plain = render(card_of(message("hi 😂")), scale=1, emoji=assets)
+        jumbo = render(card_of(message("😂😂")), scale=1, emoji=assets)
+        self.assertEqual(jumbo.size[1] - plain.size[1], 30)  # a 52 px row instead of a 22 px row
+        self.assertGreater(count_close(jumbo, self.RED, tolerance=5), 2 * 40 * 40)
+
+    def test_more_than_five_emoji_are_not_jumbo(self) -> None:
+        assets = {"1f602": solid_png(self.RED, 72)}
+        five = render(card_of(message("😂" * 5)), scale=1, emoji=assets).size[1]
+        six = render(card_of(message("😂" * 6)), scale=1, emoji=assets).size[1]
+        normal = render(card_of(message("hi 😂")), scale=1, emoji=assets).size[1]
+        self.assertGreater(five, normal)
+        self.assertEqual(six, normal)
+
+    def test_emoji_with_text_wraps_and_stays_inside_the_card(self) -> None:
+        assets = {"1f602": solid_png(self.RED, 72)}
+        image = render(card_of(message("word 😂 " * 30)), scale=2, emoji=assets)
+        right_padding = image.crop(((520 - 16 + 2) * 2, 0, 520 * 2, image.size[1]))
+        self.assertEqual(count_close(right_padding, THEMES["onyx"].bg, tolerance=0), right_padding.size[0] * right_padding.size[1])
+
+
+class DemoTests(unittest.TestCase):
+    def test_demo_card_is_made_up_data_that_renders(self) -> None:
+        card = demo_card()
+        self.assertGreaterEqual(len(card.messages), 3)
+        names = {m.author.name for m in card.messages}
+        self.assertTrue(names.isdisjoint({"Pranit", "Koryei", "Shan"}))  # no real people in the repo
+        image = render(card, scale=2)
+        self.assertGreater(image.size[1], 200)
 
 
 if __name__ == "__main__":

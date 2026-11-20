@@ -17,6 +17,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+try:  # the `emoji` package segments sequences exactly; without it a regex covers the common cases
+    import emoji as _emoji_lib
+except ImportError:  # pragma: no cover - exercised when the package is absent
+    _emoji_lib = None
+
 FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
 GROUP_GAP_S = 7 * 60.0  # Discord groups an author's messages sent within 7 minutes of each other
 
@@ -370,9 +375,66 @@ def _parse(text: str, style: _Style, mentions: Mapping[int, str]) -> list[Span]:
     return _merge(out)
 
 
+_EMOJI_CHAR = (
+    "[\u00a9\u00ae\u203c\u2049\u2122\u2139\u2194-\u21aa\u231a-\u23ff\u24c2\u25aa-\u25fe\u2600-\u27bf"
+    "\u2934\u2935\u2b05-\u2b55\u3030\u303d\u3297\u3299\U0001f000-\U0001faff]"
+)
+_EMOJI_MOD = "[\U0001f3fb-\U0001f3ff]"
+_FALLBACK_EMOJI_RE = re.compile(
+    "[\U0001f1e6-\U0001f1ff]{2}"  # flags
+    "|[0-9#*]\ufe0f?\u20e3"  # keycaps
+    f"|{_EMOJI_CHAR}[\ufe0e\ufe0f]?{_EMOJI_MOD}?(?:\u200d{_EMOJI_CHAR}\ufe0f?{_EMOJI_MOD}?)*"
+)
+
+
+def emoji_key(sequence: str) -> str:
+    """The Twemoji file stem for an emoji sequence: hex codepoints joined by ``-`` (``fe0f`` dropped unless in a ZWJ)."""
+    if "\u200d" not in sequence:
+        sequence = sequence.replace("\ufe0f", "")
+    return "-".join(f"{ord(char):x}" for char in sequence)
+
+
+def _emoji_ranges(text: str) -> list[tuple[int, int]]:
+    if _emoji_lib is not None:
+        return [(found["match_start"], found["match_end"]) for found in _emoji_lib.emoji_list(text)]
+    return [(match.start(), match.end()) for match in _FALLBACK_EMOJI_RE.finditer(text)]
+
+
+def _split_emoji(spans: list[Span]) -> list[Span]:
+    """Split unicode emoji out of plain text spans (code and other kinds are left alone)."""
+    out: list[Span] = []
+    for span in spans:
+        if span.kind != "text":
+            out.append(span)
+            continue
+        position = 0
+        for start, end in _emoji_ranges(span.text):
+            if start > position:
+                out.append(Span("text", span.text[position:start], *_style_of(span)))
+            sequence = span.text[start:end]
+            out.append(Span("emoji", sequence, ref=emoji_key(sequence)))
+            position = end
+        if position < len(span.text):
+            out.append(Span("text", span.text[position:], *_style_of(span)))
+    return out
+
+
 def tokenize_markdown(text: str, mentions: Mapping[int, str] | None = None) -> list[Span]:
-    """Parse the Discord markdown subset (bold, italic, underline, strike, code, mentions, custom emoji)."""
-    return _parse(text, (False, False, False, False), mentions or {})
+    """Parse the Discord markdown subset (bold, italic, underline, strike, code, mentions, emoji)."""
+    return _split_emoji(_parse(text, (False, False, False, False), mentions or {}))
+
+
+def collect_asset_keys(card: ClipCard) -> tuple[set[str], set[str]]:
+    """The images a card needs: ``(unicode emoji keys, custom emoji ids)``, so the caller can prefetch them."""
+    unicode_keys: set[str] = set()
+    custom_ids: set[str] = set()
+    for message in card.messages:
+        for span in tokenize_markdown(message.text, card.mentions):
+            if span.kind == "emoji" and span.ref:
+                unicode_keys.add(span.ref)
+            elif span.kind == "custom_emoji" and span.ref:
+                custom_ids.add(span.ref)
+    return unicode_keys, custom_ids
 
 
 # layout and drawing -------------------------------------------------------------------------------------------
@@ -395,6 +457,8 @@ class _Item:
     bg: tuple[int, int, int] | None = None
     ref: str | None = None
     space: bool = False
+    height: int = LINE_H  # logical px of the row this item needs
+    size: int = 0  # logical px of an emoji image
 
 
 @dataclass
@@ -414,7 +478,20 @@ def _font_for(span: Span, fonts: Fonts) -> ImageFont.FreeTypeFont:
     return fonts.body
 
 
-def _items_for(span: Span, fonts: Fonts, colours: Theme, scale: int) -> list[_Item]:
+EMOJI_SIZE = 20
+JUMBO_SIZE = 48
+JUMBO_ROW = 52
+JUMBO_MAX = 5
+
+
+def _is_jumbo(spans: Sequence[Span]) -> bool:
+    """Discord shows a message of only 1-5 emoji at a larger size."""
+    emoji_count = sum(1 for s in spans if s.kind in ("emoji", "custom_emoji"))
+    others = [s for s in spans if s.kind not in ("emoji", "custom_emoji") and not (s.kind == "text" and not s.text.strip())]
+    return 0 < emoji_count <= JUMBO_MAX and not others
+
+
+def _items_for(span: Span, fonts: Fonts, colours: Theme, scale: int, jumbo: bool = False) -> list[_Item]:
     pad = PILL_PAD * scale
     if span.kind == "text":
         font = _font_for(span, fonts)
@@ -436,11 +513,11 @@ def _items_for(span: Span, fonts: Fonts, colours: Theme, scale: int) -> list[_It
     if span.kind == "mention":
         font = fonts.body
         return [_Item("mention", span.text, font, colours.mention_text, int(font.getlength(span.text)) + 2 * pad, bg=colours.mention_bg)]
-    if span.kind == "custom_emoji":
-        shown = f":{span.text}:"
-        return [_Item("custom", shown, fonts.body, colours.text, int(fonts.body.getlength(shown)), ref=span.ref)]
-    shown = span.text
-    return [_Item(span.kind, shown, fonts.body, colours.text, int(fonts.body.getlength(shown)), ref=span.ref)]
+    size = JUMBO_SIZE if jumbo else EMOJI_SIZE
+    height = JUMBO_ROW if jumbo else LINE_H
+    shown = f":{span.text}:" if span.kind == "custom_emoji" else span.text  # what we draw if the image is missing
+    kind = "custom" if span.kind == "custom_emoji" else "emoji"
+    return [_Item(kind, shown, fonts.body, colours.text, (size + (4 if jumbo else 2)) * scale, ref=span.ref, height=height, size=size)]
 
 
 def _split_item(item: _Item, max_width: int) -> list[_Item]:
@@ -460,7 +537,7 @@ def _split_item(item: _Item, max_width: int) -> list[_Item]:
     return pieces
 
 
-def _layout(spans: Sequence[Span], fonts: Fonts, colours: Theme, scale: int, max_width: int) -> list[_Row]:
+def _layout(spans: Sequence[Span], fonts: Fonts, colours: Theme, scale: int, max_width: int, jumbo: bool = False) -> list[_Row]:
     """Lay spans out into rows: words wrap at ``max_width`` (scaled px), code blocks get their own rows."""
     rows: list[_Row] = []
     line: list[tuple[int, _Item]] = []
@@ -468,7 +545,7 @@ def _layout(spans: Sequence[Span], fonts: Fonts, colours: Theme, scale: int, max
 
     def end_line() -> None:
         nonlocal line, x
-        rows.append(_Row(LINE_H, line))
+        rows.append(_Row(max([LINE_H] + [item.height for _, item in line]), line))
         line, x = [], 0
 
     for span in spans:
@@ -479,7 +556,7 @@ def _layout(spans: Sequence[Span], fonts: Fonts, colours: Theme, scale: int, max
             lines = [piece for source in span.text.split("\n") for piece in wrap_text(source, fonts.mono, inner)]
             rows.append(_Row(len(lines) * BLOCK_LINE_H + 2 * BLOCK_PAD + 2 * BLOCK_MARGIN, [], block=lines))
             continue
-        for item in _items_for(span, fonts, colours, scale):
+        for item in _items_for(span, fonts, colours, scale, jumbo):
             if item.kind == "newline":
                 end_line()
                 continue
@@ -505,7 +582,16 @@ def _layout(spans: Sequence[Span], fonts: Fonts, colours: Theme, scale: int, max
     return rows
 
 
-def _draw_row(draw: ImageDraw.ImageDraw, row: _Row, top: int, scale: int, colours: Theme, fonts: Fonts) -> None:
+def _draw_row(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    row: _Row,
+    top: int,
+    scale: int,
+    colours: Theme,
+    fonts: Fonts,
+    assets: Mapping[str, Image.Image],
+) -> None:
     """Draw one laid-out row whose top edge is at ``top`` logical px."""
     left = TEXT_X * scale
     if row.block is not None:
@@ -517,8 +603,18 @@ def _draw_row(draw: ImageDraw.ImageDraw, row: _Row, top: int, scale: int, colour
             draw.text((left + BLOCK_PAD * scale, y), text, font=fonts.mono, fill=colours.text, anchor="ls")
         return
     baseline = (top + BASELINE) * scale
+    if row.height > LINE_H:  # a jumbo row: centre the text baseline of any fallback glyph
+        baseline = (top + row.height // 2 + 6) * scale
     for offset, item in row.items:
         x = left + offset
+        if item.kind in ("emoji", "custom"):
+            asset = assets.get(item.ref or "" if item.kind == "emoji" else f"custom:{item.ref}")
+            if asset is not None:
+                side = item.size * scale
+                tile = asset.resize((side, side), Image.Resampling.LANCZOS)
+                y = top * scale + (row.height * scale - side) // 2
+                image.paste(tile, (x + scale, y), tile)
+                continue
         text_x = x
         if item.bg is not None:
             draw.rounded_rectangle((x, (top + 2) * scale, x + item.width, (top + 21) * scale), radius=3 * scale, fill=item.bg)
@@ -529,6 +625,18 @@ def _draw_row(draw: ImageDraw.ImageDraw, row: _Row, top: int, scale: int, colour
             draw.rectangle((x, baseline + 2 * scale, x + item.width - 1, baseline + 3 * scale - 1), fill=item.fill)
         if item.strike:
             draw.rectangle((x, baseline - 5 * scale, x + item.width - 1, baseline - 4 * scale - 1), fill=item.fill)
+
+
+def _decode_assets(emoji: Mapping[str, bytes] | None) -> dict[str, Image.Image]:
+    """Decode supplied emoji images, silently dropping any that cannot be read."""
+    decoded: dict[str, Image.Image] = {}
+    for key, data in (emoji or {}).items():
+        try:
+            with Image.open(io.BytesIO(data)) as source:
+                decoded[key] = source.convert("RGBA")
+        except (OSError, ValueError, Image.DecompressionBombError):
+            continue
+    return decoded
 
 
 def render_clip(
@@ -543,13 +651,15 @@ def render_clip(
     fonts = load_fonts(scale)
     max_width = (WIDTH - TEXT_X - PAD) * scale
     groups = group_messages(card.messages)
+    assets = _decode_assets(emoji)
 
     laid_out: list[tuple[list[ClipMessage], list[list[_Row]]]] = []
     total = PAD
     for index, group in enumerate(groups):
-        message_rows = [
-            _layout(tokenize_markdown(message.text, card.mentions), fonts, colours, scale, max_width) for message in group
-        ]
+        message_rows = []
+        for message in group:
+            spans = tokenize_markdown(message.text, card.mentions)
+            message_rows.append(_layout(spans, fonts, colours, scale, max_width, _is_jumbo(spans)))
         laid_out.append((group, message_rows))
         total += HEADER_H + sum(row.height for rows in message_rows for row in rows)
         total += GROUP_GAP if index < len(groups) - 1 else 0
@@ -579,10 +689,36 @@ def render_clip(
         row_top = y + HEADER_H
         for rows in message_rows:
             for row in rows:
-                _draw_row(draw, row, row_top, scale, colours, fonts)
+                _draw_row(image, draw, row, row_top, scale, colours, fonts, assets)
                 row_top += row.height
         y = row_top + GROUP_GAP
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
+
+
+def demo_card() -> ClipCard:
+    """A made-up card (no real people or messages) for previewing the look: ``python clip_render.py demo``."""
+    pilot = ClipAuthor(1, "Maple", (255, 150, 50), "FOX", None)
+    friend = ClipAuthor(2, "Quill", None, None, None)
+    start = 1_700_000_000.0
+    return ClipCard(
+        messages=(
+            ClipMessage(pilot, "so i finally **tried** the new place", start),
+            ClipMessage(pilot, "it was `fine` honestly", start + 8),
+            ClipMessage(friend, "<@1> the soup was ~~good~~ a crime", start + 30),
+        ),
+        mentions={1: "Maple"},
+    )
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "demo":
+        target = Path(sys.argv[2] if len(sys.argv) > 2 else "clip-demo.png")
+        target.write_bytes(render_clip(demo_card()))
+        print(f"wrote {target}")
+    else:
+        print("usage: python clip_render.py demo [out.png]")
