@@ -18,8 +18,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from bombagif_core import ALLOWED_TYPES, MAX_GIF_BATCH, MediaSource
+from bombagif_core import ALLOWED_TYPES, MAX_GIF_BATCH, MediaSource, is_discord_media_url
 
 logger = logging.getLogger("bombagif.selfbot")
 
@@ -207,11 +208,49 @@ def _supported_attachments(message: Any) -> list[MediaSource]:
     return found
 
 
+def _embed_filename(url: str, kind: str) -> str:
+    """Name an embed's media from its URL path; video embeds without a known extension get .mp4."""
+    name = os.path.basename(urlparse(url).path) or "embed"
+    if kind in ("gifv", "video") and os.path.splitext(name.lower())[1] not in ALLOWED_TYPES:
+        name += ".mp4"
+    return name
+
+
+def _embed_sources(message: Any) -> list[MediaSource]:
+    """Media from image/GIF/video embeds, using only Discord's own proxy URLs."""
+    found: list[MediaSource] = []
+    for embed in getattr(message, "embeds", None) or ():
+        kind = getattr(embed, "type", None)
+        if kind in ("gifv", "video"):
+            candidates = [getattr(embed, "video", None)]
+        elif kind == "image":
+            # Discord puts a bare image link's media in `thumbnail`; some embeds use `image`.
+            candidates = [getattr(embed, "image", None), getattr(embed, "thumbnail", None)]
+        else:
+            continue
+        for media in candidates:
+            url = getattr(media, "proxy_url", None)
+            if url and is_discord_media_url(url):
+                found.append(MediaSource(filename=_embed_filename(url, kind), url=url))
+                break
+    return found
+
+
+def has_media(message: Any) -> bool:
+    """True if the message carries attachments or convertible embed media (not plain link previews)."""
+    return bool(getattr(message, "attachments", None)) or bool(_embed_sources(message))
+
+
+def _message_sources(message: Any) -> list[MediaSource]:
+    """A message's attachments; only when it has none, its embeds."""
+    return _supported_attachments(message) or _embed_sources(message)
+
+
 def collect_media(message: Any, referenced: Any | None = None, limit: int = MAX_GIF_BATCH) -> Collected:
     """Pick media from the triggering message, else from the message it replies to."""
-    found = _supported_attachments(message)
+    found = _message_sources(message)
     if not found and referenced is not None:
-        found = _supported_attachments(referenced)
+        found = _message_sources(referenced)
     return Collected(sources=found[:limit], skipped=max(0, len(found) - limit))
 
 

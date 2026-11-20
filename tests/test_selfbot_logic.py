@@ -239,5 +239,67 @@ class FormatResultsTests(unittest.TestCase):
         self.assertTrue(NO_MEDIA_TEXT)
 
 
+def embed(kind: str, *, image: str | None = None, video: str | None = None, thumb: str | None = None, url: str | None = None) -> SimpleNamespace:
+    def media(proxy: str | None) -> SimpleNamespace | None:
+        return SimpleNamespace(url=proxy, proxy_url=proxy) if proxy else None
+
+    return SimpleNamespace(type=kind, image=media(image), video=media(video), thumbnail=media(thumb), url=url)
+
+
+def message_with_embeds(*embeds: SimpleNamespace, attachments: tuple[str, ...] = ()) -> SimpleNamespace:
+    return SimpleNamespace(attachments=[att(n) for n in attachments], embeds=list(embeds))
+
+
+class CollectEmbedTests(unittest.TestCase):
+    def test_collect_embed_image(self) -> None:
+        msg = message_with_embeds(embed("image", image="https://media.discordapp.net/external/h/https/i.example/cat.png?w=1"))
+        sources = collect_media(msg).sources
+        self.assertEqual([(s.filename, s.url) for s in sources], [("cat.png", "https://media.discordapp.net/external/h/https/i.example/cat.png?w=1")])
+
+    def test_collect_gifv_uses_video_proxy_and_mp4_suffix(self) -> None:
+        msg = message_with_embeds(embed("gifv", video="https://images-ext-1.discordapp.net/external/h/https/media.tenor.com/abc/tenor", url="https://tenor.com/view/x"))
+        sources = collect_media(msg).sources
+        self.assertEqual(len(sources), 1)
+        self.assertTrue(sources[0].filename.endswith(".mp4"))
+        self.assertTrue(sources[0].url.startswith("https://images-ext-1.discordapp.net/"))
+
+    def test_collect_video_embed_with_mp4_name_is_kept(self) -> None:
+        msg = message_with_embeds(embed("video", video="https://media.discordapp.net/external/h/clip.webm"))
+        self.assertEqual(collect_media(msg).sources[0].filename, "clip.webm")
+
+    def test_image_embed_falls_back_to_thumbnail(self) -> None:
+        msg = message_with_embeds(embed("image", thumb="https://media.discordapp.net/external/h/t.jpg"))
+        self.assertEqual(collect_media(msg).sources[0].filename, "t.jpg")
+
+    def test_collect_drops_non_discord_embed_host(self) -> None:
+        msg = message_with_embeds(
+            embed("image", image="https://evil.example/a.png"),
+            embed("gifv", video="http://127.0.0.1/a.mp4"),
+        )
+        self.assertEqual(collect_media(msg).sources, [])
+
+    def test_unsupported_embed_types_ignored(self) -> None:
+        msg = message_with_embeds(embed("rich", image="https://media.discordapp.net/a.png"), embed("link"))
+        self.assertEqual(collect_media(msg).sources, [])
+
+    def test_attachments_still_win_over_embeds(self) -> None:
+        msg = message_with_embeds(embed("image", image="https://media.discordapp.net/e.png"), attachments=("mine.png",))
+        self.assertEqual([s.filename for s in collect_media(msg).sources], ["mine.png"])
+
+    def test_own_embeds_win_over_referenced_attachments(self) -> None:
+        mine = message_with_embeds(embed("image", image="https://media.discordapp.net/e.png"))
+        theirs = message_with_embeds(attachments=("theirs.png",))
+        self.assertEqual([s.filename for s in collect_media(mine, theirs).sources], ["e.png"])
+
+    def test_referenced_embeds_are_used_last(self) -> None:
+        theirs = message_with_embeds(embed("image", image="https://media.discordapp.net/r.png"))
+        self.assertEqual([s.filename for s in collect_media(message_with_embeds(), theirs).sources], ["r.png"])
+
+    def test_embeds_count_against_batch_cap(self) -> None:
+        msg = message_with_embeds(*[embed("image", image=f"https://media.discordapp.net/{i}.png") for i in range(6)])
+        collected = collect_media(msg)
+        self.assertEqual((len(collected.sources), collected.skipped), (5, 1))
+
+
 if __name__ == "__main__":
     unittest.main()
