@@ -26,6 +26,12 @@ class CoreIsolationTests(unittest.TestCase):
     def test_selfbot_logic_does_not_import_discord(self) -> None:
         self.assertFalse(self._imports_discord("selfbot_logic"))
 
+    def test_discord_free_scout_modules_do_not_import_discord(self) -> None:
+        for module in ("private_files", "scout_config", "scout_buffer", "scout_safety", "scout_stores", "scout_judge", "scout", "clip_render"):
+            if (REPO_ROOT / f"{module}.py").exists():
+                with self.subTest(module=module):
+                    self.assertFalse(self._imports_discord(module))
+
 
 if __name__ == "__main__":
     unittest.main()

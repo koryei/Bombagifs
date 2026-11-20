@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -21,6 +20,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from bombagif_core import ALLOWED_TYPES, MAX_GIF_BATCH, MediaSource, is_discord_media_url
+from private_files import write_private_json
 
 logger = logging.getLogger("bombagif.selfbot")
 
@@ -78,7 +78,7 @@ class AllowlistStore:
                 logger.warning("Could not move corrupt allowlist aside", exc_info=True)
 
     def _save(self) -> None:
-        _write_private_json(self.path, {str(user_id): ts for user_id, ts in sorted(self._users.items())})
+        write_private_json(self.path, {str(user_id): ts for user_id, ts in sorted(self._users.items())})
 
 
 def env_flag(value: str | None) -> bool:
@@ -94,23 +94,6 @@ def resolve_ui_mode(setting: str | None, *, is_tty: bool) -> Literal["pretty", "
     if value in ("pretty", "json"):
         return value  # type: ignore[return-value]
     raise RuntimeError("SELFBOT_UI must be auto, pretty, or json")
-
-
-def _write_private_json(path: Path, data: dict[str, Any]) -> None:
-    """Atomically write JSON (temp file + rename) readable only by the owner (mode 600)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            handle.write(json.dumps(data))
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
 
 
 class CaptchaGuard:
@@ -145,7 +128,7 @@ class CaptchaGuard:
         self.blocked = True
         self.reason = reason
         try:
-            _write_private_json(self.path, {"reason": reason, "at": time.time()})
+            write_private_json(self.path, {"reason": reason, "at": time.time()})
         except OSError:
             logger.exception("Could not persist the CAPTCHA guard state to %s", self.path)
         logger.error(
