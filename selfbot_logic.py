@@ -15,9 +15,9 @@ import tempfile
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from bombagif_core import ALLOWED_TYPES, MAX_GIF_BATCH, MediaSource, is_discord_media_url
@@ -340,3 +340,52 @@ def format_results(results: list[tuple[str, str, bool]], skipped: int = 0) -> st
     while len("\n".join(lines)) > MAX_REPLY_CHARS and len(lines) > 1:
         lines.pop()
     return "\n".join(lines)[:MAX_REPLY_CHARS]
+
+
+ActivityLevel = Literal["ok", "fail", "info", "warn"]
+
+
+@dataclass(frozen=True)
+class ActivityEntry:
+    """One line of the live activity feed."""
+
+    at: float
+    level: ActivityLevel
+    text: str
+
+
+@dataclass
+class BotStats:
+    """In-memory counters and a short activity feed for the terminal dashboard."""
+
+    started_at: float = field(default_factory=time.time)
+    activity_size: int = 8
+    triggers: int = 0
+    conversions_ok: int = 0
+    conversions_failed: int = 0
+    rate_limited: int = 0
+    registered: int = 0
+    unregistered: int = 0
+    friends_accepted: int = 0
+    activity: deque[ActivityEntry] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.activity = deque(maxlen=self.activity_size)
+
+    def note(self, level: ActivityLevel, text: str, *, now: float | None = None) -> None:
+        """Append an entry to the activity feed (oldest entries fall off)."""
+        self.activity.append(ActivityEntry(time.time() if now is None else now, level, text))
+
+    def uptime(self, now: float | None = None) -> str:
+        """Human-readable time since start, e.g. ``1h 02m 05s``."""
+        seconds = max(0, int((time.time() if now is None else now) - self.started_at))
+        days, rest = divmod(seconds, 86_400)
+        hours, rest = divmod(rest, 3_600)
+        minutes, secs = divmod(rest, 60)
+        if days:
+            return f"{days}d {hours:02d}h {minutes:02d}m"
+        if hours:
+            return f"{hours}h {minutes:02d}m {secs:02d}s"
+        if minutes:
+            return f"{minutes}m {secs:02d}s"
+        return f"{secs}s"

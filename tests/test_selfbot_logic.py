@@ -13,6 +13,7 @@ from selfbot_logic import (
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
+    BotStats,
     CaptchaGuard,
     ChannelKind,
     Decision,
@@ -358,6 +359,34 @@ class EnvFlagTests(unittest.TestCase):
         for value in (None, "", "0", "false", "no", "off", "maybe"):
             with self.subTest(value=value):
                 self.assertFalse(env_flag(value))
+
+
+class BotStatsTests(unittest.TestCase):
+    def test_counters_start_at_zero(self) -> None:
+        stats = BotStats(started_at=100.0)
+        self.assertEqual(
+            (stats.triggers, stats.conversions_ok, stats.conversions_failed, stats.rate_limited, stats.registered, stats.unregistered, stats.friends_accepted),
+            (0, 0, 0, 0, 0, 0, 0),
+        )
+        self.assertEqual(len(stats.activity), 0)
+
+    def test_note_keeps_newest_entries_in_order(self) -> None:
+        stats = BotStats(started_at=0.0, activity_size=3)
+        for index in range(5):
+            stats.note("info", f"event {index}", now=float(index))
+        self.assertEqual([entry.text for entry in stats.activity], ["event 2", "event 3", "event 4"])
+        self.assertEqual(stats.activity[-1].level, "info")
+        self.assertEqual(stats.activity[-1].at, 4.0)
+
+    def test_uptime_formatting(self) -> None:
+        stats = BotStats(started_at=1000.0)
+        cases = {0: "0s", 59: "59s", 65: "1m 05s", 3725: "1h 02m 05s", 90061: "1d 01h 01m"}
+        for seconds, expected in cases.items():
+            with self.subTest(seconds=seconds):
+                self.assertEqual(stats.uptime(now=1000.0 + seconds), expected)
+
+    def test_uptime_never_negative(self) -> None:
+        self.assertEqual(BotStats(started_at=50.0).uptime(now=10.0), "0s")
 
 
 if __name__ == "__main__":
