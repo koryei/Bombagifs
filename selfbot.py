@@ -34,6 +34,7 @@ from selfbot_logic import (
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
+    CaptchaGuard,
     ChannelKind,
     Incoming,
     Kind,
@@ -53,10 +54,12 @@ class SelfBot(discord.Client):
         settings: Settings,
         allowlist: AllowlistStore,
         rate_limiter: RateLimiter | None = None,
+        captcha_guard: CaptchaGuard | None = None,
     ) -> None:
         super().__init__()
         self.config = settings
         self.allowlist = allowlist
+        self.captcha_guard = captcha_guard or CaptchaGuard(allowlist.path.with_name("captcha-blocked.json"))
         self.rate_limiter = rate_limiter or RateLimiter()
         self.http_session: aiohttp.ClientSession | None = None
         self.max_parallel_jobs = max(1, min(2, os.cpu_count() or 1))
@@ -105,12 +108,16 @@ class SelfBot(discord.Client):
 
     async def _reply(self, message: discord.Message, text: str) -> None:
         """Reply once to a message without pinging anyone."""
+        if self.captcha_guard.blocked:
+            return
         try:
             await message.reply(
                 text,
                 mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        except discord.CaptchaRequired:
+            self.captcha_guard.trip("sending a reply")
         except discord.HTTPException:
             self.logger.exception(
                 "Could not send self-bot reply",
@@ -119,8 +126,12 @@ class SelfBot(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
+        if self.captcha_guard.blocked:
+            return
         try:
             await self._handle_message(message)
+        except discord.CaptchaRequired:
+            self.captcha_guard.trip("handling a message")
         except Exception:
             self.logger.exception("Unhandled self-bot message error", extra={"user_id": message.author.id})
 
@@ -151,6 +162,9 @@ class SelfBot(discord.Client):
             return None
         try:
             return await message.channel.fetch_message(reference.message_id)
+        except discord.CaptchaRequired:
+            self.captcha_guard.trip("fetching a message")
+            return None
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
 
@@ -219,7 +233,11 @@ def main() -> None:
     settings = read_settings("SELFBOT_TOKEN")
     configure_logging(settings.log_level)
     data_dir = Path(os.getenv("SELFBOT_DATA_DIR", "data"))
-    bot = SelfBot(settings, AllowlistStore(data_dir / "allowlist.json"))
+    bot = SelfBot(
+        settings,
+        AllowlistStore(data_dir / "allowlist.json"),
+        captcha_guard=CaptchaGuard(data_dir / "captcha-blocked.json"),
+    )
     bot.run(settings.discord_token, log_handler=None)
 
 

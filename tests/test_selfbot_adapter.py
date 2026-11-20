@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from bombagif_core import Settings, UserFacingError
-from selfbot_logic import NO_MEDIA_TEXT, STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore, RateLimiter
+from selfbot_logic import NO_MEDIA_TEXT, STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore, CaptchaGuard, RateLimiter
 
 try:
     metadata.version("discord.py-self")
@@ -53,6 +53,11 @@ class _Typing:
 
     async def __aexit__(self, *exc_info: object) -> None:
         return None
+
+
+def make_captcha() -> Exception:
+    """A CaptchaRequired without going through its HTTP-response constructor."""
+    return discord.CaptchaRequired.__new__(discord.CaptchaRequired)
 
 
 def attachment(name: str = "a.png") -> SimpleNamespace:
@@ -287,6 +292,76 @@ class SelfBotConvertTests(_SelfBotCase):
         message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], attachments=[attachment("mine.png")], reference=SimpleNamespace(message_id=42, resolved=deleted_marker, cached_message=None))
         await self.bot.on_message(message)
         self.assertEqual(self.convert.await_args.args[3].filename, "mine.png")
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotCaptchaGuardTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.allowlist.add(99)
+        convert = patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK)
+        self.convert = convert.start()
+        self.addCleanup(convert.stop)
+
+    async def test_captcha_on_reply_trips_guard(self) -> None:
+        message = make_message(attachments=[attachment()])
+        message.reply.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertTrue(self.bot.captcha_guard.blocked)
+        self.assertEqual(self.bot.captcha_guard.reason, "sending a reply")
+
+    async def test_tripped_guard_pauses_everything(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.bot.captcha_guard.trip("test")
+        member = make_message(attachments=[attachment()])
+        stranger = make_message(author_id=123, content="hi")
+        await self.bot.on_message(member)
+        await self.bot.on_message(stranger)
+        member.reply.assert_not_awaited()
+        stranger.reply.assert_not_awaited()
+        self.convert.assert_not_awaited()
+        self.assertNotIn(123, self.allowlist)
+
+    async def test_captcha_while_fetching_reply_target_trips_guard(self) -> None:
+        reference = SimpleNamespace(message_id=42, resolved=None, cached_message=None)
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], reference=reference)
+        message.channel.fetch_message = AsyncMock(side_effect=make_captcha())
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertEqual(self.bot.captcha_guard.reason, "fetching a message")
+        message.reply.assert_not_awaited()
+
+    async def test_captcha_from_typing_trips_guard(self) -> None:
+        class _CaptchaTyping:
+            async def __aenter__(self) -> None:
+                raise make_captcha()
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                return None
+
+        message = make_message(attachments=[attachment()])
+        message.channel.typing = Mock(return_value=_CaptchaTyping())
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertTrue(self.bot.captcha_guard.blocked)
+
+    async def test_persisted_guard_is_loaded_at_startup(self) -> None:
+        from selfbot import SelfBot
+
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.bot.captcha_guard.trip("test")
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            fresh = SelfBot(SETTINGS, self.allowlist)
+        self.addAsyncCleanup(fresh.close)
+        self.assertTrue(fresh.captcha_guard.blocked)
+
+    async def test_other_http_errors_do_not_trip_guard(self) -> None:
+        message = make_message(attachments=[attachment()])
+        message.reply.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "no")
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertFalse(self.bot.captcha_guard.blocked)
 
 
 if __name__ == "__main__":
