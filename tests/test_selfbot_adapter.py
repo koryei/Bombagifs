@@ -79,7 +79,7 @@ def make_message(
     channel.typing = Mock(return_value=_Typing())
     message = SimpleNamespace(
         id=555,
-        author=SimpleNamespace(id=author_id, bot=False),
+        author=SimpleNamespace(id=author_id, bot=False, name=f"user{author_id}"),
         channel=channel,
         guild=None,
         content=content,
@@ -425,6 +425,59 @@ class SelfBotFriendRequestTests(_SelfBotCase):
         accepted = [r for r in pending if r.accept.await_count == 1]
         self.assertEqual(len(accepted), self.bot.friend_sweep_limit)
         friend.accept.assert_not_awaited()
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotStatsTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.allowlist.add(99)
+        convert = patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK)
+        self.convert = convert.start()
+        self.addCleanup(convert.stop)
+
+    async def test_successful_conversion_is_counted_and_listed(self) -> None:
+        await self.bot.on_message(make_message(attachments=[attachment("cat.png")]))
+        stats = self.bot.stats
+        self.assertEqual((stats.triggers, stats.conversions_ok, stats.conversions_failed), (1, 1, 0))
+        last = stats.activity[-1]
+        self.assertEqual(last.level, "ok")
+        self.assertIn("cat.png", last.text)
+        self.assertIn("user99", last.text)
+
+    async def test_failed_conversion_is_counted(self) -> None:
+        self.convert.side_effect = UserFacingError("too big")
+        await self.bot.on_message(make_message(attachments=[attachment("big.png")]))
+        self.assertEqual((self.bot.stats.conversions_ok, self.bot.stats.conversions_failed), (0, 1))
+        self.assertEqual(self.bot.stats.activity[-1].level, "fail")
+        self.assertIn("too big", self.bot.stats.activity[-1].text)
+
+    async def test_rate_limited_trigger_is_counted_separately(self) -> None:
+        self.bot.rate_limiter = RateLimiter(limit=1)
+        for _ in range(2):
+            await self.bot.on_message(make_message(attachments=[attachment()]))
+        self.assertEqual((self.bot.stats.triggers, self.bot.stats.rate_limited), (1, 1))
+
+    async def test_registration_and_stop_are_counted(self) -> None:
+        await self.bot.on_message(make_message(author_id=123, content="hi"))
+        await self.bot.on_message(make_message(author_id=123, content="stop"))
+        self.assertEqual((self.bot.stats.registered, self.bot.stats.unregistered), (1, 1))
+        self.assertEqual([e.level for e in list(self.bot.stats.activity)[-2:]], ["info", "info"])
+
+    async def test_accepted_friend_request_is_counted(self) -> None:
+        self.bot.auto_accept_friends = True
+        self.bot.friend_accept_delay = 0
+        relationship = make_relationship(discord.RelationshipType.incoming_request)
+        await self.bot.on_relationship_add(relationship)
+        self.assertEqual(self.bot.stats.friends_accepted, 1)
+
+    async def test_captcha_trip_shows_a_warning_in_the_feed(self) -> None:
+        message = make_message(attachments=[attachment()])
+        message.reply.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertEqual(self.bot.stats.activity[-1].level, "warn")
+        self.assertIn("CAPTCHA", self.bot.stats.activity[-1].text)
 
 
 if __name__ == "__main__":

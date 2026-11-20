@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -34,6 +35,7 @@ from selfbot_logic import (
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
+    BotStats,
     CaptchaGuard,
     ChannelKind,
     Incoming,
@@ -63,6 +65,7 @@ class SelfBot(discord.Client):
         self.allowlist = allowlist
         self.captcha_guard = captcha_guard or CaptchaGuard(allowlist.path.with_name("captcha-blocked.json"))
         self.rate_limiter = rate_limiter or RateLimiter()
+        self.stats = BotStats()
         self.auto_accept_friends = auto_accept_friends
         self.friend_accept_delay = 3.0  # seconds between accepts, so a burst never looks automated
         self.friend_sweep_limit = 10  # pending requests accepted per (re)connect
@@ -109,9 +112,11 @@ class SelfBot(discord.Client):
                 return
             try:
                 await relationship.accept()
+                self.stats.friends_accepted += 1
+                self.stats.note("info", f"Accepted a friend request from {self._who(relationship.user)}")
                 self.logger.info("Accepted a friend request", extra={"user_id": relationship.user.id})
             except discord.CaptchaRequired:
-                self.captcha_guard.trip("accepting a friend request")
+                self._trip_captcha("accepting a friend request")
                 return
             except discord.HTTPException:
                 self.logger.exception("Could not accept a friend request", extra={"user_id": relationship.user.id})
@@ -140,6 +145,17 @@ class SelfBot(discord.Client):
             is_reply=message.reference is not None,
         )
 
+    @staticmethod
+    def _who(user: object) -> str:
+        """A short display name for the terminal feed (never used in replies)."""
+        name = getattr(user, "display_name", None) or getattr(user, "name", None)
+        return str(name or getattr(user, "id", "someone"))
+
+    def _trip_captcha(self, action: str) -> None:
+        """Pause all account actions and show the pause in the activity feed."""
+        if self.captcha_guard.trip(action):
+            self.stats.note("warn", f"CAPTCHA requested while {action}. Paused; see the log to resume.")
+
     async def _reply(self, message: discord.Message, text: str) -> None:
         """Reply once to a message without pinging anyone."""
         if self.captcha_guard.blocked:
@@ -151,7 +167,7 @@ class SelfBot(discord.Client):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.CaptchaRequired:
-            self.captcha_guard.trip("sending a reply")
+            self._trip_captcha("sending a reply")
         except discord.HTTPException:
             self.logger.exception(
                 "Could not send self-bot reply",
@@ -165,7 +181,7 @@ class SelfBot(discord.Client):
         try:
             await self._handle_message(message)
         except discord.CaptchaRequired:
-            self.captcha_guard.trip("handling a message")
+            self._trip_captcha("handling a message")
         except Exception:
             self.logger.exception("Unhandled self-bot message error", extra={"user_id": message.author.id})
 
@@ -173,11 +189,15 @@ class SelfBot(discord.Client):
         decision = decide(self._incoming(message), self.allowlist)
         if decision.kind is Kind.REGISTER:
             self.allowlist.add(message.author.id)
+            self.stats.registered += 1
+            self.stats.note("info", f"{self._who(message.author)} said hi: registered")
             await self._reply(message, WELCOME_TEXT)
             if decision.convert:
                 await self._convert_and_reply(message)
         elif decision.kind is Kind.UNREGISTER:
             self.allowlist.remove(message.author.id)
+            self.stats.unregistered += 1
+            self.stats.note("info", f"{self._who(message.author)} opted out")
             await self._reply(message, STOP_CONFIRMATION)
         elif decision.kind is Kind.CONVERT:
             await self._convert_and_reply(message)
@@ -197,7 +217,7 @@ class SelfBot(discord.Client):
         try:
             return await message.channel.fetch_message(reference.message_id)
         except discord.CaptchaRequired:
-            self.captcha_guard.trip("fetching a message")
+            self._trip_captcha("fetching a message")
             return None
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
@@ -231,8 +251,11 @@ class SelfBot(discord.Client):
         """Convert the message's media and answer with a single reply."""
         author_id = message.author.id
         if not self.rate_limiter.allow(author_id):
+            self.stats.rate_limited += 1
+            self.stats.note("warn", f"{self._who(message.author)} rate limited")
             self.logger.info("Rate limited trigger ignored", extra={"user_id": author_id})
             return
+        self.stats.triggers += 1
         guild_id = message.guild.id if message.guild is not None else None
         async with message.channel.typing():
             collected = collect_media(message)
@@ -244,7 +267,19 @@ class SelfBot(discord.Client):
                 if message.attachments or self._incoming(message).mentions_me:
                     await self._reply(message, NO_MEDIA_TEXT)
                 return
-            results = [await self._convert_one(source, author_id, guild_id) for source in collected.sources]
+            who = self._who(message.author)
+            results = []
+            for source in collected.sources:
+                started = time.monotonic()
+                result = await self._convert_one(source, author_id, guild_id)
+                results.append(result)
+                seconds = time.monotonic() - started
+                if result[2]:
+                    self.stats.conversions_ok += 1
+                    self.stats.note("ok", f"{who}: {source.filename} converted ({seconds:.1f}s)")
+                else:
+                    self.stats.conversions_failed += 1
+                    self.stats.note("fail", f"{who}: {source.filename}: {result[1]}")
             await self._reply(message, format_results(results, collected.skipped))
 
     async def close(self) -> None:
