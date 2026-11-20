@@ -126,6 +126,20 @@ python3 -m venv .venv-selfbot
 .venv-selfbot/bin/python selfbot.py
 ```
 
+**CAPTCHA guard.** The self-bot cannot solve CAPTCHAs, and retrying only makes Discord stricter. If Discord asks
+for one (for example when replying, fetching a message, or accepting a friend request), the self-bot logs a single
+clear error, pauses *every* account action, and stays paused across restarts (`$SELFBOT_DATA_DIR/captcha-blocked.json`).
+To resume: log in to the account in a browser, complete whatever Discord asks, delete that file, and restart.
+
+**Friend requests.** Friending the account is not required: people in a shared server or group chat can DM it
+(unless the account blocks them). Set `SELFBOT_AUTO_ACCEPT_FRIENDS=true` to accept incoming requests automatically
+(paced a few seconds apart, at most 10 pending requests per connect, and paused by the CAPTCHA guard). Accepting a
+request does not register anyone; they still have to DM the account first.
+
+**Troubleshooting uploads.** A failed upload logs `bombagif.zipline` with the HTTP status and a short snippet of
+Zipline's error (never your token). `status=401/403` usually means a wrong `ZIPLINE_TOKEN`; `413` means Zipline's
+size limit; a Cloudflare or proxy page in the snippet points at your reverse proxy.
+
 The self-bot is run manually for now; the installer, Dockerfile, and compose file only cover the `/gif` app. It
 needs FFmpeg and Cairo on the host for the same formats as the app. Embedded media is only ever fetched through
 Discord's own CDN/proxy URLs.
