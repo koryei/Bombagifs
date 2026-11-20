@@ -13,6 +13,8 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `format_results`, reply copy. Never import `discord` here.
 - `selfbot.py` — v2: thin `discord.py-self` adapter (`SelfBot`); run from `.venv-selfbot`
   (`requirements-selfbot.txt`). Note `SelfBot.config` holds `Settings` (`Client.settings` is a library property).
+- `console_ui.py` — discord-free Rich terminal UI for the self-bot (boot banner, live status panel, pretty log
+  handler, `TerminalUi`, `demo()`); needs `rich` (in `requirements-selfbot.txt`). Preview: `python console_ui.py`.
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
   `.venv-selfbot/bin/python -m unittest tests.test_selfbot_adapter -v` for the self-bot adapter (skipped elsewhere);
   `bash tests/test_installer.sh`.
@@ -38,6 +40,11 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
 Zipline failures now log status + error snippet; `CaptchaGuard` (persisted in `data/captcha-blocked.json`) pauses all
 account actions on `discord.CaptchaRequired` until the file is deleted; opt-in `SELFBOT_AUTO_ACCEPT_FRIENDS` (paced,
 capped, guard-aware, never registers anyone).
+
+## v2.2 (branch `v2.2-terminal-ui`, stacked on v2.1)
+
+Pretty terminal for the self-bot: `BotStats` counters + activity feed in `selfbot_logic.py`, `console_ui.py`
+renderers, `SELFBOT_UI=auto|pretty|json` (auto = pretty only on a TTY, JSON otherwise so systemd/Docker are unchanged).
 
 ## Status
 

@@ -247,3 +247,14 @@ protection against Discord CAPTCHAs on a self-bot. Commits, in order: Zipline fa
 reference fetches, handler-level catch; paused guard ignores all messages including registration) -> `env_flag`
 -> opt-in `SELFBOT_AUTO_ACCEPT_FRIENDS` (pending sweep on ready capped at 10, 3 s pacing, serialized, guard-aware)
 -> docs. Not solved on purpose: no CAPTCHA solver (`captcha_handler` hook) - deeper ToS territory.
+
+
+---
+
+## v2.2 addendum (terminal UI)
+
+Modeled on BombaclatAI's Rich UI, in Bombagif's own colours (blurple + orange). Commits: `BotStats` -> adapter
+records events -> width-adaptive boot banner -> live status panel + shutdown panel -> `SELFBOT_UI` resolver and
+pretty log handler (markup-safe, shortens trace ids, never prints unknown extras) -> `TerminalUi` -> adapter/`main()`
+wiring (banner printed once per process, boot info never contains tokens) -> `python console_ui.py` demo -> docs.
+Design rule: logs stay JSON unless attached to a terminal, so deployments are unaffected.
