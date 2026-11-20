@@ -9,7 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from selfbot_logic import (
+    CLIP_OPT_OUT_CONFIRMATION,
     NO_MEDIA_TEXT,
+    START_CONFIRMATION,
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
@@ -25,6 +27,7 @@ from selfbot_logic import (
     env_flag,
     format_results,
     resolve_ui_mode,
+    welcome_text,
 )
 
 
@@ -137,8 +140,50 @@ class DecideTests(unittest.TestCase):
     def test_dm_stranger_with_media_registers_and_converts(self) -> None:
         self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, has_payload=True), self.allowlist), Decision(Kind.REGISTER, True))
 
-    def test_dm_stranger_stop_is_ignored(self) -> None:
-        self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, content="stop"), self.allowlist).kind, Kind.IGNORE)
+    def test_dm_stranger_stop_opts_out(self) -> None:
+        # v2 ignored this; now a stranger who DMs `stop` is recorded as opted out of clipping
+        self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, content="stop"), self.allowlist).kind, Kind.UNREGISTER)
+
+    def test_stop_with_other_words_is_not_an_opt_out(self) -> None:
+        self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, content="please stop that"), self.allowlist).kind, Kind.REGISTER)
+
+    def test_dm_start_returns_start_for_members_and_strangers(self) -> None:
+        for content in ("start", " START ", "Start\n"):
+            with self.subTest(content=content):
+                self.assertEqual(decide(msg(channel=ChannelKind.DM, content=content), self.allowlist).kind, Kind.START)
+                self.assertEqual(decide(self.stranger(channel=ChannelKind.DM, content=content), self.allowlist).kind, Kind.START)
+
+    def test_start_outside_a_dm_does_nothing(self) -> None:
+        self.assertEqual(decide(msg(content="start", mentions_me=True), self.allowlist).kind, Kind.CONVERT)  # a normal member ping
+        self.assertEqual(decide(self.stranger(content="start"), self.allowlist).kind, Kind.IGNORE)
+
+    def test_reply_stop_to_a_clip_opts_out_the_replier_only(self) -> None:
+        for author_in, label in ((msg, "member"), (self.stranger, "stranger")):
+            for channel in (ChannelKind.GUILD, ChannelKind.GROUP):
+                with self.subTest(author=label, channel=channel):
+                    decision = decide(author_in(channel=channel, content=" Stop ", is_clip_reply=True), self.allowlist)
+                    self.assertEqual(decision.kind, Kind.OPT_OUT_CLIPS)
+
+    def test_stop_reply_to_a_non_clip_message_is_ignored(self) -> None:
+        self.assertEqual(decide(self.stranger(content="stop", is_reply=True), self.allowlist).kind, Kind.IGNORE)
+        self.assertEqual(decide(msg(content="stop", is_reply=True), self.allowlist).kind, Kind.IGNORE)
+
+    def test_other_text_in_a_reply_to_a_clip_is_ignored(self) -> None:
+        self.assertEqual(decide(self.stranger(content="lol that was me", is_clip_reply=True), self.allowlist).kind, Kind.IGNORE)
+
+    def test_clip_reply_from_a_bot_is_ignored(self) -> None:
+        self.assertEqual(decide(self.stranger(content="stop", is_clip_reply=True, author_is_bot=True), self.allowlist).kind, Kind.IGNORE)
+
+    def test_stranger_mention_returns_help(self) -> None:
+        for channel in (ChannelKind.GUILD, ChannelKind.GROUP):
+            with self.subTest(channel=channel):
+                self.assertEqual(decide(self.stranger(channel=channel, mentions_me=True, has_payload=True), self.allowlist).kind, Kind.HELP)
+
+    def test_stranger_without_a_mention_is_still_ignored(self) -> None:
+        self.assertEqual(decide(self.stranger(has_payload=True), self.allowlist).kind, Kind.IGNORE)
+
+    def test_incoming_without_is_clip_reply_defaults_to_false(self) -> None:
+        self.assertFalse(msg().is_clip_reply)
 
     def test_dm_member_stop_unregisters(self) -> None:
         for content in ("stop", " STOP ", "Stop\n"):
@@ -157,8 +202,8 @@ class DecideTests(unittest.TestCase):
     def test_guild_mention_from_member_converts(self) -> None:
         self.assertEqual(decide(msg(mentions_me=True), self.allowlist).kind, Kind.CONVERT)
 
-    def test_guild_mention_from_stranger_ignored(self) -> None:
-        self.assertEqual(decide(self.stranger(mentions_me=True, has_payload=True), self.allowlist).kind, Kind.IGNORE)
+    def test_guild_mention_from_stranger_gets_help_not_a_conversion(self) -> None:
+        self.assertEqual(decide(self.stranger(mentions_me=True, has_payload=True), self.allowlist).kind, Kind.HELP)
 
     def test_guild_media_without_mention_ignored(self) -> None:
         self.assertEqual(decide(msg(has_payload=True), self.allowlist).kind, Kind.IGNORE)
@@ -235,6 +280,28 @@ class FormatResultsTests(unittest.TestCase):
         self.assertLessEqual(len(text), 2000)
         self.assertTrue(text.startswith("**file0.png** → https://z.example/"))
         self.assertTrue(text.splitlines()[-1].endswith(".gif"))
+
+    def test_welcome_text_variants_fit_limits(self) -> None:
+        self.assertEqual(welcome_text(False), WELCOME_TEXT)
+        scout = welcome_text(True)
+        self.assertLessEqual(len(scout), 500)
+        self.assertIn("clip", scout.lower())
+        self.assertIn("stop", scout.lower())
+        self.assertTrue(scout.startswith(WELCOME_TEXT))
+        opted_out = welcome_text(True, opted_out=True)
+        self.assertIn("`start`", opted_out)
+        self.assertLessEqual(len(opted_out), 500)
+        self.assertNotIn("clip", welcome_text(False).lower())
+
+    def test_confirmation_copy(self) -> None:
+        self.assertIn("clip", STOP_CONFIRMATION.lower())
+        self.assertIn("convert", STOP_CONFIRMATION.lower())
+        self.assertIn("`start`", STOP_CONFIRMATION)
+        self.assertIn("clip", START_CONFIRMATION.lower())
+        self.assertIn("`stop`", START_CONFIRMATION)
+        self.assertIn("`start`", CLIP_OPT_OUT_CONFIRMATION)
+        for text in (STOP_CONFIRMATION, START_CONFIRMATION, CLIP_OPT_OUT_CONFIRMATION):
+            self.assertLessEqual(len(text), 300)
 
     def test_copy_constants(self) -> None:
         self.assertIn("stop", WELCOME_TEXT.lower())

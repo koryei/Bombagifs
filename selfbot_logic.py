@@ -181,6 +181,9 @@ class Kind(enum.Enum):
     REGISTER = "register"
     UNREGISTER = "unregister"
     CONVERT = "convert"
+    START = "start"
+    OPT_OUT_CLIPS = "opt_out_clips"
+    HELP = "help"
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,7 @@ class Incoming:
     content: str
     has_payload: bool  # attachments or embeds present
     is_reply: bool
+    is_clip_reply: bool = False  # a reply to one of the clips this account posted
 
 
 @dataclass(frozen=True)
@@ -210,23 +214,32 @@ _IGNORE = Decision(Kind.IGNORE)
 
 
 def decide(msg: Incoming, allowlist: AllowlistStore) -> Decision:
-    """Apply the trigger rules: consent comes from DMing the account first."""
+    """Apply the trigger rules.
+
+    Conversions need consent: people must DM the account first. ``stop`` (in a DM, from anyone) opts out of
+    everything; ``start`` opts back in; a reply of ``stop`` to one of our clips opts the replier out of clipping.
+    A stranger who pings the account gets a help reply instead of a conversion.
+    """
     if msg.is_own or msg.author_is_bot or msg.is_system:
         return _IGNORE
     is_member = msg.author_id in allowlist
-    wants_stop = msg.content.strip().lower() == "stop"
+    word = msg.content.strip().lower()
 
     if msg.channel is ChannelKind.DM:
-        if not is_member:
-            return _IGNORE if wants_stop else Decision(Kind.REGISTER, msg.has_payload)
-        if wants_stop:
+        if word == "start":
+            return Decision(Kind.START)
+        if word == "stop":
             return Decision(Kind.UNREGISTER)
+        if not is_member:
+            return Decision(Kind.REGISTER, msg.has_payload)
         if msg.has_payload or msg.is_reply:
             return Decision(Kind.CONVERT)
         return _IGNORE
 
-    if msg.mentions_me and is_member:
-        return Decision(Kind.CONVERT)
+    if msg.is_clip_reply and word == "stop":
+        return Decision(Kind.OPT_OUT_CLIPS)
+    if msg.mentions_me:
+        return Decision(Kind.CONVERT) if is_member else Decision(Kind.HELP)
     return _IGNORE
 
 
@@ -308,7 +321,29 @@ WELCOME_TEXT = (
     "• Anywhere else: reply to a message with media and @ me, or @ me with a file attached.\n"
     "Send `stop` here any time and I'll leave you alone."
 )
-STOP_CONFIRMATION = "Okay, I won't convert your media anymore. DM me anything to switch me back on."
+_WELCOME_CLIPS = (
+    "\nHeads up: in some chats I also clip messages that are funny out of context and name who said them. "
+    "`stop` opts you out of that too."
+)
+_WELCOME_OPTED_OUT = "\nYou opted out of clips earlier, so clipping stays off for you until you send `start`."
+
+
+def welcome_text(scout_on: bool = False, *, opted_out: bool = False) -> str:
+    """The first-DM welcome. With the scout on it also says that clipping exists and how to opt out."""
+    if opted_out:
+        return WELCOME_TEXT + _WELCOME_OPTED_OUT
+    return WELCOME_TEXT + (_WELCOME_CLIPS if scout_on else "")
+
+
+STOP_CONFIRMATION = (
+    "Okay: no more clips of you, and I won't convert your media. DM me any time to use conversions again; "
+    "clipping stays off until you send `start`."
+)
+START_CONFIRMATION = (
+    "You're back in: I'll convert your media again, and clipping is back on for you wherever it's enabled. "
+    "Send `stop` any time to turn it all off."
+)
+CLIP_OPT_OUT_CONFIRMATION = "Got it, I won't clip you any more. (Send `start` in a DM to turn it back on.)"
 NO_MEDIA_TEXT = "I couldn't find a supported image or video to convert."
 
 _MARKDOWN_CHARS = re.compile(r"([\\*_~|>`])")

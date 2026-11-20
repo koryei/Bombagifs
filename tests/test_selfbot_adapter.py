@@ -17,7 +17,16 @@ from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
 from scout_config import read_scout_config
 from scout_stores import ClipLedger, OptOutStore, ScoutChatStore
-from selfbot_logic import NO_MEDIA_TEXT, STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore, RateLimiter
+from selfbot_logic import (
+    CLIP_OPT_OUT_CONFIRMATION,
+    NO_MEDIA_TEXT,
+    START_CONFIRMATION,
+    STOP_CONFIRMATION,
+    WELCOME_TEXT,
+    AllowlistStore,
+    RateLimiter,
+    welcome_text,
+)
 
 try:
     metadata.version("discord.py-self")
@@ -148,7 +157,7 @@ class SelfBotMessageTests(_SelfBotCase):
         self.assertEqual(message.reply.await_args.args[0], WELCOME_TEXT)
         self.assertIn(99, self.allowlist)
 
-    async def test_stop_unregisters_and_confirms(self) -> None:
+    async def test_stop_unregisters_and_confirms(self) -> None:  # also covers the v2 flow without a scout
         self.allowlist.add(99)
         message = make_message(content="stop")
         await self.bot.on_message(message)
@@ -923,6 +932,125 @@ class SelfBotScoutLifecycleTests(_SelfBotCase):
             await bot.setup_hook()
             self.assertIsNone(bot._scout_task)
             await bot.close()
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotOptOutTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        from selfbot import SelfBot
+
+        self.runtime = make_runtime(Path(self._tmp.name), mode="on")
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.addAsyncCleanup(self.bot.close)
+
+    async def test_welcome_does_not_mention_clipping_in_dry_run(self) -> None:
+        from selfbot import SelfBot
+
+        dry = SelfBot(SETTINGS, self.allowlist, scout=make_runtime(Path(self._tmp.name) / "dry", mode="dry-run"))
+        self.addAsyncCleanup(dry.close)
+        message = make_message(author_id=445, content="hi")
+        await dry.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], WELCOME_TEXT)  # nothing is posted in dry-run
+
+    async def test_stop_in_dm_adds_optout_and_removes_allowlist(self) -> None:
+        self.allowlist.add(99)
+        message = make_message(content="stop")
+        await self.bot.on_message(message)
+        self.assertIn(99, self.runtime.optout)
+        self.assertNotIn(99, self.allowlist)
+        self.assertEqual(message.reply.await_args.args[0], STOP_CONFIRMATION)
+        self.assertEqual(self.bot.stats.unregistered, 1)
+
+    async def test_stranger_stop_in_dm_is_confirmed_and_recorded(self) -> None:
+        message = make_message(author_id=321, content="stop")
+        await self.bot.on_message(message)
+        self.assertIn(321, self.runtime.optout)
+        self.assertNotIn(321, self.allowlist)  # not registered by saying stop
+        self.assertEqual(message.reply.await_args.args[0], STOP_CONFIRMATION)
+
+    async def test_start_removes_optout_and_registers(self) -> None:
+        self.runtime.optout.add(99)
+        message = make_message(content="start")
+        await self.bot.on_message(message)
+        self.assertNotIn(99, self.runtime.optout)
+        self.assertIn(99, self.allowlist)
+        self.assertEqual(message.reply.await_args.args[0], START_CONFIRMATION)
+
+    async def test_reply_stop_to_a_clip_records_optout_and_confirms(self) -> None:
+        self.bot._clip_message_ids.add(900)
+        reference = SimpleNamespace(message_id=900, resolved=None, cached_message=None)
+        message = make_message(author_id=55, channel_cls=discord.TextChannel, content="stop", reference=reference)
+        await self.bot.on_message(message)
+        self.assertIn(55, self.runtime.optout)
+        self.assertNotIn(55, self.allowlist)
+        self.assertEqual(message.reply.await_args.args[0], CLIP_OPT_OUT_CONFIRMATION)
+
+    async def test_reply_stop_to_a_clip_only_opts_out_the_replier(self) -> None:
+        self.bot._clip_message_ids.add(900)
+        self.runtime.optout.add(77)
+        reference = SimpleNamespace(message_id=900, resolved=None, cached_message=None)
+        await self.bot.on_message(make_message(author_id=55, channel_cls=discord.TextChannel, content="stop", reference=reference))
+        self.assertEqual({55, 77}, {uid for uid in (55, 77, 99) if uid in self.runtime.optout})
+
+    async def test_reply_stop_to_another_message_is_ignored(self) -> None:
+        reference = SimpleNamespace(message_id=12345, resolved=None, cached_message=None)
+        message = make_message(author_id=55, channel_cls=discord.TextChannel, content="stop", reference=reference)
+        await self.bot.on_message(message)
+        self.assertNotIn(55, self.runtime.optout)
+        message.reply.assert_not_awaited()
+
+    async def test_other_text_in_a_reply_to_a_clip_does_nothing(self) -> None:
+        self.bot._clip_message_ids.add(900)
+        reference = SimpleNamespace(message_id=900, resolved=None, cached_message=None)
+        message = make_message(author_id=55, channel_cls=discord.TextChannel, content="haha that was me", reference=reference)
+        await self.bot.on_message(message)
+        self.assertNotIn(55, self.runtime.optout)
+        message.reply.assert_not_awaited()
+
+    async def test_welcome_mentions_clipping_when_the_scout_is_on(self) -> None:
+        message = make_message(author_id=444, content="hi")
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], welcome_text(True))
+
+    async def test_an_opted_out_user_who_dms_again_is_told_clipping_stays_off(self) -> None:
+        self.runtime.optout.add(444)
+        message = make_message(author_id=444, content="hi")
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], welcome_text(True, opted_out=True))
+        self.assertIn(444, self.allowlist)  # registered for conversions
+        self.assertIn(444, self.runtime.optout)  # but still opted out of clips
+
+    async def test_opted_out_author_messages_leave_the_buffer_window(self) -> None:
+        self.runtime.chats.enable(CHAT)
+        for message_id, author in ((1, 55), (2, 66)):
+            await self.bot.on_message(make_message(author_id=author, channel_cls=discord.TextChannel, content="a funny line", message_id=message_id))
+        self.bot._clip_message_ids.add(900)
+        reference = SimpleNamespace(message_id=900, resolved=None, cached_message=None)
+        await self.bot.on_message(make_message(author_id=55, channel_cls=discord.TextChannel, content="stop", reference=reference, message_id=3))
+        run = [self.runtime.buffer.get(CHAT, 2)]
+        self.assertEqual([m.id for m in self.runtime.buffer.window(CHAT, run)], [2])
+
+    async def test_stop_without_a_scout_still_works_like_v2(self) -> None:
+        from selfbot import SelfBot
+
+        bot = SelfBot(SETTINGS, self.allowlist)
+        self.addAsyncCleanup(bot.close)
+        self.allowlist.add(99)
+        message = make_message(content="stop")
+        await bot.on_message(message)
+        self.assertNotIn(99, self.allowlist)
+        self.assertEqual(message.reply.await_args.args[0], STOP_CONFIRMATION)
+
+    async def test_start_without_a_scout_registers(self) -> None:
+        from selfbot import SelfBot
+
+        bot = SelfBot(SETTINGS, self.allowlist)
+        self.addAsyncCleanup(bot.close)
+        message = make_message(author_id=222, content="start")
+        await bot.on_message(message)
+        self.assertIn(222, self.allowlist)
+        self.assertEqual(message.reply.await_args.args[0], START_CONFIRMATION)
 
 
 if __name__ == "__main__":

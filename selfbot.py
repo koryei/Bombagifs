@@ -45,9 +45,10 @@ from scout import ClipPlan, Scout, ScoutRuntime, format_clip_notice
 from scout_judge import build_judge_chain
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
+    CLIP_OPT_OUT_CONFIRMATION,
     NO_MEDIA_TEXT,
+    START_CONFIRMATION,
     STOP_CONFIRMATION,
-    WELCOME_TEXT,
     AllowlistStore,
     BotStats,
     CaptchaGuard,
@@ -61,6 +62,7 @@ from selfbot_logic import (
     format_results,
     has_media,
     resolve_ui_mode,
+    welcome_text,
 )
 
 
@@ -191,6 +193,8 @@ class SelfBot(discord.Client):
             content=message.content or "",
             has_payload=has_media(message),
             is_reply=message.reference is not None,
+            is_clip_reply=message.reference is not None
+            and getattr(message.reference, "message_id", None) in self._clip_message_ids,
         )
 
     @staticmethod
@@ -418,18 +422,35 @@ class SelfBot(discord.Client):
 
     async def _handle_message(self, message: discord.Message) -> None:
         decision = decide(self._incoming(message), self.allowlist)
+        author = message.author.id
+        runtime = self._scouting()
+        clipping_live = runtime is not None and runtime.cfg.mode == "on"
         if decision.kind is Kind.REGISTER:
-            self.allowlist.add(message.author.id)
+            self.allowlist.add(author)
             self.stats.registered += 1
             self.stats.note("info", f"{self._who(message.author)} said hi: registered")
-            await self._reply(message, WELCOME_TEXT)
+            opted_out = clipping_live and author in runtime.optout  # type: ignore[union-attr]
+            await self._reply(message, welcome_text(clipping_live, opted_out=opted_out))
             if decision.convert:
                 await self._convert_and_reply(message)
         elif decision.kind is Kind.UNREGISTER:
-            self.allowlist.remove(message.author.id)
+            self.allowlist.remove(author)
+            if runtime is not None:
+                runtime.optout.add(author)
             self.stats.unregistered += 1
             self.stats.note("info", f"{self._who(message.author)} opted out")
             await self._reply(message, STOP_CONFIRMATION)
+        elif decision.kind is Kind.START:
+            if runtime is not None:
+                runtime.optout.remove(author)
+            self.allowlist.add(author)
+            self.stats.note("info", f"{self._who(message.author)} opted back in")
+            await self._reply(message, START_CONFIRMATION)
+        elif decision.kind is Kind.OPT_OUT_CLIPS:
+            if runtime is not None:
+                runtime.optout.add(author)
+            self.stats.note("info", f"{self._who(message.author)} opted out of clips")
+            await self._reply(message, CLIP_OPT_OUT_CONFIRMATION)
         elif decision.kind is Kind.CONVERT:
             await self._convert_and_reply(message)
 
