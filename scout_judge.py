@@ -7,17 +7,21 @@ payload with anonymous speaker labels, and whatever comes back is validated befo
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import math
 import string
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+import time
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import aiohttp
 
 from scout_buffer import ScoutMessage
+from scout_config import ScoutConfig
 
 logger = logging.getLogger("bombagif.scout")
 
@@ -476,3 +480,257 @@ async def final_stage(
         decide=dict(decide),
         provider=provider,
     )
+
+
+INCEPTION_BASE_URL = "https://api.inceptionlabs.ai"
+INCEPTION_CHAT_MODEL = "mercury-3"
+INCEPTION_SHUTDOWN = datetime.date(2026, 12, 28)  # Inception stops serving the Mercury API after this day
+
+
+def inception_usable(now: float) -> bool:
+    """True while the (UTC) date is strictly before Inception's announced shutdown."""
+    return datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date() < INCEPTION_SHUTDOWN
+
+
+class CallBudget:
+    """Bounds provider calls: ``per_minute`` in a rolling minute and ``per_day`` per UTC day."""
+
+    def __init__(self, per_day: int, per_minute: int = 30, clock: Callable[[], float] = time.time) -> None:
+        self.per_day = per_day
+        self.per_minute = per_minute
+        self.clock = clock
+        self._minute: deque[float] = deque()
+        self._day: datetime.date | None = None
+        self._day_count = 0
+
+    def _roll(self) -> float:
+        now = self.clock()
+        today = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date()
+        if today != self._day:
+            self._day, self._day_count = today, 0
+        return now
+
+    @property
+    def exhausted(self) -> bool:
+        """True once today's call cap is used up (the per-minute limit does not count)."""
+        self._roll()
+        return self._day_count >= self.per_day
+
+    def try_acquire(self) -> bool:
+        """Reserve one call; False if either the day cap or the minute limit is reached."""
+        now = self._roll()
+        if self._day_count >= self.per_day:
+            return False
+        while self._minute and now - self._minute[0] >= 60.0:
+            self._minute.popleft()
+        if len(self._minute) >= self.per_minute:
+            return False
+        self._minute.append(now)
+        self._day_count += 1
+        return True
+
+
+def _with_clip(verdict: Verdict, clip: bool) -> Verdict:
+    return verdict if verdict.clip == clip else replace(verdict, clip=clip)
+
+
+class InceptionJudge:
+    """Mercury Decide screens cheaply; Mercury 3 makes the final call. Both stages must agree."""
+
+    name = "inception"
+    can_post = True
+
+    def __init__(
+        self,
+        decide_api: DecideApi,
+        chat_api: ChatApi,
+        cfg: ScoutConfig,
+        budget: CallBudget,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.decide_api = decide_api
+        self.chat_api = chat_api
+        self.cfg = cfg
+        self.budget = budget
+        self.clock = clock
+
+    async def judge(self, window: JudgeWindow) -> Verdict | None:
+        if not inception_usable(self.clock()):
+            raise ProviderUnavailable("the Inception API has shut down")
+        if not self.budget.try_acquire():
+            return None
+        scores = await decide_stage(self.decide_api, window)
+        cfg = self.cfg
+        passed = (
+            scores["funny"] >= cfg.decide_funny_min
+            and scores["standalone"] >= cfg.decide_standalone_min
+            and scores["sensitive"] <= cfg.decide_sensitive_max
+        )
+        if not passed:
+            return Verdict(
+                clip=False,
+                start=0,
+                end=0,
+                funny=0.0,
+                standalone=False,
+                sensitive=(),
+                reason=(
+                    f"decide: funny={scores['funny']:.2f} standalone={scores['standalone']:.2f} "
+                    f"sensitive={scores['sensitive']:.2f}"
+                ),
+                decide=scores,
+                provider=self.name,
+            )
+        if not self.budget.try_acquire():
+            return None
+        verdict = await final_stage(
+            self.chat_api, INCEPTION_CHAT_MODEL, window, effort="low", provider=self.name, decide=scores
+        )
+        keep = verdict.clip and verdict.funny >= cfg.judge_funny_min and verdict.standalone and not verdict.sensitive
+        return _with_clip(verdict, keep)
+
+
+class OpenAICompatJudge:
+    """One structured call to any OpenAI-compatible chat model that supports JSON-schema output."""
+
+    name = "openai"
+    can_post = True
+
+    def __init__(self, chat_api: ChatApi, model: str, cfg: ScoutConfig, budget: CallBudget) -> None:
+        self.chat_api = chat_api
+        self.model = model
+        self.cfg = cfg
+        self.budget = budget
+
+    async def judge(self, window: JudgeWindow) -> Verdict | None:
+        if not self.budget.try_acquire():
+            return None
+        verdict = await final_stage(self.chat_api, self.model, window, effort=None, provider=self.name, decide={})
+        decide = {
+            "funny": verdict.funny / 10.0,
+            "standalone": 1.0 if verdict.standalone else 0.0,
+            "sensitive": 1.0 if verdict.sensitive else 0.0,
+        }
+        keep = verdict.clip and verdict.funny >= self.cfg.judge_funny_min and verdict.standalone and not verdict.sensitive
+        return replace(verdict, clip=keep, decide=decide)
+
+
+class JudgeChain:
+    """Tries judges in order. A gone provider is disabled for good; repeated failures disable it too.
+
+    ``judge`` never raises: a transient failure returns ``None`` (try again later). The last judge is normally the
+    heuristic one, which cannot post, so losing every LLM provider degrades to "show candidates only".
+    """
+
+    def __init__(
+        self,
+        judges: Sequence[Judge],
+        clock: Callable[[], float] = time.time,
+        failure_limit: int = 5,
+    ) -> None:
+        self._judges = list(judges)
+        self.clock = clock
+        self.failure_limit = failure_limit
+        self._disabled: set[str] = set()
+        self._failures: dict[str, int] = {}
+        self._events: list[str] = []
+
+    @property
+    def active(self) -> Judge | None:
+        for judge in self._judges:
+            if judge.name not in self._disabled:
+                return judge
+        return None
+
+    @property
+    def names(self) -> list[str]:
+        return [judge.name for judge in self._judges if judge.name not in self._disabled]
+
+    @property
+    def can_post(self) -> bool:
+        active = self.active
+        return active is not None and active.can_post
+
+    @property
+    def status(self) -> str:
+        active = self.active
+        if active is None:
+            return "no judge"
+        return active.name if active.can_post else f"{active.name} (no LLM)"
+
+    def drain_events(self) -> list[str]:
+        """Pop the one-line notices (provider disabled, etc.) for the terminal feed."""
+        events, self._events = self._events, []
+        return events
+
+    def _disable(self, judge: Judge, why: str) -> None:
+        self._disabled.add(judge.name)
+        message = f"{judge.name} judge disabled: {why}"
+        logger.warning(message)
+        self._events.append(message)
+
+    def _failed(self, judge: Judge, why: str) -> None:
+        count = self._failures.get(judge.name, 0) + 1
+        self._failures[judge.name] = count
+        if count >= self.failure_limit:
+            self._disable(judge, f"{count} failures in a row (last: {why})")
+
+    async def judge(self, window: JudgeWindow) -> Verdict | None:
+        while True:
+            judge = self.active
+            if judge is None:
+                return None
+            try:
+                verdict = await judge.judge(window)
+            except ProviderUnavailable as exc:
+                self._disable(judge, str(exc))
+                continue
+            except ProviderError as exc:
+                logger.warning("%s judge failed: %s", judge.name, exc)
+                self._failed(judge, str(exc))
+                return None
+            except Exception as exc:
+                logger.exception("%s judge crashed", judge.name)
+                self._failed(judge, f"unexpected {type(exc).__name__}")
+                return None
+            if verdict is not None:
+                self._failures[judge.name] = 0
+            return verdict
+
+
+def build_judge_chain(
+    cfg: ScoutConfig,
+    session: aiohttp.ClientSession,
+    clock: Callable[[], float] = time.time,
+) -> JudgeChain:
+    """Build the provider chain from the config (``auto``: Inception, then OpenAI-compatible, then heuristic)."""
+    budget = CallBudget(cfg.max_calls_per_day, clock=clock)
+
+    def inception() -> InceptionJudge:
+        return InceptionJudge(
+            DecideApi(session, cfg.inception_api_key, INCEPTION_BASE_URL),
+            ChatApi(session, cfg.inception_api_key, INCEPTION_BASE_URL),
+            cfg,
+            budget,
+            clock,
+        )
+
+    def openai() -> OpenAICompatJudge:
+        return OpenAICompatJudge(ChatApi(session, cfg.llm_api_key, cfg.llm_base_url), cfg.llm_model, cfg, budget)
+
+    judges: list[Judge] = []
+    has_openai = bool(cfg.llm_base_url and cfg.llm_api_key and cfg.llm_model)
+    if cfg.judge == "inception":
+        if cfg.inception_api_key:
+            judges.append(inception())
+        else:
+            logger.warning("SCOUT_JUDGE=inception but INCEPTION_API_KEY is not set; using the heuristic judge")
+    elif cfg.judge == "openai":
+        judges.append(openai())
+    elif cfg.judge == "auto":
+        if cfg.inception_api_key and inception_usable(clock()):
+            judges.append(inception())
+        if has_openai:
+            judges.append(openai())
+    judges.append(HeuristicJudge())
+    return JudgeChain(judges, clock)

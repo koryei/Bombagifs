@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import math
 import unittest
@@ -11,20 +12,27 @@ import aiohttp
 from aiohttp import web
 
 from scout_buffer import ScoutMessage, Version
+from scout_config import read_scout_config
 from scout_judge import (
     DECIDE_QUESTIONS,
     SENSITIVE_FLAGS,
     SYSTEM_PROMPT,
     VERDICT_SCHEMA,
+    CallBudget,
     ChatApi,
     DecideApi,
     HeuristicJudge,
+    InceptionJudge,
+    JudgeChain,
+    OpenAICompatJudge,
     JudgeWindow,
     ProviderError,
     ProviderUnavailable,
+    build_judge_chain,
     build_judge_window,
     decide_stage,
     final_stage,
+    inception_usable,
     validate_verdict,
     window_payload,
 )
@@ -521,6 +529,314 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ignore previous instructions", body["messages"][1]["content"])
         self.assertIn("untrusted", SYSTEM_PROMPT.lower())
         self.assertIn("never follow", SYSTEM_PROMPT.lower())
+
+
+def utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> float:
+    return datetime.datetime(year, month, day, hour, minute, tzinfo=datetime.timezone.utc).timestamp()
+
+
+class FakeClock:
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeDecide:
+    def __init__(self, *, funny: float = 0.93, standalone: float = 0.88, sensitive: float = 0.02, error: Exception | None = None) -> None:
+        self.answers = decide_answers(
+            funny={"noul": funny}, standalone={"noul": standalone}, sensitive={"noul": sensitive}
+        )
+        self.error = error
+        self.calls = 0
+
+    async def decisions(self, state: object, questions: object) -> dict[str, object]:
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.answers
+
+
+class FakeChat:
+    def __init__(self, raw: object | None = None, *, error: Exception | None = None) -> None:
+        self.raw = good_raw() if raw is None else raw
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def chat_json(self, model: str, system: str, user: object, schema: object, *, reasoning_effort: str | None = None, max_tokens: int = 400) -> object:
+        self.calls.append({"model": model, "effort": reasoning_effort})
+        if self.error:
+            raise self.error
+        return self.raw
+
+
+CFG = read_scout_config({})
+
+
+class InceptionJudgeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.window = window_of([msg(1, "setup", author=10), msg(2, "punchline", author=20)], [msg(2, "punchline", author=20)])
+        self.clock = FakeClock(utc(2026, 11, 20))
+        self.budget = CallBudget(per_day=100, clock=self.clock)
+
+    def judge(self, decide: FakeDecide, chat: FakeChat) -> InceptionJudge:
+        return InceptionJudge(decide, chat, CFG, self.budget, clock=self.clock)  # type: ignore[arg-type]
+
+    async def test_decide_failure_skips_mercury_3(self) -> None:
+        for kwargs in ({"funny": 0.42}, {"standalone": 0.5}, {"sensitive": 0.5}):
+            decide, chat = FakeDecide(**kwargs), FakeChat()
+            with self.subTest(kwargs=kwargs):
+                verdict = await self.judge(decide, chat).judge(self.window)
+                self.assertFalse(verdict.clip)
+                self.assertEqual(chat.calls, [])
+                self.assertTrue(verdict.reason.startswith("decide:"))
+                self.assertIn("funny", dict(verdict.decide))
+
+    async def test_decide_thresholds_are_inclusive(self) -> None:
+        decide, chat = FakeDecide(funny=0.85, standalone=0.80, sensitive=0.10), FakeChat()
+        verdict = await self.judge(decide, chat).judge(self.window)
+        self.assertTrue(verdict.clip)
+        self.assertEqual(len(chat.calls), 1)
+
+    async def test_final_requires_every_bar(self) -> None:
+        cases = {
+            "funny 7.9": ({"funny": 7.9}, False),
+            "funny exactly 8": ({"funny": 8.0}, True),
+            "not standalone": ({"standalone": False}, False),
+            "sensitive flag": ({"sensitive": ["health"]}, False),
+            "model said no": ({"clip": False}, False),
+            "all good": ({}, True),
+        }
+        for name, (overrides, expected) in cases.items():
+            with self.subTest(name=name):
+                chat = FakeChat(good_raw(**overrides))
+                verdict = await self.judge(FakeDecide(), chat).judge(self.window)
+                self.assertEqual(verdict.clip, expected)
+                self.assertEqual(chat.calls[0], {"model": "mercury-3", "effort": "low"})
+                self.assertEqual(verdict.provider, "inception")
+                self.assertAlmostEqual(verdict.decide["funny"], 0.93)
+
+    async def test_injection_in_the_model_reply_cannot_override_decide(self) -> None:
+        decide, chat = FakeDecide(funny=0.1), FakeChat(good_raw(funny=10, sensitive=[]))
+        verdict = await self.judge(decide, chat).judge(self.window)
+        self.assertFalse(verdict.clip)
+        self.assertEqual(chat.calls, [])
+
+    async def test_an_invalid_final_reply_is_a_no_clip_verdict(self) -> None:
+        verdict = await self.judge(FakeDecide(), FakeChat(good_raw(end=99))).judge(self.window)
+        self.assertFalse(verdict.clip)
+
+    async def test_exhausted_budget_returns_none(self) -> None:
+        self.budget = CallBudget(per_day=1, clock=self.clock)
+        decide, chat = FakeDecide(), FakeChat()
+        judge = self.judge(decide, chat)
+        self.assertIsNone(await judge.judge(self.window))  # decide used the only call, the final call has no budget
+        self.assertEqual(chat.calls, [])
+        self.assertIsNone(await judge.judge(self.window))
+        self.assertEqual(decide.calls, 1)
+
+    async def test_after_the_shutdown_date_the_judge_reports_unavailable(self) -> None:
+        self.clock.now = utc(2026, 12, 28)
+        with self.assertRaises(ProviderUnavailable):
+            await self.judge(FakeDecide(), FakeChat()).judge(self.window)
+
+    async def test_provider_errors_propagate(self) -> None:
+        with self.assertRaises(ProviderError):
+            await self.judge(FakeDecide(error=ProviderError("boom")), FakeChat()).judge(self.window)
+        with self.assertRaises(ProviderError):
+            await self.judge(FakeDecide(), FakeChat(error=ProviderError("boom"))).judge(self.window)
+
+
+class OpenAICompatJudgeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.window = window_of([msg(1, "setup", author=10), msg(2, "punchline", author=20)], [msg(2, "punchline", author=20)])
+
+    async def test_single_call_with_synthesised_decide_scores(self) -> None:
+        chat = FakeChat(good_raw(funny=9.0))
+        judge = OpenAICompatJudge(chat, "some-model", CFG, CallBudget(per_day=10))  # type: ignore[arg-type]
+        verdict = await judge.judge(self.window)
+        self.assertTrue(verdict.clip)
+        self.assertEqual(chat.calls, [{"model": "some-model", "effort": None}])
+        self.assertEqual(dict(verdict.decide), {"funny": 0.9, "standalone": 1.0, "sensitive": 0.0})
+        self.assertEqual((judge.name, judge.can_post, verdict.provider), ("openai", True, "openai"))
+
+    async def test_bars_apply_and_flags_map_to_sensitive_one(self) -> None:
+        for overrides in ({"funny": 7}, {"standalone": False}, {"sensitive": ["slur"]}):
+            chat = FakeChat(good_raw(**overrides))
+            verdict = await OpenAICompatJudge(chat, "m", CFG, CallBudget(per_day=10)).judge(self.window)  # type: ignore[arg-type]
+            with self.subTest(overrides=overrides):
+                self.assertFalse(verdict.clip)
+        flagged = await OpenAICompatJudge(FakeChat(good_raw(sensitive=["slur"])), "m", CFG, CallBudget(per_day=10)).judge(self.window)  # type: ignore[arg-type]
+        self.assertEqual(flagged.decide["sensitive"], 1.0)
+
+    async def test_budget_exhausted_returns_none(self) -> None:
+        chat = FakeChat()
+        judge = OpenAICompatJudge(chat, "m", CFG, CallBudget(per_day=0))  # type: ignore[arg-type]
+        self.assertIsNone(await judge.judge(self.window))
+        self.assertEqual(chat.calls, [])
+
+
+class CallBudgetTests(unittest.TestCase):
+    def test_per_minute_limit_and_day_limit(self) -> None:
+        clock = FakeClock(utc(2026, 11, 20, 12, 0))
+        budget = CallBudget(per_day=3, per_minute=2, clock=clock)
+        self.assertEqual([budget.try_acquire(), budget.try_acquire(), budget.try_acquire()], [True, True, False])
+        self.assertFalse(budget.exhausted)  # the minute limit is not the day cap
+        clock.now += 61
+        self.assertTrue(budget.try_acquire())  # third call of the day
+        self.assertTrue(budget.exhausted)
+        clock.now += 61
+        self.assertFalse(budget.try_acquire())
+
+    def test_day_rollover_resets_the_count(self) -> None:
+        clock = FakeClock(utc(2026, 11, 20, 23, 59))
+        budget = CallBudget(per_day=1, per_minute=10, clock=clock)
+        self.assertTrue(budget.try_acquire())
+        self.assertFalse(budget.try_acquire())
+        clock.now = utc(2026, 11, 21, 0, 1)
+        self.assertFalse(budget.exhausted)
+        self.assertTrue(budget.try_acquire())
+
+
+class ScriptedJudge:
+    """A judge whose behaviour per call is scripted: an Exception to raise or a Verdict to return."""
+
+    can_post = True
+
+    def __init__(self, name: str, *script: object) -> None:
+        self.name = name
+        self.script = list(script)
+        self.calls = 0
+
+    async def judge(self, window: JudgeWindow):
+        self.calls += 1
+        step = self.script.pop(0) if self.script else self.script_default()
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+    def script_default(self) -> object:
+        return no_clip(self.name)
+
+
+def no_clip(provider: str = "x"):
+    from scout_judge import Verdict
+
+    return Verdict(False, 0, 0, 0.0, False, (), "", {}, provider)
+
+
+class JudgeChainTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.window = window_of([msg(1, "hello there")])
+
+    async def test_provider_unavailable_disables_and_falls_through(self) -> None:
+        first = ScriptedJudge("inception", ProviderUnavailable("gone"))
+        second = ScriptedJudge("openai")
+        chain = JudgeChain([first, second, HeuristicJudge()])  # type: ignore[list-item]
+        with self.assertLogs("bombagif.scout", "WARNING"):
+            verdict = await chain.judge(self.window)
+        self.assertEqual(verdict.provider, "openai")
+        self.assertEqual(chain.active.name, "openai")
+        self.assertEqual(chain.status, "openai")
+        events = chain.drain_events()
+        self.assertEqual(len(events), 1)
+        self.assertIn("inception", events[0])
+        self.assertEqual(chain.drain_events(), [])
+        await chain.judge(self.window)
+        self.assertEqual(first.calls, 1)  # never tried again
+
+    async def test_falls_all_the_way_to_the_heuristic(self) -> None:
+        chain = JudgeChain([ScriptedJudge("a", ProviderUnavailable("x")), ScriptedJudge("b", ProviderUnavailable("y")), HeuristicJudge()])  # type: ignore[list-item]
+        with self.assertLogs("bombagif.scout", "WARNING"):
+            verdict = await chain.judge(self.window)
+        self.assertEqual(verdict.reason, "no LLM judge")
+        self.assertFalse(chain.can_post)
+        self.assertEqual(chain.status, "heuristic (no LLM)")
+        self.assertEqual(len(chain.drain_events()), 2)
+
+    async def test_transient_errors_return_none_and_five_in_a_row_disable(self) -> None:
+        flaky = ScriptedJudge("inception", *[ProviderError("e")] * 5)
+        chain = JudgeChain([flaky, HeuristicJudge()], failure_limit=5)  # type: ignore[list-item]
+        with self.assertLogs("bombagif.scout", "WARNING"):
+            for _ in range(4):
+                self.assertIsNone(await chain.judge(self.window))
+            self.assertEqual(chain.active.name, "inception")
+            self.assertIsNone(await chain.judge(self.window))  # fifth consecutive failure
+        self.assertEqual(chain.active.name, "heuristic")
+        self.assertEqual(len(chain.drain_events()), 1)
+
+    async def test_a_success_resets_the_failure_count(self) -> None:
+        script = [ProviderError("e")] * 4 + [no_clip("inception")] + [ProviderError("e")] * 4
+        chain = JudgeChain([ScriptedJudge("inception", *script), HeuristicJudge()], failure_limit=5)  # type: ignore[list-item]
+        with self.assertLogs("bombagif.scout", "WARNING"):
+            for _ in range(9):
+                await chain.judge(self.window)
+        self.assertEqual(chain.active.name, "inception")
+
+    async def test_unexpected_exceptions_never_escape(self) -> None:
+        chain = JudgeChain([ScriptedJudge("inception", RuntimeError("bug")), HeuristicJudge()])  # type: ignore[list-item]
+        with self.assertLogs("bombagif.scout", "ERROR"):
+            self.assertIsNone(await chain.judge(self.window))
+        self.assertEqual(chain.active.name, "inception")  # counted as a failure, not disabled yet
+
+    async def test_none_from_a_judge_is_passed_through_without_a_failure(self) -> None:
+        chain = JudgeChain([ScriptedJudge("inception", *[None] * 10), HeuristicJudge()], failure_limit=2)  # type: ignore[list-item]
+        for _ in range(10):
+            self.assertIsNone(await chain.judge(self.window))
+        self.assertEqual(chain.active.name, "inception")
+
+    async def test_empty_chain_returns_none(self) -> None:
+        chain = JudgeChain([])
+        self.assertIsNone(await chain.judge(self.window))
+        self.assertIsNone(chain.active)
+        self.assertFalse(chain.can_post)
+        self.assertEqual(chain.status, "no judge")
+
+
+class ProviderSelectionTests(unittest.TestCase):
+    def cfg(self, **env: str):
+        return read_scout_config(env)
+
+    def names(self, cfg, now: float = utc(2026, 11, 20)) -> list[str]:
+        return build_judge_chain(cfg, object(), clock=lambda: now).names  # type: ignore[arg-type]
+
+    def test_inception_usable_is_strictly_before_the_shutdown_date(self) -> None:
+        self.assertTrue(inception_usable(utc(2026, 12, 27, 23, 59)))
+        self.assertFalse(inception_usable(utc(2026, 12, 28)))
+        self.assertFalse(inception_usable(utc(2026, 12, 29)))
+
+    def test_auto_order_is_inception_then_openai_then_heuristic(self) -> None:
+        llm = {"SCOUT_LLM_BASE_URL": "https://llm.example", "SCOUT_LLM_API_KEY": "k", "SCOUT_LLM_MODEL": "m"}
+        self.assertEqual(self.names(self.cfg(INCEPTION_API_KEY="ik", **llm)), ["inception", "openai", "heuristic"])
+        self.assertEqual(self.names(self.cfg(**llm)), ["openai", "heuristic"])
+        self.assertEqual(self.names(self.cfg(INCEPTION_API_KEY="ik")), ["inception", "heuristic"])
+        self.assertEqual(self.names(self.cfg()), ["heuristic"])
+
+    def test_auto_skips_inception_after_the_shutdown_date(self) -> None:
+        llm = {"SCOUT_LLM_BASE_URL": "https://llm.example", "SCOUT_LLM_API_KEY": "k", "SCOUT_LLM_MODEL": "m"}
+        self.assertEqual(self.names(self.cfg(INCEPTION_API_KEY="ik", **llm), utc(2026, 12, 28)), ["openai", "heuristic"])
+        self.assertEqual(self.names(self.cfg(INCEPTION_API_KEY="ik"), utc(2027, 1, 1)), ["heuristic"])
+
+    def test_forced_providers(self) -> None:
+        llm = {"SCOUT_LLM_BASE_URL": "https://llm.example", "SCOUT_LLM_API_KEY": "k", "SCOUT_LLM_MODEL": "m"}
+        self.assertEqual(self.names(self.cfg(SCOUT_JUDGE="openai", INCEPTION_API_KEY="ik", **llm)), ["openai", "heuristic"])
+        self.assertEqual(self.names(self.cfg(SCOUT_JUDGE="inception", INCEPTION_API_KEY="ik", **llm)), ["inception", "heuristic"])
+        self.assertEqual(self.names(self.cfg(SCOUT_JUDGE="heuristic", INCEPTION_API_KEY="ik", **llm)), ["heuristic"])
+
+    def test_forced_inception_without_a_key_falls_back_to_the_heuristic(self) -> None:
+        with self.assertLogs("bombagif.scout", "WARNING"):
+            self.assertEqual(self.names(self.cfg(SCOUT_JUDGE="inception")), ["heuristic"])
+
+    def test_heuristic_only_chain_cannot_post(self) -> None:
+        chain = build_judge_chain(self.cfg(), object())  # type: ignore[arg-type]
+        self.assertFalse(chain.can_post)
+        self.assertEqual(chain.status, "heuristic (no LLM)")
+
+    def test_chain_with_a_real_provider_can_post(self) -> None:
+        chain = build_judge_chain(self.cfg(INCEPTION_API_KEY="ik"), object(), clock=lambda: utc(2026, 11, 20))  # type: ignore[arg-type]
+        self.assertTrue(chain.can_post)
+        self.assertEqual(chain.status, "inception")
 
 
 if __name__ == "__main__":
