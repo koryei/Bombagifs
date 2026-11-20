@@ -9,8 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
-from bombagif_core import Settings
-from selfbot_logic import STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore
+from bombagif_core import Settings, UserFacingError
+from selfbot_logic import NO_MEDIA_TEXT, STOP_CONFIRMATION, WELCOME_TEXT, AllowlistStore, RateLimiter
 
 try:
     metadata.version("discord.py-self")
@@ -44,6 +44,19 @@ class SelfBotLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 SELF_ID = 1000
+LINK = "https://z.example/u/a.gif"
+
+
+class _Typing:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+def attachment(name: str = "a.png") -> SimpleNamespace:
+    return SimpleNamespace(filename=name, url=f"https://cdn.discordapp.com/{name}", size=10, content_type=None)
 
 
 def make_message(
@@ -58,6 +71,7 @@ def make_message(
     mention_everyone: bool = False,
 ) -> SimpleNamespace:
     channel = Mock(spec=channel_cls or discord.DMChannel)
+    channel.typing = Mock(return_value=_Typing())
     message = SimpleNamespace(
         id=555,
         author=SimpleNamespace(id=author_id, bot=False),
@@ -75,8 +89,9 @@ def make_message(
     return message
 
 
-@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
-class SelfBotMessageTests(unittest.IsolatedAsyncioTestCase):
+class _SelfBotCase(unittest.IsolatedAsyncioTestCase):
+    """Builds a SelfBot with a fake identity and a temporary allowlist."""
+
     async def asyncSetUp(self) -> None:
         from selfbot import SelfBot
 
@@ -91,6 +106,9 @@ class SelfBotMessageTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.setup_hook()
         self.addAsyncCleanup(self.bot.close)
 
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotMessageTests(_SelfBotCase):
     async def test_stranger_dm_gets_welcome_and_is_registered(self) -> None:
         message = make_message(content="hi")
         await self.bot.on_message(message)
@@ -131,6 +149,67 @@ class SelfBotMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(kwargs["mention_author"], False)
         allowed = kwargs["allowed_mentions"]
         self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotConvertTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.allowlist.add(99)
+        convert = patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK)
+        self.convert = convert.start()
+        self.addCleanup(convert.stop)
+
+    async def test_member_dm_media_replies_with_link(self) -> None:
+        message = make_message(attachments=[attachment()])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], LINK)
+        self.convert.assert_awaited_once()
+
+    async def test_stranger_dm_with_media_registers_and_converts(self) -> None:
+        self.allowlist.remove(99)
+        message = make_message(attachments=[attachment()])
+        await self.bot.on_message(message)
+        self.assertEqual([c.args[0] for c in message.reply.await_args_list], [WELCOME_TEXT, LINK])
+        self.assertIn(99, self.allowlist)
+
+    async def test_member_mention_in_guild_converts(self) -> None:
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], attachments=[attachment()])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], LINK)
+
+    async def test_rate_limited_trigger_is_silent(self) -> None:
+        self.bot.rate_limiter = RateLimiter(limit=1)
+        first, second = make_message(attachments=[attachment()]), make_message(attachments=[attachment()])
+        await self.bot.on_message(first)
+        await self.bot.on_message(second)
+        first.reply.assert_awaited_once()
+        second.reply.assert_not_awaited()
+
+    async def test_user_facing_error_is_reported(self) -> None:
+        self.convert.side_effect = UserFacingError("That file is too large.")
+        message = make_message(attachments=[attachment("big.png")])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], "**big.png**: That file is too large.")
+
+    async def test_unexpected_error_gets_generic_message_and_is_logged(self) -> None:
+        self.convert.side_effect = RuntimeError("boom")
+        message = make_message(attachments=[attachment("a.png")])
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], "**a.png**: Could not process this file.")
+
+    async def test_no_supported_media_gets_no_media_text(self) -> None:
+        message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], attachments=[attachment("n.txt")])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], NO_MEDIA_TEXT)
+        self.convert.assert_not_awaited()
+
+    async def test_batch_is_capped_and_noted(self) -> None:
+        message = make_message(attachments=[attachment(f"{i}.png") for i in range(7)])
+        await self.bot.on_message(message)
+        self.assertEqual(self.convert.await_count, 5)
+        self.assertTrue(message.reply.await_args.args[0].endswith("(+2 skipped, max 5 per message)"))
 
 
 if __name__ == "__main__":

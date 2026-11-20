@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import signal
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,8 +20,17 @@ import aiohttp
 import discord
 from dotenv import load_dotenv
 
-from bombagif_core import DOWNLOAD_TIMEOUT, Settings, configure_logging, read_settings
+from bombagif_core import (
+    DOWNLOAD_TIMEOUT,
+    MediaSource,
+    Settings,
+    UserFacingError,
+    configure_logging,
+    convert_and_upload,
+    read_settings,
+)
 from selfbot_logic import (
+    NO_MEDIA_TEXT,
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
@@ -28,7 +38,9 @@ from selfbot_logic import (
     Incoming,
     Kind,
     RateLimiter,
+    collect_media,
     decide,
+    format_results,
 )
 
 
@@ -104,9 +116,53 @@ class SelfBot(discord.Client):
         if decision.kind is Kind.REGISTER:
             self.allowlist.add(message.author.id)
             await self._reply(message, WELCOME_TEXT)
+            if decision.convert:
+                await self._convert_and_reply(message)
         elif decision.kind is Kind.UNREGISTER:
             self.allowlist.remove(message.author.id)
             await self._reply(message, STOP_CONFIRMATION)
+        elif decision.kind is Kind.CONVERT:
+            await self._convert_and_reply(message)
+
+    async def _convert_one(
+        self, source: MediaSource, user_id: int, guild_id: int | None
+    ) -> tuple[str, str, bool]:
+        """Convert one item, returning (filename, link-or-error, ok) and never raising."""
+        trace_id = uuid.uuid4().hex
+        context = {"user_id": user_id, "guild_id": guild_id, "trace_id": trace_id}
+        if self.http_session is None:
+            return source.filename, "I'm still starting up. Please try again shortly.", False
+        try:
+            async with self.semaphore:
+                link = await convert_and_upload(
+                    self.http_session,
+                    self.config,
+                    self.executor,
+                    source,
+                    trace_id=trace_id,
+                    log_context={"user_id": user_id, "guild_id": guild_id},
+                )
+            return source.filename, link, True
+        except UserFacingError as exc:
+            return source.filename, str(exc), False
+        except Exception:
+            self.logger.exception("Unexpected self-bot processing error", extra=context)
+            return source.filename, "Could not process this file.", False
+
+    async def _convert_and_reply(self, message: discord.Message) -> None:
+        """Convert the message's media and answer with a single reply."""
+        author_id = message.author.id
+        if not self.rate_limiter.allow(author_id):
+            self.logger.info("Rate limited trigger ignored", extra={"user_id": author_id})
+            return
+        guild_id = message.guild.id if message.guild is not None else None
+        async with message.channel.typing():
+            collected = collect_media(message)
+            if not collected.sources:
+                await self._reply(message, NO_MEDIA_TEXT)
+                return
+            results = [await self._convert_one(source, author_id, guild_id) for source in collected.sources]
+            await self._reply(message, format_results(results, collected.skipped))
 
     async def close(self) -> None:
         """Close HTTP resources and drain image work before disconnecting."""
