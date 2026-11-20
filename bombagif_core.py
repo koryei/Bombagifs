@@ -784,3 +784,89 @@ async def upload_to_zipline(
     if isinstance(last_error, asyncio.TimeoutError):
         raise UserFacingError("Uploading to the file host timed out. Please try again.") from last_error
     raise UploadFailure("The file host is unavailable. Please try again later.") from last_error
+
+
+def read_settings(token_env: str = "DISCORD_TOKEN") -> Settings:
+    """Read required credentials and validate the optional runtime settings.
+
+    ``token_env`` names the Discord login token variable: ``DISCORD_TOKEN`` for the app,
+    ``SELFBOT_TOKEN`` for the self-bot. Neither program requires the other's token.
+    """
+    discord_token = os.getenv(token_env, "").strip()
+    zipline_token = os.getenv("ZIPLINE_TOKEN", "").strip()
+    if not discord_token or not zipline_token:
+        raise RuntimeError(f"{token_env} and ZIPLINE_TOKEN must be configured")
+
+    zipline_url = os.getenv("ZIPLINE_URL", "").strip().rstrip("/")
+    if not zipline_url:
+        raise RuntimeError("ZIPLINE_URL must be set to your own Zipline instance URL")
+    parsed_url = urlparse(zipline_url)
+    if (
+        parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise RuntimeError("ZIPLINE_URL must be an HTTPS base URL without embedded credentials or query parameters")
+
+    guilds: set[int] = set()
+    for guild_value in os.getenv("ALLOWED_GUILDS", "").split(","):
+        guild_value = guild_value.strip()
+        if guild_value:
+            try:
+                guild_id = int(guild_value)
+                if guild_id <= 0:
+                    raise ValueError
+                guilds.add(guild_id)
+            except ValueError as exc:
+                raise RuntimeError("ALLOWED_GUILDS must contain comma-separated numeric IDs") from exc
+
+    background_text = os.getenv("GIF_BACKGROUND", "#FFFFFF").strip()
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", background_text):
+        raise RuntimeError("GIF_BACKGROUND must be a six-digit hex color such as #FFFFFF")
+    background = tuple(int(background_text[index : index + 2], 16) for index in (1, 3, 5))
+
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise RuntimeError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+
+    return Settings(
+        discord_token=discord_token,
+        zipline_token=zipline_token,
+        zipline_url=zipline_url,
+        log_level=log_level,
+        allowed_guilds=frozenset(guilds),
+        background=(background[0], background[1], background[2]),
+    )
+
+
+class JsonFormatter(logging.Formatter):
+    """Format standard logging records as single-line JSON objects."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Serialize stable fields and contextual extras, without raw secrets."""
+        payload: dict[str, Any] = {
+            "time": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key in ("trace_id", "user_id", "guild_id", "attachment_name", "attempt"):
+            value = getattr(record, key, None)
+            if value is not None:
+                payload[key] = value
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def configure_logging(level: str) -> None:
+    """Configure concise structured logs on stderr."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(getattr(logging, level, logging.INFO))
