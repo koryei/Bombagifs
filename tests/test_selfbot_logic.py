@@ -8,7 +8,20 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from selfbot_logic import AllowlistStore, ChannelKind, Decision, Incoming, Kind, RateLimiter, collect_media, decide
+from selfbot_logic import (
+    NO_MEDIA_TEXT,
+    STOP_CONFIRMATION,
+    WELCOME_TEXT,
+    AllowlistStore,
+    ChannelKind,
+    Decision,
+    Incoming,
+    Kind,
+    RateLimiter,
+    collect_media,
+    decide,
+    format_results,
+)
 
 
 class AllowlistStoreTests(unittest.TestCase):
@@ -191,6 +204,39 @@ class CollectMediaTests(unittest.TestCase):
     def test_sources_carry_attachment_fields(self) -> None:
         source = collect_media(fake_message("a.png")).sources[0]
         self.assertEqual((source.url, source.size), ("https://cdn.discordapp.com/a.png", 10))
+
+
+class FormatResultsTests(unittest.TestCase):
+    def test_single_ok_is_bare_link(self) -> None:
+        self.assertEqual(format_results([("a.png", "https://z.example/u/a.gif", True)]), "https://z.example/u/a.gif")
+
+    def test_multiple_lines_and_errors(self) -> None:
+        text = format_results([("a.png", "https://z.example/a.gif", True), ("b.png", "Too big.", False)])
+        self.assertEqual(text, "**a.png** → https://z.example/a.gif\n**b.png**: Too big.")
+
+    def test_single_error_is_a_labelled_line(self) -> None:
+        self.assertEqual(format_results([("b.png", "Too big.", False)]), "**b.png**: Too big.")
+
+    def test_filename_markdown_escaped(self) -> None:
+        text = format_results([("a_b*.png", "x", False), ("c.png", "y", False)])
+        self.assertIn("**a\\_b\\*.png**", text)
+
+    def test_skipped_note(self) -> None:
+        text = format_results([("a.png", "https://z.example/a.gif", True)], skipped=2)
+        self.assertEqual(text, "https://z.example/a.gif\n(+2 skipped, max 5 per message)")
+
+    def test_truncates_to_2000_at_line_boundary(self) -> None:
+        results = [(f"file{i}.png", "https://z.example/" + "x" * 150 + ".gif", True) for i in range(30)]
+        text = format_results(results)
+        self.assertLessEqual(len(text), 2000)
+        self.assertTrue(text.startswith("**file0.png** → https://z.example/"))
+        self.assertTrue(text.splitlines()[-1].endswith(".gif"))
+
+    def test_copy_constants(self) -> None:
+        self.assertIn("stop", WELCOME_TEXT.lower())
+        self.assertLessEqual(len(WELCOME_TEXT), 400)
+        self.assertTrue(STOP_CONFIRMATION)
+        self.assertTrue(NO_MEDIA_TEXT)
 
 
 if __name__ == "__main__":

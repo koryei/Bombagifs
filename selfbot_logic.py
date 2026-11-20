@@ -10,6 +10,7 @@ import enum
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from collections import defaultdict, deque
@@ -212,3 +213,38 @@ def collect_media(message: Any, referenced: Any | None = None, limit: int = MAX_
     if not found and referenced is not None:
         found = _supported_attachments(referenced)
     return Collected(sources=found[:limit], skipped=max(0, len(found) - limit))
+
+
+MAX_REPLY_CHARS = 2000
+
+WELCOME_TEXT = (
+    "Hey! I turn images and videos into GIF links.\n"
+    "• DM me a file and I'll reply with a link.\n"
+    "• Anywhere else: reply to a message with media and @ me, or @ me with a file attached.\n"
+    "Send `stop` here any time and I'll leave you alone."
+)
+STOP_CONFIRMATION = "Okay, I won't convert your media anymore. DM me anything to switch me back on."
+NO_MEDIA_TEXT = "I couldn't find a supported image or video to convert."
+
+_MARKDOWN_CHARS = re.compile(r"([\\*_~|>`])")
+
+
+def _escape(text: str) -> str:
+    return _MARKDOWN_CHARS.sub(r"\\\1", text)
+
+
+def format_results(results: list[tuple[str, str, bool]], skipped: int = 0) -> str:
+    """Build one reply: a bare link for a lone success, else one labelled line per file."""
+    if len(results) == 1 and results[0][2]:
+        lines = [results[0][1]]
+    else:
+        lines = [
+            f"**{_escape(name)}** → {value}" if ok else f"**{_escape(name)}**: {value}"
+            for name, value, ok in results
+        ]
+    note = f"(+{skipped} skipped, max {MAX_GIF_BATCH} per message)" if skipped > 0 else None
+    if note:
+        lines.append(note)
+    while len("\n".join(lines)) > MAX_REPLY_CHARS and len(lines) > 1:
+        lines.pop()
+    return "\n".join(lines)[:MAX_REPLY_CHARS]
