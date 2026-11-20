@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import unittest
 
+import aiohttp
+from aiohttp import web
+
 from scout_buffer import ScoutMessage, Version
 from scout_judge import (
+    DECIDE_QUESTIONS,
     SENSITIVE_FLAGS,
+    DecideApi,
     HeuristicJudge,
     JudgeWindow,
+    ProviderError,
+    ProviderUnavailable,
     build_judge_window,
+    decide_stage,
     validate_verdict,
     window_payload,
 )
@@ -189,6 +198,190 @@ class HeuristicJudgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(verdict.clip)
         self.assertFalse(judge.can_post)
         self.assertEqual((judge.name, verdict.provider, verdict.reason), ("heuristic", "heuristic", "no LLM judge"))
+
+
+API_KEY = "inception-secret-key-123"
+
+
+class MockServer:
+    """A loopback aiohttp server whose handler a test supplies; records every request."""
+
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.requests: list[dict[str, object]] = []
+        self.runner: web.AppRunner | None = None
+        self.url = ""
+
+    async def start(self, path: str) -> "MockServer":
+        async def wrapped(request: web.Request) -> web.StreamResponse:
+            body = await request.read()
+            try:
+                parsed = json.loads(body)
+            except ValueError:
+                parsed = None
+            self.requests.append({"path": request.path, "headers": dict(request.headers), "json": parsed})
+            return await self.handler(request, parsed, len(self.requests))
+
+        app = web.Application()
+        app.router.add_post(path, wrapped)
+        self.runner = web.AppRunner(app)
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        await site.start()
+        self.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"  # type: ignore[union-attr]
+        return self
+
+    async def stop(self) -> None:
+        if self.runner is not None:
+            await self.runner.cleanup()
+
+
+def decide_answers(**overrides: object) -> dict[str, object]:
+    answers: dict[str, object] = {
+        "funny": {"type": "noul", "noul": 0.93},
+        "standalone": {"type": "noul", "noul": 0.88},
+        "sensitive": {"type": "noul", "noul": 0.02},
+        "quality": {"type": "score", "score": 3.4, "legend": {}, "probabilities": {}, "confidence": 0.7},
+    }
+    answers.update(overrides)
+    return answers
+
+
+class DecideApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.session.close)
+        self.window = window_of(
+            [msg(1, "setup line", author=10), msg(2, "the punchline", author=20, deleted=True)],
+            [msg(2, "the punchline", author=20)],
+        )
+
+    async def serve(self, handler) -> MockServer:
+        server = await MockServer(handler).start("/v1/decisions")
+        self.addAsyncCleanup(server.stop)
+        return server
+
+    def api(self, server: MockServer, **kwargs: object) -> DecideApi:
+        options = {"backoff": 0.0, "timeout": 2.0, "retries": 2}
+        options.update(kwargs)
+        return DecideApi(self.session, API_KEY, base_url=server.url, **options)  # type: ignore[arg-type]
+
+    async def ok(self, request: web.Request, body: object, n: int) -> web.Response:
+        return web.json_response({"model": "mercury-decide", "answers": decide_answers(), "usage": {"input_tokens": 100, "output_tokens": 3}})
+
+    async def test_request_shape(self) -> None:
+        server = await self.serve(self.ok)
+        await decide_stage(self.api(server), self.window)
+        request = server.requests[0]
+        self.assertEqual(request["path"], "/v1/decisions")
+        self.assertEqual(request["headers"]["Authorization"], f"Bearer {API_KEY}")
+        body = request["json"]
+        self.assertEqual(body["model"], "mercury-decide")
+        self.assertEqual(set(body["questions"]), {"funny", "standalone", "sensitive", "quality"})
+        self.assertEqual([body["questions"][k]["type"] for k in ("funny", "standalone", "sensitive")], ["noul"] * 3)
+        self.assertEqual(body["questions"]["quality"]["type"], "score")
+        self.assertEqual(len(body["questions"]["quality"]["criteria"]), 5)
+        self.assertEqual(body["state"]["window"], window_payload(self.window))
+        self.assertEqual(body["state"]["candidate"], {"start": self.window.run_start, "end": self.window.run_end})
+
+    async def test_parses_answers(self) -> None:
+        server = await self.serve(self.ok)
+        scores = await decide_stage(self.api(server), self.window)
+        self.assertEqual(scores, {"funny": 0.93, "standalone": 0.88, "sensitive": 0.02, "quality": 3.4})
+
+    async def test_state_contains_no_names_or_ids(self) -> None:
+        server = await self.serve(self.ok)
+        await decide_stage(self.api(server), self.window)
+        sent = json.dumps(server.requests[0]["json"])
+        for needle in ("Pranit", "Koryei", "avatars", "hash10", "hash20", API_KEY):
+            self.assertNotIn(needle, sent)
+
+    async def test_questions_treat_text_as_data(self) -> None:
+        for name, question in DECIDE_QUESTIONS.items():
+            with self.subTest(name=name):
+                self.assertIn("data", str(question["instructions"]).lower())
+
+    async def test_gone_or_refused_statuses_raise_provider_unavailable(self) -> None:
+        for status in (401, 402, 404, 410):
+            async def handler(request: web.Request, body: object, n: int, status: int = status) -> web.Response:
+                return web.json_response({"error": "nope"}, status=status)
+
+            server = await self.serve(handler)
+            with self.subTest(status=status):
+                with self.assertRaises(ProviderUnavailable):
+                    await decide_stage(self.api(server), self.window)
+                self.assertEqual(len(server.requests), 1)  # no retries for these
+
+    async def test_503_then_ok_retries(self) -> None:
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            return web.Response(status=503) if n == 1 else await self.ok(request, body, n)
+
+        server = await self.serve(handler)
+        scores = await decide_stage(self.api(server), self.window)
+        self.assertEqual(scores["funny"], 0.93)
+        self.assertEqual(len(server.requests), 2)
+
+    async def test_429_honours_retry_after_zero(self) -> None:
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            return web.Response(status=429, headers={"Retry-After": "0"}) if n == 1 else await self.ok(request, body, n)
+
+        server = await self.serve(handler)
+        await decide_stage(self.api(server, backoff=5.0), self.window)  # would take 5 s if Retry-After were ignored
+        self.assertEqual(len(server.requests), 2)
+
+    async def test_exhausted_retries_raise_provider_error_and_log_without_the_key(self) -> None:
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            return web.Response(status=500)
+
+        server = await self.serve(handler)
+        with self.assertLogs("bombagif.scout", "WARNING") as logs:
+            with self.assertRaises(ProviderError):
+                await decide_stage(self.api(server), self.window)
+        self.assertEqual(len(server.requests), 3)  # 1 + 2 retries
+        self.assertNotIn(API_KEY, "\n".join(logs.output))
+
+    async def test_other_client_errors_are_not_retried(self) -> None:
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            return web.json_response({"error": "bad"}, status=422)
+
+        server = await self.serve(handler)
+        with self.assertRaises(ProviderError):
+            await decide_stage(self.api(server), self.window)
+        self.assertEqual(len(server.requests), 1)
+
+    async def test_timeout_raises_provider_error(self) -> None:
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            await asyncio.sleep(0.5)
+            return web.Response(status=200)
+
+        server = await self.serve(handler)
+        with self.assertRaises(ProviderError):
+            await decide_stage(self.api(server, timeout=0.05, retries=0), self.window)
+
+    async def test_missing_or_ill_typed_answers_raise_provider_error(self) -> None:
+        cases = {
+            "missing question": {k: v for k, v in decide_answers().items() if k != "funny"},
+            "noul out of range": decide_answers(funny={"type": "noul", "noul": 1.5}),
+            "noul wrong type": decide_answers(funny={"type": "noul", "noul": "high"}),
+            "score missing": decide_answers(quality={"type": "score"}),
+            "answers not an object": ["x"],
+        }
+        for name, answers in cases.items():
+            async def handler(request: web.Request, body: object, n: int, answers: object = answers) -> web.Response:
+                return web.json_response({"answers": answers})
+
+            server = await self.serve(handler)
+            with self.subTest(name=name):
+                with self.assertRaises(ProviderError):
+                    await decide_stage(self.api(server), self.window)
+
+    async def test_non_json_body_raises_provider_error(self) -> None:
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            return web.Response(text="<html>gateway</html>", content_type="text/html")
+
+        server = await self.serve(handler)
+        with self.assertRaises(ProviderError):
+            await decide_stage(self.api(server), self.window)
 
 
 if __name__ == "__main__":
