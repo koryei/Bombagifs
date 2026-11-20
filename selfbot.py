@@ -124,8 +124,33 @@ class SelfBot(discord.Client):
             return "paused"
         return "online" if self.is_ready() else "connecting"
 
+    def scout_view(self) -> tuple[str, str, bool] | None:
+        """``(mode, judge status, can post)`` for the live panel, or ``None`` when the scout is not running."""
+        runtime = self._scouting()
+        if runtime is None:
+            return None
+        if runtime.judge is None:
+            return (runtime.cfg.mode, "starting", False)
+        return (runtime.cfg.mode, runtime.judge.status, runtime.judge.can_post)
+
+    def _scout_info(self) -> dict[str, str]:
+        runtime = self._scouting()
+        if runtime is None:
+            return {"scout": "off"}
+        info = {"scout": runtime.cfg.mode}
+        judge = runtime.judge
+        info["judge"] = judge.status if judge is not None else "starting"
+        info["scout chats"] = str(len(runtime.chats.list()))
+        active = judge.active if judge is not None else None
+        if active is not None and active.name == "inception":
+            info["reminder"] = "Inception: turn OFF 'Improve the model for everyone' in its API settings"
+        return info
+
     def _boot_info(self) -> dict[str, str]:
         """Facts for the boot banner. Never includes tokens."""
+        return {**self._boot_basics(), **self._scout_info()}
+
+    def _boot_basics(self) -> dict[str, str]:
         guard = self.captcha_guard
         return {
             "account": str(self.user),
@@ -678,7 +703,7 @@ def main() -> None:
 
         console = console_ui.create_console()
         console_ui.configure_pretty_logging(console, settings.log_level)
-        dashboard = console_ui.Dashboard(bot.stats, bot.ui_status, lambda: len(bot.allowlist))
+        dashboard = console_ui.Dashboard(bot.stats, bot.ui_status, lambda: len(bot.allowlist), get_scout=bot.scout_view)
         bot.ui = console_ui.TerminalUi(console, dashboard)
     else:
         configure_logging(settings.log_level)

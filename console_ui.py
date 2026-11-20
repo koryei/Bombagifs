@@ -141,8 +141,13 @@ def render_dashboard(
     allowlist_size: int,
     now: float | None = None,
     width: int | None = None,
+    scout: tuple[str, str, bool] | None = None,
 ) -> Panel:
-    """The live status panel: state line, counters, then the recent activity feed."""
+    """The live status panel: state line, counters, then the recent activity feed.
+
+    ``scout`` is ``(mode, judge status, can_post)`` when the clip scout is configured, which adds its header and a
+    second row of counters.
+    """
     icon, label, style = _STATUS_VIEW[status]
     header = Text()
     header.append(f"{icon} {label}", style=style)
@@ -164,6 +169,34 @@ def render_dashboard(
         padding=(0, 3),
         expand=True,
     )
+    top: list[RenderableType] = [header]
+    middle: list[RenderableType] = [Text(""), counters]
+    if scout is not None:
+        mode, judge, can_post = scout
+        scout_header = Text()
+        scout_header.append("scout ", style="muted")
+        scout_header.append(mode, style="accent")
+        scout_header.append("   ")
+        if can_post:
+            scout_header.append(f"judge {judge}", style="ok")
+        else:
+            scout_header.append("judge paused", style="warn")
+            scout_header.append(f" ({judge})", style="muted")
+        top.append(scout_header)
+        middle.append(
+            Columns(
+                [
+                    _stat("screened", stats.scout_screened),
+                    _stat("passed", stats.scout_passed),
+                    _stat("clips", stats.clips_posted),
+                    _stat("deleted rescued", stats.deleted_rescued),
+                    _stat("dry-run hits", stats.dry_run_hits),
+                    _stat("rejected", stats.scout_rejected),
+                ],
+                padding=(0, 3),
+                expand=True,
+            )
+        )
 
     feed = Table.grid(padding=(0, 1), expand=True)
     feed.add_column(style="muted", no_wrap=True)
@@ -182,7 +215,7 @@ def render_dashboard(
         feed_body = feed
 
     return Panel(
-        Group(header, Text(""), counters, Text(""), Text("recent activity", style="label"), feed_body),
+        Group(*top, *middle, Text(""), Text("recent activity", style="label"), feed_body),
         title="[brand]live status[/brand]",
         border_style="brand",
         box=box.ROUNDED,
@@ -200,11 +233,13 @@ class Dashboard:
         get_status: Callable[[], Status],
         get_allowlist_size: Callable[[], int],
         clock: Callable[[], float] = time.time,
+        get_scout: Callable[[], tuple[str, str, bool] | None] | None = None,
     ) -> None:
         self.stats = stats
         self.get_status = get_status
         self.get_allowlist_size = get_allowlist_size
         self.clock = clock
+        self.get_scout = get_scout
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         # Stay a few columns narrower than the terminal: a full-width panel makes the "^C" echoed on
@@ -215,6 +250,7 @@ class Dashboard:
             allowlist_size=self.get_allowlist_size(),
             now=self.clock(),
             width=max(30, options.max_width - 3),
+            scout=self.get_scout() if self.get_scout is not None else None,
         )
 
 

@@ -144,6 +144,51 @@ class DashboardTests(unittest.TestCase):
                 text = render(dashboard, width=width)
                 self.assertLessEqual(max(len(line) for line in text.splitlines()), width - 3)
 
+    def scout_stats(self) -> BotStats:
+        stats = self.stats()
+        stats.scout_screened, stats.scout_passed, stats.clips_posted = 40, 6, 3
+        stats.deleted_rescued, stats.dry_run_hits, stats.scout_rejected = 1, 5, 2
+        return stats
+
+    def test_dashboard_shows_the_scout_row_only_when_enabled(self) -> None:
+        plain = squash(render(console_ui.render_dashboard(self.scout_stats(), status="online", allowlist_size=1, now=1.0)))
+        self.assertNotIn("screened", plain)
+        self.assertNotIn("judge", plain)
+        scouting = squash(render(console_ui.render_dashboard(self.scout_stats(), status="online", allowlist_size=1, now=1.0, scout=("dry-run", "inception", True))))
+        self.assertIn("screened", scouting)
+
+    def test_scout_counters_render(self) -> None:
+        text = squash(render(console_ui.render_dashboard(self.scout_stats(), status="online", allowlist_size=1, now=1.0, scout=("on", "inception", True))))
+        for expected in ("screened 40", "passed 6", "clips 3", "deleted rescued 1", "dry-run hits 5", "rejected 2"):
+            self.assertIn(expected, text)
+
+    def test_judge_status_and_mode_in_the_header(self) -> None:
+        text = squash(render(console_ui.render_dashboard(self.stats(), status="online", allowlist_size=1, now=1.0, scout=("on", "inception", True))))
+        self.assertIn("scout on", text)
+        self.assertIn("judge inception", text)
+        self.assertNotIn("paused", text)
+
+    def test_a_judge_that_cannot_post_is_shown_as_paused(self) -> None:
+        text = squash(render(console_ui.render_dashboard(self.stats(), status="online", allowlist_size=1, now=1.0, scout=("dry-run", "heuristic (no LLM)", False))))
+        self.assertIn("judge paused", text)
+        self.assertIn("heuristic (no LLM)", text)
+
+    def test_scout_rows_survive_a_narrow_terminal(self) -> None:
+        text = squash(render(console_ui.render_dashboard(self.scout_stats(), status="online", allowlist_size=1, now=1.0, scout=("on", "inception", True)), width=50))
+        self.assertIn("screened 40", text)
+        self.assertIn("clips 3", text)
+
+    def test_live_dashboard_reads_the_scout_view_each_time(self) -> None:
+        stats = self.stats()
+        view = {"value": None}
+        dashboard = console_ui.Dashboard(stats, lambda: "online", lambda: 1, clock=lambda: 5.0, get_scout=lambda: view["value"])
+        self.assertNotIn("screened", squash(render(dashboard)))
+        view["value"] = ("on", "openai", True)
+        stats.scout_screened = 9
+        text = squash(render(dashboard))
+        self.assertIn("screened 9", text)
+        self.assertIn("judge openai", text)
+
     def test_shutdown_panel_summarizes_the_session(self) -> None:
         stats = self.stats()
         stats.conversions_ok, stats.conversions_failed = 12, 1

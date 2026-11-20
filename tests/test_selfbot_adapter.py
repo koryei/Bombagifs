@@ -1342,5 +1342,50 @@ class SelfBotHelpTests(_SelfBotCase):
         self.assertEqual(message.reply.await_args.args[0], WELCOME_TEXT)  # registered, not helped
 
 
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotScoutUiTests(_SelfBotCase):
+    def bot_with(self, mode: str, **env: str):
+        from scout_judge import build_judge_chain
+        from selfbot import SelfBot
+
+        runtime = make_runtime(Path(self._tmp.name) / f"ui-{mode}-{len(env)}", mode=mode, **env)
+        runtime.judge = build_judge_chain(runtime.cfg, None, clock=lambda: NOW)  # type: ignore[arg-type]
+        bot = SelfBot(SETTINGS, self.allowlist, scout=runtime)
+        self.addAsyncCleanup(bot.close)
+        return bot
+
+    async def test_boot_info_without_a_scout_says_off(self) -> None:
+        info = self.bot._boot_info()
+        self.assertEqual(info["scout"], "off")
+        self.assertNotIn("judge", info)
+
+    async def test_boot_info_scout_rows(self) -> None:
+        info = self.bot_with("dry-run")._boot_info()
+        self.assertEqual(info["scout"], "dry-run")
+        self.assertEqual(info["judge"], "heuristic (no LLM)")
+        self.assertEqual(info["scout chats"], "1")
+        self.assertNotIn("reminder", info)
+
+    async def test_inception_reminder_shows_while_inception_is_active(self) -> None:
+        bot = self.bot_with("on", INCEPTION_API_KEY="inception-secret-key")
+        info = bot._boot_info()
+        self.assertEqual(info["judge"], "inception")
+        self.assertIn("Improve the model for everyone", info["reminder"])
+        self.assertNotIn("inception-secret-key", " ".join(str(v) for v in info.values()))
+
+    async def test_scout_view_is_none_when_off_and_a_tuple_otherwise(self) -> None:
+        self.assertIsNone(self.bot.scout_view())
+        self.assertIsNone(self.bot_with("off").scout_view())
+        self.assertEqual(self.bot_with("dry-run").scout_view(), ("dry-run", "heuristic (no LLM)", False))
+        self.assertEqual(self.bot_with("on", INCEPTION_API_KEY="k").scout_view(), ("on", "inception", True))
+
+    async def test_scout_view_before_the_judge_exists(self) -> None:
+        from selfbot import SelfBot
+
+        bot = SelfBot(SETTINGS, self.allowlist, scout=make_runtime(Path(self._tmp.name) / "nojudge", mode="on"))
+        self.addAsyncCleanup(bot.close)
+        self.assertEqual(bot.scout_view(), ("on", "starting", False))
+
+
 if __name__ == "__main__":
     unittest.main()
