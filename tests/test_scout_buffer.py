@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from scout_buffer import ScoutBuffer, ScoutMessage, Version
+from scout_buffer import ScoutBuffer, ScoutMessage, Version, has_laughter
 
 
 class FakeClock:
@@ -117,6 +117,65 @@ class BufferCoreTests(unittest.TestCase):
         self.buffer.add(msg(1, chat=1))
         self.buffer.add(msg(1, chat=2))
         self.assertEqual(sorted(self.buffer.chats()), [1, 2])
+
+
+class LaughSignalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.buffer = ScoutBuffer(max_age_s=900, max_per_chat=50, is_opted_out=lambda _: False, clock=self.clock)
+
+    def test_react_counts_only_laugh_emoji_and_can_decrement(self) -> None:
+        self.buffer.add(msg(1))
+        self.buffer.react(1, 1, "😂", True)
+        self.buffer.react(1, 1, "💀", True)
+        self.buffer.react(1, 1, "❤️", True)
+        self.assertEqual(self.buffer.get(1, 1).laugh_reactions, 2)
+        self.buffer.react(1, 1, "😂", False)
+        self.buffer.react(1, 1, "😂", False)
+        self.buffer.react(1, 1, "💀", False)
+        self.assertEqual(self.buffer.get(1, 1).laugh_reactions, 0)  # never below zero
+
+    def test_react_on_unknown_message_is_ignored(self) -> None:
+        self.buffer.react(1, 404, "😂", True)
+        self.assertEqual(self.buffer.chats(), [])
+
+    def test_has_laughter(self) -> None:
+        for text in ("LMAO", "im dead", "💀", "bro 😭", "lmfao what", "😂😂"):
+            with self.subTest(text=text):
+                self.assertTrue(has_laughter(text))
+        for text in ("hello there", "that is a deadline", "", "lol maybe"):
+            with self.subTest(text=text):
+                self.assertFalse(has_laughter(text))
+
+    def test_laugh_reply_credits_recent_messages_by_other_authors(self) -> None:
+        now = self.clock.now
+        self.buffer.add(msg(1, "first thing", author=10, at=now - 20))
+        self.buffer.add(msg(2, "second thing", author=10, at=now - 10))
+        self.buffer.add(msg(3, "my own line", author=20, at=now - 5))
+        self.buffer.add(msg(4, "lmao", author=20, at=now))
+        self.assertEqual(self.buffer.get(1, 1).laugh_replies, 1)
+        self.assertEqual(self.buffer.get(1, 2).laugh_replies, 1)
+        self.assertEqual(self.buffer.get(1, 3).laugh_replies, 0)  # the laugher's own message
+        self.assertEqual(self.buffer.get(1, 4).laugh_replies, 0)
+
+    def test_old_messages_are_not_credited(self) -> None:
+        now = self.clock.now
+        self.buffer.add(msg(1, "old", author=10, at=now - 120))
+        self.buffer.add(msg(2, "lmao", author=20, at=now))
+        self.assertEqual(self.buffer.get(1, 1).laugh_replies, 0)
+
+    def test_only_the_three_previous_messages_are_credited(self) -> None:
+        now = self.clock.now
+        for i in range(1, 6):
+            self.buffer.add(msg(i, f"line {i}", author=10, at=now - 30 + i))
+        self.buffer.add(msg(6, "dead", author=20, at=now))
+        self.assertEqual([self.buffer.get(1, i).laugh_replies for i in range(1, 6)], [0, 0, 1, 1, 1])
+
+    def test_non_laughing_reply_credits_nothing(self) -> None:
+        now = self.clock.now
+        self.buffer.add(msg(1, "joke", author=10, at=now - 5))
+        self.buffer.add(msg(2, "interesting", author=20, at=now))
+        self.assertEqual(self.buffer.get(1, 1).laugh_replies, 0)
 
 
 if __name__ == "__main__":

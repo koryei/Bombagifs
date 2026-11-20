@@ -6,10 +6,22 @@ a deleted or edited message can still be judged. Nothing here is written to disk
 
 from __future__ import annotations
 
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+
+
+LAUGH_EMOJI = frozenset({"😂", "🤣", "💀", "😭"})
+_LAUGH_RE = re.compile(r"\b(?:lm+a+o+|lmfao|rofl|dead|dying|crying|screaming)\b|[💀😭😂🤣]", re.IGNORECASE)
+LAUGH_REPLY_WINDOW_S = 60.0
+LAUGH_REPLY_LOOKBACK = 3
+
+
+def has_laughter(text: str) -> bool:
+    """True if the text reads as laughing at what came just before it (lmao, dead, 💀, 😭, 😂)."""
+    return bool(_LAUGH_RE.search(text))
 
 
 @dataclass
@@ -93,10 +105,22 @@ class ScoutBuffer:
         messages = self._chats.setdefault(message.chat_id, OrderedDict())
         if message.id in messages:
             return False
+        previous = list(messages.values())[-LAUGH_REPLY_LOOKBACK:]
         messages[message.id] = message
         while len(messages) > self.max_per_chat:
             messages.popitem(last=False)
+        if has_laughter(message.original):
+            for earlier in previous:
+                recent = 0 <= message.created_at - earlier.created_at <= LAUGH_REPLY_WINDOW_S
+                if earlier.author_id != message.author_id and recent:
+                    earlier.laugh_replies += 1
         return True
+
+    def react(self, chat_id: int, message_id: int, emoji: str, added: bool) -> None:
+        """Count a laugh reaction being added or removed (other emoji and unknown messages are ignored)."""
+        found = self.get(chat_id, message_id)
+        if found is not None and emoji in LAUGH_EMOJI:
+            found.laugh_reactions = max(0, found.laugh_reactions + (1 if added else -1))
 
     def edit(self, chat_id: int, message_id: int, content: str, at: float | None = None) -> None:
         """Record a new version of a buffered message (unknown messages are ignored)."""
