@@ -16,30 +16,33 @@ import discord
 from aiohttp import web
 from PIL import Image, features
 
-from main import (
-    InvalidImage,
-    PublicGifView,
-    Settings,
-    UploadFailure,
-    UserFacingError,
+import bombagif_core
+from bombagif_core import (
+    GIF_TARGET_BYTES,
+    MAX_GIF_BATCH,
     MAX_INPUT_BYTES,
     MAX_OUTPUT_BYTES,
-    MAX_GIF_BATCH,
-    GIF_TARGET_BYTES,
-    PRESENCE_REASSERT_TICKS,
+    InvalidImage,
+    UploadFailure,
+    UserFacingError,
     _CandidateTooLarge,
     _convert_image_to_target,
+    _rasterize_svg,
+    convert_image,
+    convert_video,
+    validate_image_metadata,
+)
+from main import (
+    PublicGifView,
+    Settings,
+    PRESENCE_REASSERT_TICKS,
     _extract_zipline_file_url,
     _presence_signature,
     _read_settings,
-    _rasterize_svg,
     create_bot,
-    convert_image,
-    convert_video,
     load_presence_config,
     load_presence_or_default,
     upload_to_zipline,
-    validate_image_metadata,
 )
 
 
@@ -201,7 +204,7 @@ class ImageTests(unittest.TestCase):
     def test_image_attempts_fall_back_to_smallest_successful_candidate(self) -> None:
         """Continue after a candidate exceeds the hard cap and keep the smallest."""
         with patch(
-            "main._convert_image_once",
+            "bombagif_core._convert_image_once",
             side_effect=[b"a" * (GIF_TARGET_BYTES + 1), _CandidateTooLarge("too large"), b"b" * 900_000],
         ) as convert_once:
             candidate = _convert_image_to_target(b"source", ".png", (255, 255, 255))
@@ -217,7 +220,7 @@ class ImageTests(unittest.TestCase):
             b"d" * 1_500_000,
             b"e" * 1_600_000,
         ]
-        with patch("main._convert_image_once", side_effect=candidates):
+        with patch("bombagif_core._convert_image_once", side_effect=candidates):
             self.assertEqual(
                 _convert_image_to_target(b"source", ".png", (255, 255, 255)), candidates[1]
             )
@@ -231,7 +234,7 @@ class ImageTests(unittest.TestCase):
             b"d" * 1_500_000,
             b"e" * 1_600_000,
         ]
-        with patch("main._convert_video_once", side_effect=candidates) as convert_once:
+        with patch("bombagif_core._convert_video_once", side_effect=candidates) as convert_once:
             result = convert_video(b"source", ".mp4")
         self.assertEqual(result, candidates[1])
         self.assertEqual(convert_once.call_count, 5)
@@ -256,8 +259,8 @@ class ImageTests(unittest.TestCase):
 
         for suffix in (".mp4", ".webm"):
             with self.subTest(suffix=suffix):
-                with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
-                    "main.subprocess.run", side_effect=fake_ffmpeg
+                with patch("bombagif_core.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+                    "bombagif_core.subprocess.run", side_effect=fake_ffmpeg
                 ) as run:
                     converted = convert_video(b"video bytes", suffix)
                 self.assertEqual(converted, b"GIF89aframe;")
@@ -327,7 +330,7 @@ class ImageTests(unittest.TestCase):
 
     def test_video_conversion_reports_missing_ffmpeg_and_invalid_outputs(self) -> None:
         """Report missing FFmpeg, timeout, failed decodes, and oversized output clearly."""
-        with patch("main.shutil.which", return_value=None):
+        with patch("bombagif_core.shutil.which", return_value=None):
             with self.assertRaisesRegex(InvalidImage, "requires FFmpeg"):
                 convert_video(b"video bytes", ".mp4")
 
@@ -342,8 +345,8 @@ class ImageTests(unittest.TestCase):
             timed_out_workdirs.append(Path(str(kwargs["cwd"])))
             raise subprocess.TimeoutExpired(command, 45)
 
-        with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
-            "main.subprocess.run", side_effect=time_out
+        with patch("bombagif_core.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "bombagif_core.subprocess.run", side_effect=time_out
         ):
             with self.assertRaisesRegex(InvalidImage, "took too long"):
                 convert_video(b"video bytes", ".mp4")
@@ -359,8 +362,8 @@ class ImageTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 1)
 
         with self.assertLogs("bombagif.media", level="WARNING") as logs:
-            with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
-                "main.subprocess.run", side_effect=failed_ffmpeg
+            with patch("bombagif_core.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+                "bombagif_core.subprocess.run", side_effect=failed_ffmpeg
             ):
                 with self.assertRaisesRegex(InvalidImage, "service journal"):
                     convert_video(b"video bytes", ".mp4", "test-trace")
@@ -386,8 +389,8 @@ class ImageTests(unittest.TestCase):
             oversized_attempts += 1
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("main.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
-            "main.subprocess.run", side_effect=oversized_output
+        with patch("bombagif_core.shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+            "bombagif_core.subprocess.run", side_effect=oversized_output
         ):
             converted = convert_video(b"video bytes", ".mp4")
         self.assertEqual(converted, b"GIF89aframe;")
@@ -429,7 +432,7 @@ class ImageTests(unittest.TestCase):
 
     def test_missing_cairo_reports_macos_install_hint(self) -> None:
         """Explain the native Cairo prerequisite without blocking bot startup."""
-        with patch("main.importlib.import_module", side_effect=OSError("libcairo missing")):
+        with patch("bombagif_core.importlib.import_module", side_effect=OSError("libcairo missing")):
             with self.assertRaisesRegex(InvalidImage, "brew install cairo"):
                 _rasterize_svg(b"<svg/>", 1, 1)
 
