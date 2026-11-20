@@ -19,7 +19,7 @@ from typing import Literal
 from scout_buffer import ScoutBuffer, ScoutMessage
 from scout_config import ScoutConfig
 from scout_judge import JudgeChain, Verdict, build_judge_window
-from scout_safety import check_window
+from scout_safety import check_window, load_blocklist
 from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
 from selfbot_logic import BotStats
 
@@ -296,6 +296,31 @@ class Scout:
             self.ledger.append(record)
         except OSError:
             logger.exception("could not write the clip ledger")
+
+
+def build_scout_runtime(cfg: ScoutConfig, data_dir: Path) -> ScoutRuntime | None:
+    """Create the scout's stores and buffer under ``data_dir``.
+
+    Returns ``None`` when the scout is off and no owner is configured. With mode ``off`` but an owner set it still
+    builds a runtime (without scouting) so the owner's ``!scout`` command can explain why it is refused. The judge
+    chain and the scout loop are created later, once the adapter has an HTTP session.
+    """
+    if cfg.mode == "off" and cfg.owner_id is None:
+        return None
+    optout = OptOutStore(data_dir / "optout.json")
+    return ScoutRuntime(
+        cfg=cfg,
+        buffer=ScoutBuffer(
+            max_age_s=cfg.buffer_minutes * 60.0,
+            max_per_chat=cfg.buffer_max_per_chat,
+            is_opted_out=lambda user_id: user_id in optout,
+        ),
+        chats=ScoutChatStore(data_dir / "scout-chats.json", seed=cfg.seed_chats),
+        optout=optout,
+        ledger=ClipLedger(data_dir / "clips.jsonl"),
+        blocklist=load_blocklist(data_dir / "scout-blocklist.txt"),
+        emoji_cache=data_dir / "emoji-cache",
+    )
 
 
 # notice text and owner commands --------------------------------------------------------------------------------

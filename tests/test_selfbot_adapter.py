@@ -1387,5 +1387,37 @@ class SelfBotScoutUiTests(_SelfBotCase):
         self.assertEqual(bot.scout_view(), ("on", "starting", False))
 
 
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class CreateBotTests(unittest.TestCase):
+    ENV = {"ZIPLINE_TOKEN": "z", "ZIPLINE_URL": "https://z.example", "SELFBOT_TOKEN": "t"}
+
+    def create(self, **extra: str):
+        from bombagif_core import read_settings
+        from selfbot import create_bot
+
+        env = {**self.ENV, **extra}
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return create_bot(read_settings("SELFBOT_TOKEN", env), Path(tmp.name), env)
+
+    def test_without_scout_settings_the_bot_is_plain_v2(self) -> None:
+        bot = self.create()
+        self.assertIsNone(bot.scout)
+        self.assertFalse(bot.auto_accept_friends)
+        self.assertEqual(bot.captcha_guard.path.name, "captcha-blocked.json")
+
+    def test_scout_settings_build_a_runtime(self) -> None:
+        bot = self.create(SELFBOT_SCOUT_MODE="dry-run", SELFBOT_OWNER_ID="42", INCEPTION_API_KEY="k")
+        self.assertEqual((bot.scout.cfg.mode, bot.scout.cfg.owner_id), ("dry-run", 42))
+        self.assertEqual(bot.scout.cfg.inception_api_key, "k")
+
+    def test_friend_auto_accept_flag_is_read(self) -> None:
+        self.assertTrue(self.create(SELFBOT_AUTO_ACCEPT_FRIENDS="true").auto_accept_friends)
+
+    def test_invalid_scout_settings_fail_fast_with_the_variable_name(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "SELFBOT_SCOUT_MODE"):
+            self.create(SELFBOT_SCOUT_MODE="sometimes")
+
+
 if __name__ == "__main__":
     unittest.main()

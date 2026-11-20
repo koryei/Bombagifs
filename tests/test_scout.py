@@ -10,7 +10,16 @@ from unittest.mock import AsyncMock, patch
 from dataclasses import replace
 from pathlib import Path
 
-from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, Scout, ScoutCommand, format_clip_notice, parse_scout_command
+from scout import (
+    ANNOUNCE_OFF,
+    ANNOUNCE_ON,
+    ClipPlan,
+    Scout,
+    ScoutCommand,
+    build_scout_runtime,
+    format_clip_notice,
+    parse_scout_command,
+)
 from scout_buffer import ScoutBuffer, ScoutMessage, Version
 from scout_config import read_scout_config
 from scout_judge import HeuristicJudge, JudgeChain, JudgeWindow, Verdict
@@ -614,6 +623,45 @@ class ClipPlanTests(unittest.TestCase):
         plan = ClipPlan(1, (), good_verdict(), False, False)
         with self.assertRaises(Exception):
             plan.chat_id = 2  # type: ignore[misc]
+
+
+class BuildRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name) / "data"
+
+    def build(self, **env: str):
+        return build_scout_runtime(read_scout_config(env), self.dir)
+
+    def test_returns_none_when_off_and_no_owner(self) -> None:
+        self.assertIsNone(self.build())
+        self.assertIsNone(self.build(SELFBOT_SCOUT_MODE="off"))
+
+    def test_off_with_an_owner_still_builds_so_the_command_can_refuse(self) -> None:
+        runtime = self.build(SELFBOT_OWNER_ID="42")
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime.cfg.mode, "off")
+
+    def test_builds_the_stores_under_the_data_dir_and_loads_the_blocklist(self) -> None:
+        self.dir.mkdir(parents=True)
+        (self.dir / "scout-blocklist.txt").write_text("# my list\nbadword\n", encoding="utf-8")
+        runtime = self.build(SELFBOT_SCOUT_MODE="dry-run", SELFBOT_SCOUT_CHATS="5,6")
+        self.assertEqual(runtime.blocklist, frozenset({"badword"}))
+        self.assertEqual(runtime.optout.path, self.dir / "optout.json")
+        self.assertEqual(runtime.chats.path, self.dir / "scout-chats.json")
+        self.assertEqual(runtime.ledger.path, self.dir / "clips.jsonl")
+        self.assertEqual(runtime.emoji_cache, self.dir / "emoji-cache")
+        self.assertTrue(runtime.chats.enabled(5) and runtime.chats.enabled(6))
+        self.assertIsNone(runtime.judge)  # built later, with the HTTP session
+        self.assertIsNone(runtime.scout)
+
+    def test_buffer_follows_the_config_and_is_wired_to_the_optout_store(self) -> None:
+        runtime = self.build(SELFBOT_SCOUT_MODE="on", SCOUT_BUFFER_MINUTES="2", SCOUT_BUFFER_MAX_PER_CHAT="3")
+        self.assertEqual((runtime.buffer.max_age_s, runtime.buffer.max_per_chat), (120, 3))
+        runtime.optout.add(9)
+        self.assertTrue(runtime.buffer.is_opted_out(9))
+        self.assertFalse(runtime.buffer.is_opted_out(10))
 
 
 if __name__ == "__main__":

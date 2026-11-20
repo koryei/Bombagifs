@@ -18,6 +18,7 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -41,7 +42,17 @@ from bombagif_core import (
 )
 from clip_assets import asset_url_allowed, build_card, custom_emoji_url, mentioned_ids, twemoji_url
 from clip_render import collect_asset_keys, render_clip
-from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, Scout, ScoutRuntime, format_clip_notice, parse_scout_command
+from scout import (
+    ANNOUNCE_OFF,
+    ANNOUNCE_ON,
+    ClipPlan,
+    Scout,
+    ScoutRuntime,
+    build_scout_runtime,
+    format_clip_notice,
+    parse_scout_command,
+)
+from scout_config import read_scout_config
 from scout_judge import build_judge_chain
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
@@ -686,18 +697,23 @@ class SelfBot(discord.Client):
             await super().close()
 
 
+def create_bot(settings: Settings, data_dir: Path, environ: Mapping[str, str]) -> SelfBot:
+    """Build the self-bot (allowlist, CAPTCHA guard, optional auto-accept, optional scout) from the environment."""
+    return SelfBot(
+        settings,
+        AllowlistStore(data_dir / "allowlist.json"),
+        captcha_guard=CaptchaGuard(data_dir / "captcha-blocked.json"),
+        auto_accept_friends=env_flag(environ.get("SELFBOT_AUTO_ACCEPT_FRIENDS")),
+        scout=build_scout_runtime(read_scout_config(environ), data_dir),
+    )
+
+
 def main() -> None:
     """Load configuration and run the self-bot until interrupted."""
     load_dotenv()
     settings = read_settings("SELFBOT_TOKEN")
     mode = resolve_ui_mode(os.getenv("SELFBOT_UI"), is_tty=sys.stdout.isatty())
-    data_dir = Path(os.getenv("SELFBOT_DATA_DIR", "data"))
-    bot = SelfBot(
-        settings,
-        AllowlistStore(data_dir / "allowlist.json"),
-        captcha_guard=CaptchaGuard(data_dir / "captcha-blocked.json"),
-        auto_accept_friends=env_flag(os.getenv("SELFBOT_AUTO_ACCEPT_FRIENDS")),
-    )
+    bot = create_bot(settings, Path(os.getenv("SELFBOT_DATA_DIR", "data")), os.environ)
     if mode == "pretty":
         import console_ui  # rich is only needed for the pretty terminal
 
