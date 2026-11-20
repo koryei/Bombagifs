@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved by the operator; not started. (The v2 plan is archived at `docs/superpowers/plans/2026-11-18-selfbot.md`.)
+**Status:** implemented on branch `v3-scout` (all 18 tasks, tests green). The live `dry-run` against real chats is still manual. Deviations are recorded in the spec's "Implementation notes". (The v2 plan is archived at `docs/superpowers/plans/2026-11-18-selfbot.md`.)
 
 **Goal:** Add an opt-in "clip scout" to the self-bot: it watches enabled chats, finds genuinely funny out-of-context messages (including deleted/edited ones), renders a static Discord-style PNG, and posts it with a who-was-clipped + `stop` notice.
 

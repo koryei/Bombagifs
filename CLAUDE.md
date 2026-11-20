@@ -13,6 +13,14 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `format_results`, reply copy. Never import `discord` here.
 - `selfbot.py` — v2: thin `discord.py-self` adapter (`SelfBot`); run from `.venv-selfbot`
   (`requirements-selfbot.txt`). Note `SelfBot.config` holds `Settings` (`Client.settings` is a library property).
+- `private_files.py` — atomic mode-600 JSON write + append helpers for the data stores (discord-free).
+- Clip scout (v3), all discord-free unless noted: `scout_config.py` (env -> `ScoutConfig`), `scout_buffer.py` (in-memory
+  message buffer: versions, deletes, laugh signals, runs, windows), `scout_safety.py` (eligibility + the local sensitive
+  filter that the judge can never override), `scout_stores.py` (opt-out list, enabled chats, clip ledger),
+  `scout_judge.py` (anonymised windows, verdict validation, Mercury Decide + chat-completions clients, `InceptionJudge`,
+  `OpenAICompatJudge`, `JudgeChain`), `scout.py` (the `Scout` orchestrator, `ScoutRuntime`, notice text, `!scout`
+  parsing), `clip_render.py` (Pillow card renderer + markdown/emoji), `clip_assets.py` (asset host allowlist, card
+  building), `scout_discord.py` (**imports discord**: message mapping), `assets/fonts/` (Noto, SIL OFL).
 - `console_ui.py` — discord-free Rich terminal UI for the self-bot (boot banner, live status panel, pretty log
   handler, `TerminalUi`, `demo()`); needs `rich` (in `requirements-selfbot.txt`). Preview: `python console_ui.py`.
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
@@ -25,11 +33,15 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
 - **v1 (shipped):** `/gif` user-installed app.
 - **v2 (this branch, `v2-selfbot`):** self-bot front door. Spec: `docs/superpowers/specs/2026-11-18-selfbot-design.md`;
   plan: `PLAN.md`. Consent model: only users who DMed the account first are served; everyone else is ignored silently.
-- **v3 (planned, not started):** autonomous "clip scout" — spots clip-worthy messages and renders them as clips.
-  Proposed (not yet agreed with the owner): only allowlisted people's messages are eligible, clips are private by
-  default (never auto-posted), hard opt-out. Needs its own brainstorm and spec.
+- **v3 (implemented on branch `v3-scout`):** the clip scout. Spec: `docs/superpowers/specs/2026-11-19-clip-scout-design.md`;
+  plan: `PLAN.md`. **Not yet run against real chats**: the live `dry-run` (needs `INCEPTION_API_KEY` +
+  `SELFBOT_OWNER_ID` in `.env`) is the next step before turning `SELFBOT_SCOUT_MODE=on`.
 
 ## Key decisions
+
+- Clip scout: scouting is **off everywhere** until the owner runs `!scout on` in a chat; `dry-run` before `on`; the
+  provider payload is anonymised text only; the local safety filter, opt-outs, cooldowns and caps always win over the
+  judge; the heuristic (no-LLM) judge never posts. Inception's API ends 2026-12-28, so the judge is a swappable chain.
 
 - `discord.py-self` and `discord.py` both install as `discord`, so the self-bot is a separate process and venv.
 - Embedded media is fetched only via Discord proxy URLs (SSRF-safe); bare links in a ping's own text are not fetched.
@@ -53,17 +65,16 @@ breaking Rich's erase maths), so the live panel is now 3 columns narrower, non-t
 `discord.*` INFO chatter is hidden in pretty mode (shown at LOG_LEVEL=DEBUG). Zipline 401/403/404/413 rejections log a hint.
 Verified with a pty + `pyte` screen emulator harness (kept out of the repo).
 
-## v3 clip scout (branch `v3-scout`, design only so far)
+## v3 clip scout (branch `v3-scout`)
 
-Design: `docs/superpowers/specs/2026-11-19-clip-scout-design.md` (committed, **awaiting operator approval**). Static
-Discord-style PNG clips of funny out-of-context messages (deleted/edited ones too), posted in enabled chats with a
-who-was-clipped + `stop` notice. Judge = Mercury Decide screen + Mercury 3 final call behind a swappable interface
-(Inception's API ends 2026-12-28; fallback = any OpenAI-compatible model with json_schema, else heuristics that never
-auto-post). Scouting is off until the owner runs `!scout on` in a chat; `dry-run` ships before `on`. Stranger pings now
-get a help reply. Next step: operator approves/changes the doc -> writing-plans -> build in atomic commits.
+Built per the spec in 18 plan tasks (see `PLAN.md`): buffer -> candidate runs -> Decide screen -> Mercury 3 final call ->
+local gates -> pure Pillow renderer -> post with a who-was-clipped + `stop` notice. Extras beyond the spec are listed in
+the spec's "Implementation notes". Strangers who ping the account now get a help reply. `stop` in any DM opts out of
+clipping and conversions; `start` opts back in.
 
 ## Status
 
+v3 (clip scout) is implemented on branch `v3-scout` (not merged or released); the live dry-run is still manual.
 v2, v2.1 (CAPTCHA guard, auto-accept, terminal UI) are merged to `main` and released (tags `v2`, `v2.1`). v2 was implemented on branch `v2-selfbot` (core extraction, allowlist, rate limiter, decision rules, media
 collection, reply copy, adapter, embeds, docs). Live smoke test with a real alt-account token is still manual.
 Known limit: a ping whose own bare link has not been embedded yet at message time gets the no-media reply.

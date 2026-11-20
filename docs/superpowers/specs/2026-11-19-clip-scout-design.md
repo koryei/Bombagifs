@@ -1,6 +1,6 @@
 # Bombagif v3: the clip scout, design
 
-Status: awaiting approval. Size: a project. Builds on v2.1 (self-bot, CAPTCHA guard, terminal UI).
+Status: approved and implemented on branch `v3-scout`. Size: a project. Builds on v2.1 (self-bot, CAPTCHA guard, terminal UI).
 
 ## Intent
 
@@ -306,3 +306,22 @@ the laughter-word list; ledger rotation; how to pin the Twemoji version; welcome
 - **Judgement quality:** thresholds are untested on real chats; `dry-run` exists to fix that before `on`.
 - **Shutdown:** after 2026-12-28 the Inception judge is gone; confirm the replacement provider supports
   `json_schema` before then.
+
+## Implementation notes (where the build differs from this design)
+
+- **Welcome/help clipping line only when mode is `on`.** In `dry-run` nothing is ever posted, so telling people "I clip
+  you" would be false; the chat announcement is skipped in `dry-run` for the same reason (spec said "not `off`").
+- **`!scout` answers go to the owner by DM** (status, list, refusals), so commands add no public noise. With scout mode
+  `off` but `SELFBOT_OWNER_ID` set the command is refused with a reason; with no scout configured it is ignored.
+- **A well-formed but invalid judge reply is a no-clip verdict**, not a provider failure, so deterministic garbage is
+  never retried. Provider failures (timeouts, 5xx, non-JSON) return "no verdict" and the run is retried after 30 s.
+- **Dry-run mimics `on`:** it consumes cooldowns and the hourly cap and flags messages as clipped, so dry-run counts
+  match what live posting would do. Owner-routed (deleted) clips count only as `deleted_rescued`.
+- **Chat-completions base URL:** a `SCOUT_LLM_BASE_URL` ending in `/v1` (the OpenAI SDK convention) posts to
+  `/chat/completions`; a bare host posts to `/v1/chat/completions`.
+- **Phone rule is 9-15 digits** (E.164 maximum) so 16-19 digit numbers that fail the card checksum (Discord ids) are
+  allowed; Luhn-valid 13-19 digit runs are blocked as cards.
+- **Extras:** `clip_assets.py` (asset host allowlist + card building, discord-free), `ScoutBuffer.drop_chat`,
+  `NotoSans-BoldItalic`, an `emoji` package pin with a regex fallback when it is missing, `read_settings(env=...)`,
+  `create_bot(...)`, and a `python clip_render.py demo` preview.
+- **Not yet verified live:** real Mercury 3 / Decide behaviour, threshold calibration, posting in a real chat.
