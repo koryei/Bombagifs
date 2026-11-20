@@ -6,7 +6,6 @@ import asyncio
 import configparser
 import logging
 import os
-import re
 import signal
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -23,17 +22,12 @@ from dotenv import load_dotenv
 from bombagif_core import (
     DOWNLOAD_TIMEOUT,
     MAX_GIF_BATCH,
-    InvalidImage,
     Settings,
     UploadFailure,
     UserFacingError,
-    _convert_image_to_target,
     configure_logging,
-    convert_image,
-    convert_video,
-    download_attachment,
+    convert_and_upload,
     read_settings,
-    upload_to_zipline,
     validate_attachment_metadata,
 )
 
@@ -452,38 +446,18 @@ class BombagifBot(commands.Bot):
     ) -> str:
         """Run one pipeline while holding the global media-work limit."""
         trace_id = uuid.uuid4().hex
-        context = self._log_context(user_id, guild_id, trace_id)
-        suffix = validate_attachment_metadata(attachment.filename, attachment.content_type, attachment.size)
+        # Fail fast (before any download) on unsupported types or declared sizes.
+        validate_attachment_metadata(attachment.filename, attachment.content_type, attachment.size)
         if self.http_session is None:
             raise UploadFailure("The bot is still starting up. Please try again shortly.")
-        self.logger.info("Processing attachment", extra={**context, "attachment_name": attachment.filename})
-        data = await download_attachment(self.http_session, attachment)
-        try:
-            loop = asyncio.get_running_loop()
-            converter = convert_video if suffix in {".mp4", ".webm"} else convert_image
-            if converter is convert_video:
-                conversion_args = (data, suffix, trace_id)
-                gif_data = await loop.run_in_executor(self.image_executor, converter, *conversion_args)
-            else:
-                gif_data = await loop.run_in_executor(
-                    self.image_executor,
-                    _convert_image_to_target,
-                    data,
-                    suffix,
-                    self.settings.background,
-                )
-        except InvalidImage:
-            raise
-        except Exception as exc:
-            self.logger.exception("Media conversion failed", extra=context)
-            raise InvalidImage("That file could not be converted. Please try another image or video.") from exc
-        safe_stem = re.sub(
-            r"[^A-Za-z0-9_-]+",
-            "-",
-            os.path.splitext(os.path.basename(attachment.filename))[0],
-        ).strip("-_")[:64] or "media"
-        output_name = f"{safe_stem}.gif"
-        return await upload_to_zipline(self.http_session, self.settings, gif_data, output_name, trace_id=trace_id)
+        return await convert_and_upload(
+            self.http_session,
+            self.settings,
+            self.image_executor,
+            attachment,
+            trace_id=trace_id,
+            log_context={"user_id": user_id, "guild_id": guild_id},
+        )
 
     async def _process_many(
         self,

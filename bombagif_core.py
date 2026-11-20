@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -870,3 +871,49 @@ def configure_logging(level: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level, logging.INFO))
+
+
+@dataclass(frozen=True, slots=True)
+class MediaSource:
+    """A downloadable media item that is not necessarily a Discord attachment."""
+
+    filename: str
+    url: str
+    size: int | None = None
+    content_type: str | None = None
+
+
+async def convert_and_upload(
+    session: aiohttp.ClientSession,
+    settings: Settings,
+    executor: ThreadPoolExecutor,
+    source: MediaLike,
+    *,
+    trace_id: str,
+    log_context: dict[str, Any] | None = None,
+) -> str:
+    """Validate, download, convert and upload one media item, returning its GIF link."""
+    logger = logging.getLogger("bombagif")
+    context = {"trace_id": trace_id, **(log_context or {})}
+    suffix = validate_attachment_metadata(source.filename, source.content_type, source.size)
+    logger.info("Processing attachment", extra={**context, "attachment_name": source.filename})
+    data = await download_attachment(session, source)
+    try:
+        loop = asyncio.get_running_loop()
+        if suffix in {".mp4", ".webm"}:
+            gif_data = await loop.run_in_executor(executor, convert_video, data, suffix, trace_id)
+        else:
+            gif_data = await loop.run_in_executor(
+                executor, _convert_image_to_target, data, suffix, settings.background
+            )
+    except InvalidImage:
+        raise
+    except Exception as exc:
+        logger.exception("Media conversion failed", extra=context)
+        raise InvalidImage("That file could not be converted. Please try another image or video.") from exc
+    safe_stem = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "-",
+        os.path.splitext(os.path.basename(source.filename))[0],
+    ).strip("-_")[:64] or "media"
+    return await upload_to_zipline(session, settings, gif_data, f"{safe_stem}.gif", trace_id=trace_id)
