@@ -8,8 +8,16 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from importlib import metadata
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+try:
+    metadata.version("discord.py-self")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise unittest.SkipTest("the slash-command app tests need discord.py, not discord.py-self")
 
 import aiohttp
 import discord
