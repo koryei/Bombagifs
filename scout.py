@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from scout_buffer import ScoutBuffer, ScoutMessage
 from scout_config import ScoutConfig
 from scout_judge import JudgeChain, Verdict, build_judge_window
+from scout_safety import check_window
 from scout_stores import ClipLedger, ClipRecord, OptOutStore
 from selfbot_logic import BotStats
 
@@ -142,8 +143,78 @@ class Scout:
 
     # decisions ------------------------------------------------------------------------------------------------
 
+    def _reject(self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict, reason: str) -> None:
+        names = ", ".join(dict.fromkeys(m.author_name for m in chosen))
+        self.stats.scout_rejected += 1
+        self.stats.note("warn", f"clip rejected: {reason} ({names})")
+        logger.info("clip rejected: %s", reason)
+        self._write(
+            ClipRecord(
+                at=self.clock(),
+                chat_id=chat_id,
+                message_ids=tuple(m.id for m in chosen),
+                author_ids=tuple(dict.fromkeys(m.author_id for m in chosen)),
+                mode="rejected",
+                funny=verdict.funny,
+                decide=dict(verdict.decide),
+                deleted=any(m.deleted for m in chosen),
+                provider=verdict.provider,
+                reason=reason,
+            )
+        )
+
+    def _gate(self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict, now: float) -> str | None:
+        """Return why a clip must not be posted, or ``None`` if every gate passes. Order matches the spec."""
+        cfg = self.cfg
+        if any(m.deleted for m in chosen):
+            if cfg.clip_deleted == "off":
+                return "deleted clips are off"
+            if verdict.funny < cfg.deleted_funny_min or verdict.decide.get("sensitive", 1.0) > cfg.deleted_sensitive_max:
+                return "deleted bar"
+        safety = check_window([m.original for m in chosen], self.blocklist)
+        if not safety.ok:
+            return "safety: " + ",".join(safety.reasons)
+        if any(m.author_id in self.optout for m in chosen):
+            return "opted out"
+        if any(m.clipped for m in chosen):
+            return "already clipped"
+        if now - self._chat_last.get(chat_id, float("-inf")) < cfg.chat_cooldown_s:
+            return "chat cooldown"
+        if any(now - self._author_last.get(m.author_id, float("-inf")) < cfg.author_cooldown_s for m in chosen):
+            return "author cooldown"
+        while self._posts and now - self._posts[0] >= HOUR_S:
+            self._posts.popleft()
+        if len(self._posts) >= cfg.max_per_hour:
+            return "hourly cap"
+        if self.paused():
+            return "paused"
+        return None
+
+    def _commit(self, chat_id: int, chosen: tuple[ScoutMessage, ...], now: float) -> None:
+        """Remember a clip that went out: flag its messages and start the cooldowns."""
+        for message in chosen:
+            message.clipped = True
+            self._author_last[message.author_id] = now
+        self._chat_last[chat_id] = now
+        self._posts.append(now)
+
     async def _act(self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict) -> None:
-        """Apply the gates to a clip the judge approved, then post it (or record it in dry-run)."""
+        """Apply the gates to a clip the judge approved, then post it."""
+        now = self.clock()
+        reason = self._gate(chat_id, chosen, verdict, now)
+        if reason is not None:
+            self._reject(chat_id, chosen, verdict, reason)
+            return
+        deleted = any(m.deleted for m in chosen)
+        plan = ClipPlan(
+            chat_id=chat_id,
+            messages=chosen,
+            verdict=verdict,
+            deleted=deleted,
+            to_owner=deleted and self.cfg.clip_deleted == "owner",
+        )
+        if await self.on_clip(plan) is not None:
+            self._commit(chat_id, chosen, now)
 
     def _record_dry_run(
         self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict | None, *, reason: str = ""
