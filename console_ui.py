@@ -202,10 +202,12 @@ def render_dashboard(
     feed.add_column(style="muted", no_wrap=True)
     feed.add_column(no_wrap=True)
     feed.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
-    if not stats.activity:
+    # Rich redraws from its own thread while the bot appends to the feed: draw from a snapshot.
+    entries = list(stats.activity)
+    if not entries:
         feed_body: RenderableType = Text("Waiting for the first DM or ping\u2026", style="muted")
     else:
-        for entry in stats.activity:
+        for entry in entries:
             glyph, glyph_style = _LEVEL_VIEW[entry.level]
             feed.add_row(
                 time.strftime("%H:%M:%S", time.localtime(entry.at)),
