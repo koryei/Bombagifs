@@ -13,6 +13,7 @@ from selfbot_logic import (
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
+    CaptchaGuard,
     ChannelKind,
     Decision,
     Incoming,
@@ -299,6 +300,51 @@ class CollectEmbedTests(unittest.TestCase):
         msg = message_with_embeds(*[embed("image", image=f"https://media.discordapp.net/{i}.png") for i in range(6)])
         collected = collect_media(msg)
         self.assertEqual((len(collected.sources), collected.skipped), (5, 1))
+
+
+class CaptchaGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "data" / "captcha-blocked.json"
+
+    def test_starts_unblocked_without_state_file(self) -> None:
+        guard = CaptchaGuard(self.path)
+        self.assertFalse(guard.blocked)
+
+    def test_trip_blocks_and_persists_across_instances(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.assertTrue(CaptchaGuard(self.path).trip("friend request acceptance"))
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            reloaded = CaptchaGuard(self.path)
+        self.assertTrue(reloaded.blocked)
+        self.assertEqual(reloaded.reason, "friend request acceptance")
+
+    def test_second_trip_is_a_no_op_and_keeps_first_reason(self) -> None:
+        guard = CaptchaGuard(self.path)
+        with self.assertLogs("bombagif.selfbot", "ERROR") as logs:
+            self.assertTrue(guard.trip("reply"))
+            self.assertFalse(guard.trip("typing"))
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(guard.reason, "reply")
+
+    def test_state_file_mode_is_600(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            CaptchaGuard(self.path).trip("reply")
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+    def test_unreadable_state_file_still_blocks(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{garbage", encoding="utf-8")
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            guard = CaptchaGuard(self.path)
+        self.assertTrue(guard.blocked)
+
+    def test_deleting_the_file_clears_the_block(self) -> None:
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            CaptchaGuard(self.path).trip("reply")
+        self.path.unlink()
+        self.assertFalse(CaptchaGuard(self.path).blocked)
 
 
 if __name__ == "__main__":

@@ -78,20 +78,68 @@ class AllowlistStore:
                 logger.warning("Could not move corrupt allowlist aside", exc_info=True)
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps({str(user_id): ts for user_id, ts in sorted(self._users.items())})
-        fd, tmp_name = tempfile.mkstemp(dir=self.path.parent, prefix=".allowlist-", suffix=".tmp")
+        _write_private_json(self.path, {str(user_id): ts for user_id, ts in sorted(self._users.items())})
+
+
+def _write_private_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write JSON (temp file + rename) readable only by the owner (mode 600)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(json.dumps(data))
+        os.replace(tmp_name, path)
+    except BaseException:
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(payload)
-            os.replace(tmp_name, self.path)
-        except BaseException:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+class CaptchaGuard:
+    """Persistent "stop touching the account" switch, tripped when Discord demands a CAPTCHA.
+
+    A self-bot cannot solve CAPTCHAs, and retrying only invites a harder flag. Once tripped the
+    guard stays blocked across restarts until the operator verifies the account by hand and
+    deletes the state file.
+    """
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path)
+        self.blocked = False
+        self.reason = ""
+        if self.path.exists():
+            self.blocked = True
             try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+                self.reason = str(json.loads(self.path.read_text(encoding="utf-8")).get("reason", "unknown"))
+            except (OSError, ValueError, AttributeError):
+                self.reason = "unknown (state file unreadable)"
+            logger.error(
+                "CAPTCHA guard is active (%s): all account actions are paused. Log in to the account "
+                "manually, then delete %s and restart.",
+                self.reason,
+                self.path,
+            )
+
+    def trip(self, reason: str) -> bool:
+        """Block all account actions; returns True only the first time."""
+        if self.blocked:
+            return False
+        self.blocked = True
+        self.reason = reason
+        try:
+            _write_private_json(self.path, {"reason": reason, "at": time.time()})
+        except OSError:
+            logger.exception("Could not persist the CAPTCHA guard state to %s", self.path)
+        logger.error(
+            "Discord requested a CAPTCHA during %s: all account actions are paused. Log in to the "
+            "account manually, then delete %s and restart.",
+            reason,
+            self.path,
+        )
+        return True
 
 
 class RateLimiter:
