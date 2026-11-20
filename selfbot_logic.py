@@ -81,6 +81,11 @@ class AllowlistStore:
         _write_private_json(self.path, {str(user_id): ts for user_id, ts in sorted(self._users.items())})
 
 
+def env_flag(value: str | None) -> bool:
+    """Parse an opt-in environment flag: 1/true/yes/on (any case) enable it; anything else does not."""
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _write_private_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically write JSON (temp file + rename) readable only by the owner (mode 600)."""
     path.parent.mkdir(parents=True, exist_ok=True)

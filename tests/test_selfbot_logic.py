@@ -21,6 +21,7 @@ from selfbot_logic import (
     RateLimiter,
     collect_media,
     decide,
+    env_flag,
     format_results,
 )
 
@@ -345,6 +346,18 @@ class CaptchaGuardTests(unittest.TestCase):
             CaptchaGuard(self.path).trip("reply")
         self.path.unlink()
         self.assertFalse(CaptchaGuard(self.path).blocked)
+
+
+class EnvFlagTests(unittest.TestCase):
+    def test_truthy_values(self) -> None:
+        for value in ("1", "true", "TRUE", " yes ", "on"):
+            with self.subTest(value=value):
+                self.assertTrue(env_flag(value))
+
+    def test_everything_else_is_false(self) -> None:
+        for value in (None, "", "0", "false", "no", "off", "maybe"):
+            with self.subTest(value=value):
+                self.assertFalse(env_flag(value))
 
 
 if __name__ == "__main__":
