@@ -174,13 +174,13 @@ nobody who opted out; per-chat and per-person cooldowns; at most 4 clips an hour
 **Turn it on**
 1. Set `SELFBOT_OWNER_ID` (your own user id), `INCEPTION_API_KEY`, and `SELFBOT_SCOUT_MODE=dry-run` in `.env`
    (see `.env.example` for every setting), then restart the self-bot.
-2. In a chat the account is in, type `!scout on` (only you can; other people's `!scout` is ignored). The account
+2. In a chat the account is in, type `!on` (only you can; other people's commands are ignored). The account
    announces it there: it is clipping funny messages, names whoever is in them, and `stop` opts out. In dry-run there is
    no announcement, because nothing will be posted.
 3. Watch the terminal: candidates and scores appear in the feed (`dry-run: would clip Maple (funny 8.7)`) and
    `data/clips.jsonl` records them without text. Adjust the bars, then switch to `SELFBOT_SCOUT_MODE=on`.
-4. `!scout off` stops it in that chat (and drops its buffer); `!scout status` / `!scout list` answer you by DM. From a
-   DM with the account you can also use `!scout on <chat id>` / `!scout off <chat id>`. It never scouts 1:1 DMs or
+4. `!off` stops it in that chat (and drops its buffer); `!status` / `!list` answer you by DM. From a
+   DM with the account you can also use `!on <chat id>` / `!off <chat id>`. It never scouts 1:1 DMs or
    NSFW channels.
 
 **What a clip looks like.** One card per clip, posted as a reply to the last message in it (or a plain message if
@@ -209,7 +209,7 @@ Preview the card without Discord: `python clip_render.py demo out.png`. Everythi
 Reply to any **text** message and `@` the account: it posts that message (and the rest of that person's run, if it
 is still buffered) as a card, with ``🎬 Clipped **Name** at **You**'s request — DM me `stop` to opt out of clips.``
 No judge is involved, since a person chose it. It posts even in `dry-run`.
-- **Who:** people who have DMed the account first. Members can only do it in chats where the owner ran `!scout on`;
+- **Who:** people who have DMed the account first. Members can only do it in chats where the owner ran `!on`;
   the owner (`SELFBOT_OWNER_ID`) can do it anywhere except NSFW channels and 1:1 DMs.
 - **Always refused:** opted-out people, bots, the account itself, non-text messages (links, images, stickers,
   spoilers), anything the local sensitive filter catches, and a message that was already clipped. Refusals are one
@@ -222,16 +222,16 @@ No judge is involved, since a person chose it. It posts even in `dry-run`.
 
 The judge starts with a fixed idea of "funny out of context". You can steer it three ways (all owner-only, answers
 come by DM):
-1. **Taste notes**, plain English, up to 1,500 characters: `!scout taste add we like deadpan one-liners, skip
-   anything about exams`. They go into the judge's instructions. `!scout taste` shows them, `!scout taste clear` wipes
+1. **Taste notes**, plain English, up to 1,500 characters: `!taste add we like deadpan one-liners, skip
+   anything about exams`. They go into the judge's instructions. `!taste` shows them, `!taste clear` wipes
    them, and `data/scout-taste.txt` can be edited by hand (changes apply on the next judging call).
 2. **Rate examples.** In dry-run the account DMs you each candidate (what it would clip, plus some near-misses; at most
    `SCOUT_REVIEW_PER_HOUR`). **Reply to that DM** with `good` (clip-worthy), `bad` (never) or `skip` (the account never adds reactions, they are
    rate limited; your own 👍/👎/🙈 reactions on the DM still count). You can also reply `good`/`bad` to any clip it posted. Your
    ratings are stored in `data/taste.jsonl` (only lines you rated, anonymous speaker labels, mode 600) and the newest
-   `SCOUT_EXAMPLES` good and bad ones are shown to the judge as examples. `!scout examples` lists them,
-   `!scout examples clear` forgets them.
-3. **Tune the bar.** `!scout tune` compares your good/bad ratings with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN` (needs
+   `SCOUT_EXAMPLES` good and bad ones are shown to the judge as examples. `!examples` lists them,
+   `!examples clear` forgets them.
+3. **Tune the bar.** `!tune` compares your good/bad ratings with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN` (needs
    5 scored of each).
 
 Privacy: the examples are real chat lines sent (anonymised) to the model on every judging call, and review DMs show you
@@ -239,7 +239,7 @@ real names and text. Only lines you chose to rate are kept. Say so in the chat.
 
 ### `!help`
 
-`!help` (or `!scout help`) from the owner DMs the full command list. Anyone else gets the short guide, and only in a
+`!help` (or `!help`) from the owner DMs the full command list. Anyone else gets the short guide, and only in a
 1:1 DM with the account; elsewhere it is ignored. Handy for testers.
 
 ## Secret hygiene before publishing

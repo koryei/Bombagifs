@@ -198,13 +198,13 @@ a per-line `deleted` flag, and nothing else (no names, ids, avatars, server or c
   `optout.json` and, if they were allowlisted for conversions, removes them (v2 behaviour). Confirmation text says
   clipping *and* conversions are off. **`start`** in a DM removes the opt-out. A later plain DM re-registers them for
   conversions only, and the confirmation says clipping stays off until `start`.
-- **Enabling chats:** the owner (`SELFBOT_OWNER_ID`, required to use `!scout`) sends `!scout on` / `!scout off`
-  in a chat (or `!scout on <chat id>` in the owner's DM), `!scout status`, `!scout list`. State lives in
+- **Enabling chats:** the owner (`SELFBOT_OWNER_ID`, required to use `!scout`) sends `!on` / `!off`
+  in a chat (or `!on <chat id>` in the owner's DM), `!status`, `!list`. State lives in
   `data/scout-chats.json`. `SELFBOT_SCOUT_CHATS` (comma-separated ids) seeds it. Nobody else's `!scout` does
   anything. **Scouting is off everywhere by default**; with mode `dry-run`/`on` and no enabled chats the scout idles
   and the terminal says so. Turning a chat on **posts a one-time announcement there** ("I'm clipping messages that
   are funny out of context in this chat, naming whoever's in them; DM me `stop` to opt out") so nobody is surprised;
-  `!scout off` posts a short "stopped clipping here". Both replies are skipped in `dry-run` (the owner gets the
+  `!off` posts a short "stopped clipping here". Both replies are skipped in `dry-run` (the owner gets the
   confirmation only).
 - When `SELFBOT_CLIP_DELETED=owner` applies, the owner gets a DM with the PNG, the notice text, and a jump link to the
   chat; nothing is posted publicly.
@@ -307,7 +307,10 @@ the laughter-word list; ledger rotation; how to pin the Twemoji version; welcome
 - **Shutdown:** after 2026-12-28 the Inception judge is gone; confirm the replacement provider supports
   `json_schema` before then.
 
-## Implementation notes (where the build differs from this design)
+## Implementation notes
+
+- Owner commands dropped the `scout` word: `!on`, `!off`, `!status`, `!list`, `!taste ...`, `!examples ...`, `!tune`, `!help`. `!scout <cmd>` is kept as an alias, and only the owner's messages count, so another bot's `!status` in a chat is never touched.
+ (where the build differs from this design)
 
 - **Welcome/help clipping line only when mode is `on`.** In `dry-run` nothing is ever posted, so telling people "I clip
   you" would be false; the chat announcement is skipped in `dry-run` for the same reason (spec said "not `off`").
@@ -336,7 +339,7 @@ video"). Everything here keeps the v3 rules: the local safety filter, opt-outs, 
   no media. If the replied-to message is plain text it is clipped instead of answering "no media". A bare ping with no
   reply is unchanged.
 - **Where:** guild text channels and group DMs (never 1:1 DMs or NSFW). The owner may clip anywhere; everyone else only
-  in chats where the owner ran `!scout on`. Needs a scout runtime with mode `dry-run` or `on` (`SCOUT_MANUAL=off` turns it
+  in chats where the owner ran `!on`. Needs a scout runtime with mode `dry-run` or `on` (`SCOUT_MANUAL=off` turns it
   off). It posts even in `dry-run`: a person asked, so it is not autonomous.
 - **What:** the replied-to message plus the rest of its run when buffered (same author, at most 8 messages / 600
   characters); otherwise that single fetched message. The judge is **not** consulted.
@@ -350,7 +353,7 @@ video"). Everything here keeps the v3 rules: the local safety filter, opt-outs, 
 ### 2. Taste notes
 `data/scout-taste.txt`: plain-English guidance (at most 1,500 characters) such as "we like deadpan one-liners; skip bot
 spam and anything about exams". It is operator text, so it goes into the Mercury 3 system prompt and the Decide question
-instructions. The owner edits it with `!scout taste`, `!scout taste add <text>`, `!scout taste clear`.
+instructions. The owner edits it with `!taste`, `!taste add <text>`, `!taste clear`.
 
 ### 3. Teach by example
 - **Review DMs:** with `SCOUT_REVIEW=dry-run` (default; `always` also in live mode, `off` disables) the account DMs the
@@ -361,11 +364,11 @@ instructions. The owner edits it with `!scout taste`, `!scout taste add <text>`,
   the label, scores and source (`review`, `clip`, `manual`).
 - **Use:** the latest `SCOUT_EXAMPLES` (8) good and 8 bad examples go to Mercury 3 as data inside the user JSON
   (never in the system prompt), with the rule that they are the operator's past rulings to calibrate against.
-- **Commands:** `!scout examples` (counts and the latest few), `!scout examples clear`, `!scout tune` (compares the
+- **Commands:** `!examples` (counts and the latest few), `!examples clear`, `!tune` (compares the
   owner's 👍/👎 with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN`; needs at least 5 of each).
 
 ### 4. `!help`
-`!help` (or `!scout help`): the owner gets the full command list by DM; anyone else in a 1:1 DM gets the short user help
+`!help` (or `!help`): the owner gets the full command list by DM; anyone else in a 1:1 DM gets the short user help
 (what the account does, how to ping it, `stop`/`start`); `!help` from non-owners in public chats is ignored.
 
 ### New settings
@@ -381,5 +384,5 @@ review DMs show the owner real names and text; both are local to the owner's mac
 - Manual clips need a scout runtime (mode `dry-run` or `on`) and `SCOUT_MANUAL=on`; mode `off` keeps the old "no media" reply.
 - `ClipRecord` gained an optional `speakers` field (anonymous label per line) so a good/bad reply on a posted clip teaches with the right labels; old rows fall back to one speaker.
 - Review DMs: would-clip candidates are only reviewed in dry-run (in live mode the posted clip itself is what you reply to); near-misses are reviewed in both when `SCOUT_REVIEW=always`.
-- `!scout taste|examples|tune|help` work even when scouting is `off` (only on/off/status/list are refused).
+- `!taste|examples|tune|help` work even when scouting is `off` (only on/off/status/list are refused).
 - Nothing teaches from non-owner reactions or commands. Examples are never placed in the system prompt.

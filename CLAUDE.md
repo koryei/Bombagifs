@@ -43,7 +43,10 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
 
 ## Key decisions
 
-- Clip scout: scouting is **off everywhere** until the owner runs `!scout on` in a chat; `dry-run` before `on`; the
+- Owner commands are bare (`!on`, `!off`, `!status`, `!list`, `!taste`, `!examples`, `!tune`, `!help`); the old `!scout <cmd>`
+  form still parses. Only the owner's messages are ever read as commands.
+
+- Clip scout: scouting is **off everywhere** until the owner runs `!on` in a chat; `dry-run` before `on`; the
   provider payload is anonymised text only; the local safety filter, opt-outs, cooldowns and caps always win over the
   judge; the heuristic (no-LLM) judge never posts. Inception's API ends 2026-12-28, so the judge is a swappable chain.
 
@@ -79,7 +82,7 @@ clipping and conversions; `start` opts back in.
 ## v3.1 teaching (branch `v3.1-teach`, stacked on v3)
 
 Spec: the "v3.1 addendum" in the clip scout spec; plan: `PLAN.md`. Reply-ping a text message to clip it ("clip that"),
-owner taste notes, review DMs and posted clips the owner rates by *replying* `good`/`bad`/`skip` (the account never adds reactions: rate limits) that become few-shot examples, `!scout tune`, and `!help`. Chat
+owner taste notes, review DMs and posted clips the owner rates by *replying* `good`/`bad`/`skip` (the account never adds reactions: rate limits) that become few-shot examples, `!tune`, and `!help`. Chat
 text can never reach the system prompt (examples ride in the user JSON as data); only the owner teaches.
 
 ## Status
