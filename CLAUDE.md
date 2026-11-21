@@ -84,7 +84,8 @@ clipping and conversions; `start` opts back in.
 ## v3.2 spoken triggers (branch `clip-triggers`)
 
 In enabled chats, "clip that", "clip last 3" and a reply "gif that" work with no ping. Known phrases are matched locally;
-typos ("clkip that LMFAII") go to one small AI call that sees only that line (as data). Refusals are silent (nobody pinged);
+typos ("clkip that LMFAII") go to one cheap Mercury Decide call (two yes/no questions; a chat-model fallback after Inception shuts down) that sees
+only that line (as data). Refusals are silent (nobody pinged);
 pings keep their old path. Settings: `SCOUT_TRIGGERS=ai|phrases|off`, `SCOUT_TRIGGER_ANYONE`, `SCOUT_TRIGGER_AI_PER_DAY`,
 `SCOUT_TRIGGER_MAX_AGE_SECONDS`. Not yet run in a real chat.
 

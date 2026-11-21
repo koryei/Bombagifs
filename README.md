@@ -230,8 +230,9 @@ In a chat where the owner ran `!on`, nobody has to `@` the account. Say or reply
 | reply `gif that` / `make that a gif` | converts the media in the message you replied to |
 
 Filler, laughing, emoji and stretched letters are ignored, so `bro clip thattt LMFAOOO 😭` works. **Typos and odd
-wording** (`clkip that LMFAII`, `cilp dat`) are confirmed by a small AI check (Mercury 3, then any `SCOUT_LLM_*` model):
-it sees only that one line, as data, under a daily cap (`SCOUT_TRIGGER_AI_PER_DAY`, 300), and "nice clip" or "clip that
+wording** (`clkip that LMFAII`, `cilp dat`) are confirmed by a small AI check. It is an easy yes/no job, so it goes to **Mercury Decide** (one cheap call, two
+questions), with any `SCOUT_LLM_*` chat model as the fallback once Inception shuts down. It sees only that one line,
+as data, under a daily cap (`SCOUT_TRIGGER_AI_PER_DAY`, 300), and "nice clip" or "clip that
 video" are correctly ignored. With no provider, only the exact phrases work.
 - **Who:** registered members; `SCOUT_TRIGGER_ANYONE=on` lets anyone in an enabled chat ask for a clip (never a GIF).
 - **Quiet:** refusals (opted out, sensitive, already clipped, slow down, nothing recent) are never posted, since nobody
