@@ -79,7 +79,7 @@ clipping and conversions; `start` opts back in.
 ## v3.1 teaching (branch `v3.1-teach`, stacked on v3)
 
 Spec: the "v3.1 addendum" in the clip scout spec; plan: `PLAN.md`. Reply-ping a text message to clip it ("clip that"),
-owner taste notes, 👍/👎/🙈 review DMs and clip reactions that become few-shot examples, `!scout tune`, and `!help`. Chat
+owner taste notes, review DMs and posted clips the owner rates by *replying* `good`/`bad`/`skip` (the account never adds reactions: rate limits) that become few-shot examples, `!scout tune`, and `!help`. Chat
 text can never reach the system prompt (examples ride in the user JSON as data); only the owner teaches.
 
 ## Status

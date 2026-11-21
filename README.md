@@ -226,11 +226,12 @@ come by DM):
    anything about exams`. They go into the judge's instructions. `!scout taste` shows them, `!scout taste clear` wipes
    them, and `data/scout-taste.txt` can be edited by hand (changes apply on the next judging call).
 2. **Rate examples.** In dry-run the account DMs you each candidate (what it would clip, plus some near-misses; at most
-   `SCOUT_REVIEW_PER_HOUR`). React 👍 clip-worthy, 👎 never, 🙈 skip. You can also 👍/👎 any clip it posted. Your
+   `SCOUT_REVIEW_PER_HOUR`). **Reply to that DM** with `good` (clip-worthy), `bad` (never) or `skip` (the account never adds reactions, they are
+   rate limited; your own 👍/👎/🙈 reactions on the DM still count). You can also reply `good`/`bad` to any clip it posted. Your
    ratings are stored in `data/taste.jsonl` (only lines you rated, anonymous speaker labels, mode 600) and the newest
    `SCOUT_EXAMPLES` good and bad ones are shown to the judge as examples. `!scout examples` lists them,
    `!scout examples clear` forgets them.
-3. **Tune the bar.** `!scout tune` compares your 👍/👎 with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN` (needs
+3. **Tune the bar.** `!scout tune` compares your good/bad ratings with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN` (needs
    5 scored of each).
 
 Privacy: the examples are real chat lines sent (anonymised) to the model on every judging call, and review DMs show you

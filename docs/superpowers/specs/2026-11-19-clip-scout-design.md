@@ -356,7 +356,7 @@ instructions. The owner edits it with `!scout taste`, `!scout taste add <text>`,
 - **Review DMs:** with `SCOUT_REVIEW=dry-run` (default; `always` also in live mode, `off` disables) the account DMs the
   owner each would-clip candidate and a rate-limited sample of near-misses (Decide funny >= 0.6 or final funny >= 6),
   at most `SCOUT_REVIEW_PER_HOUR` (6). The DM shows the text, who said it, the scores and the judge's reason. The owner
-  reacts 👍 (clip-worthy), 👎 (never) or 🙈 (skip). The owner can also react 👍/👎 to a posted clip.
+  replies to the DM with `good` (clip-worthy), `bad` (never) or `skip` (also `!good`, `yes`/`no`, or a lone 👍/👎/🙈). The owner can also reply `good`/`bad` to a posted clip. The account never adds reactions (they are rate limited); the owner's own reactions on the DM still count.
 - **Storage:** `data/taste.jsonl` (mode 600): only lines the owner rated, with anonymous speaker labels (no names or ids),
   the label, scores and source (`review`, `clip`, `manual`).
 - **Use:** the latest `SCOUT_EXAMPLES` (8) good and 8 bad examples go to Mercury 3 as data inside the user JSON
@@ -379,7 +379,7 @@ review DMs show the owner real names and text; both are local to the owner's mac
 ### v3.1 implementation notes
 - The **owner is auto-registered** (added to the allowlist at startup) so "clip that" works without DMing their own account.
 - Manual clips need a scout runtime (mode `dry-run` or `on`) and `SCOUT_MANUAL=on`; mode `off` keeps the old "no media" reply.
-- `ClipRecord` gained an optional `speakers` field (anonymous label per line) so a 👍/👎 on a posted clip teaches with the right labels; old rows fall back to one speaker.
-- Review DMs: would-clip candidates are only reviewed in dry-run (in live mode the posted clip itself is what you react to); near-misses are reviewed in both when `SCOUT_REVIEW=always`.
+- `ClipRecord` gained an optional `speakers` field (anonymous label per line) so a good/bad reply on a posted clip teaches with the right labels; old rows fall back to one speaker.
+- Review DMs: would-clip candidates are only reviewed in dry-run (in live mode the posted clip itself is what you reply to); near-misses are reviewed in both when `SCOUT_REVIEW=always`.
 - `!scout taste|examples|tune|help` work even when scouting is `off` (only on/off/status/list are refused).
 - Nothing teaches from non-owner reactions or commands. Examples are never placed in the system prompt.
