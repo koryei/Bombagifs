@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scout_taste import NOTES_MAX_CHARS, Example, TasteNotes, TasteStore, tune_report
+from scout_taste import NOTES_MAX_CHARS, Example, TasteBook, TasteNotes, TasteStore, tune_report
 
 
 class TempCase(unittest.TestCase):
@@ -216,6 +216,18 @@ class TuneReportTests(unittest.TestCase):
         good = [example("good", 15.0)] * 5  # out-of-range scores in a hand-edited file
         bad = [example("bad", 14.0)] * 5
         self.assertIn("SCOUT_JUDGE_FUNNY_MIN=10 ", tune_report(good + bad, 8.0))
+
+
+class TasteBookTests(TempCase):
+    def test_book_reads_notes_and_examples_live(self) -> None:
+        notes = TasteNotes(self.dir / "n.txt")
+        store = TasteStore(self.dir / "s.jsonl", per_label=2)
+        book = TasteBook(notes, store)
+        self.assertEqual((book.notes(), book.examples()), ("", {"good": [], "bad": []}))
+        notes.add("deadpan please")
+        store.add("good", [("A", "a good line")])
+        self.assertEqual(book.notes(), "deadpan please")
+        self.assertEqual(book.examples()["good"][0].lines, (("A", "a good line"),))
 
 
 if __name__ == "__main__":

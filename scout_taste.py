@@ -211,3 +211,17 @@ def tune_report(examples: Sequence[Example], current_min: float) -> str:
     if avg_bad <= current_min <= avg_good:
         text += " The current value already sits between them."
     return text
+
+
+class TasteBook:
+    """Notes plus examples behind one object, read live on every call (what the judges consume)."""
+
+    def __init__(self, notes: TasteNotes, store: TasteStore) -> None:
+        self._notes = notes
+        self._store = store
+
+    def notes(self) -> str:
+        return self._notes.text
+
+    def examples(self) -> dict[str, list[Example]]:
+        return self._store.examples()
