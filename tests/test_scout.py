@@ -886,8 +886,8 @@ class NoticeAndCommandTests(unittest.TestCase):
                 self.assertIsNone(parse_rating(text))
 
     def test_help_texts_cover_every_command_and_fit_in_one_message(self) -> None:
-        for needle in ("!scout on", "!scout off", "!scout status", "!scout list", "!scout taste", "!scout taste add", "!scout taste clear",
-                       "!scout examples", "!scout examples clear", "!scout tune", "`good`", "`bad`", "`skip`", "`stop`", "`start`", "!help"):
+        for needle in ("!on", "!off", "!status", "!list", "!taste", "!taste add", "!taste clear",
+                       "!examples", "!examples clear", "!tune", "`good`", "`bad`", "`skip`", "`stop`", "`start`", "!help"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, HELP_OWNER)
         self.assertIn("Reply", HELP_OWNER)
@@ -896,7 +896,22 @@ class NoticeAndCommandTests(unittest.TestCase):
         for needle in ("`stop`", "`start`", "DM"):
             self.assertIn(needle, HELP_USER)
         self.assertLessEqual(len(HELP_USER), 1000)
-        self.assertNotIn("!scout", HELP_USER)  # owner-only commands are not advertised to everyone
+        self.assertNotIn("!scout", HELP_OWNER)  # the prefix is optional now; the help shows the short form
+        self.assertNotIn("!on", HELP_USER)  # owner-only commands are not advertised to everyone
+
+    def test_the_scout_prefix_is_optional(self) -> None:
+        for legacy in ("!scout on", "!scout off 42", "!scout status", "!scout list", "!scout taste", "!scout taste add We like deadpan",
+                       "!scout taste clear", "!scout examples", "!scout examples clear", "!scout tune", "!scout help", "!SCOUT  Tune"):
+            short = legacy.replace("!scout ", "!").replace("!SCOUT  ", "!")
+            with self.subTest(text=short):
+                self.assertIsNotNone(parse_scout_command(short))
+                self.assertEqual(parse_scout_command(short), parse_scout_command(legacy))
+
+    def test_short_commands_reject_everything_else(self) -> None:
+        for text in ("!", "!on abc", "!status 1", "!on 1 2", "!on 0", "!on -5", "!taste add", "!taste add   ", "!taste remove", "!taste clear now",
+                     "!tune now", "!examples now", "!help me", "!onward", "!stat", "on", "status", "taste", "hey !on", "!list all", "!!on"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_scout_command(text))
 
     def test_parse_scout_command_rejects_everything_else(self) -> None:
         for text in ("!scoutx on", "scout on", "!scout", "!scout maybe", "!scout on abc", "!scout status 1", "!scout on 1 2", "hello !scout on", "!scout on 0", "!scout on -5", ""):

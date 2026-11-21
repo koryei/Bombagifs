@@ -389,7 +389,7 @@ def build_scout_runtime(cfg: ScoutConfig, data_dir: Path) -> ScoutRuntime | None
     """Create the scout's stores and buffer under ``data_dir``.
 
     Returns ``None`` when the scout is off and no owner is configured. With mode ``off`` but an owner set it still
-    builds a runtime (without scouting) so the owner's ``!scout`` command can explain why it is refused. The judge
+    builds a runtime (without scouting) so the owner's commands can explain why it is refused. The judge
     chain and the scout loop are created later, once the adapter has an HTTP session.
     """
     if cfg.mode == "off" and cfg.owner_id is None:
@@ -447,21 +447,21 @@ def format_clip_notice(names: Sequence[str], deleted: bool, requested_by: str | 
 
 @dataclass(frozen=True)
 class ScoutCommand:
-    """A parsed owner command (``!scout on|off [chat id]``, ``status``, ``list``, ``taste``, ``examples``, ``tune``, ``help``)."""
+    """A parsed owner command (``!on|off [chat id]``, ``status``, ``list``, ``taste``, ``examples``, ``tune``, ``help``)."""
 
     action: Literal["on", "off", "status", "list", "taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help"]
     chat_id: int | None
     arg: str | None = None
 
 
-_COMMAND_RE = re.compile(r"^!scout\s+(on|off|status|list)(?:\s+(\d+))?$", re.IGNORECASE)
-_SIMPLE_RE = re.compile(r"^!scout\s+(taste|examples|tune|help)(?:\s+(clear))?$", re.IGNORECASE)
-_TASTE_ADD_RE = re.compile(r"^!scout\s+taste\s+add\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_COMMAND_RE = re.compile(r"^!(?:scout\s+)?(on|off|status|list)(?:\s+(\d+))?$", re.IGNORECASE)
+_SIMPLE_RE = re.compile(r"^!(?:scout\s+)?(taste|examples|tune|help)(?:\s+(clear))?$", re.IGNORECASE)
+_TASTE_ADD_RE = re.compile(r"^!(?:scout\s+)?taste\s+add\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _SIMPLE_ACTIONS = {"taste": "taste", "examples": "examples", "tune": "tune", "help": "help"}
 
 
 def parse_scout_command(text: str) -> ScoutCommand | None:
-    """Parse a ``!scout`` command; anything that is not exactly a command returns ``None``."""
+    """Parse an owner command like ``!on`` (the ``scout`` word is optional: ``!scout on`` works too); anything that is not exactly a command returns ``None``."""
     text = text.strip()
     added = _TASTE_ADD_RE.match(text)
     if added is not None:
@@ -511,14 +511,14 @@ def parse_rating(text: str) -> Literal["good", "bad", "skip"] | None:
 HELP_OWNER = (
     "**Bombagif: owner guide** (I answer commands by DM)\n"
     "**Clip scout**\n"
-    "`!scout on` / `!scout off`: turn clipping on or off in the chat you type it in "
-    "(DM me `!scout on <chat id>` for another chat)\n"
-    "`!scout status` and `!scout list`: how the scout is doing, and where it is on\n"
+    "`!on` / `!off`: turn clipping on or off in the chat you type it in "
+    "(DM me `!on <chat id>` for another chat)\n"
+    "`!status` and `!list`: how the scout is doing, and where it is on\n"
     "**Teaching it**\n"
-    "`!scout taste` shows my taste notes, `!scout taste add <text>` adds a line (e.g. \"we like deadpan one-liners, skip "
-    "anything about exams\"), `!scout taste clear` wipes them\n"
-    "`!scout examples` shows what you've rated, `!scout examples clear` forgets it\n"
-    "`!scout tune` compares your ratings with my scores and suggests thresholds\n"
+    "`!taste` shows my taste notes, `!taste add <text>` adds a line (e.g. \"we like deadpan one-liners, skip "
+    "anything about exams\"), `!taste clear` wipes them\n"
+    "`!examples` shows what you've rated, `!examples clear` forgets it\n"
+    "`!tune` compares your ratings with my scores and suggests thresholds\n"
     "In dry-run I DM you candidates and near-misses. Reply to that message with `good` (clip-worthy), `bad` (never) or "
     "`skip`. You can also reply `good`/`bad` to any clip I posted. Your ratings become examples the judge sees.\n"
     "**Clip that**\n"

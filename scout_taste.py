@@ -204,7 +204,7 @@ def tune_report(examples: Sequence[Example], current_min: float) -> str:
     if avg_good <= avg_bad:
         return (
             f"Your 👍 average ({avg_good:.1f}) is not above your 👎 average ({avg_bad:.1f}), so the scores aren't "
-            "separating your taste yet. Describe it with `!scout taste add <text>` or rate more examples instead of "
+            "separating your taste yet. Describe it with `!taste add <text>` or rate more examples instead of "
             "changing the threshold."
         )
     suggestion = min(10.0, max(0.0, round((avg_good + avg_bad) / 2, 1)))

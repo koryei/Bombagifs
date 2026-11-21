@@ -600,9 +600,9 @@ class SelfBot(discord.Client):
         try:
             await message.author.send(text)
         except discord.CaptchaRequired:
-            self._trip_captcha("answering a !scout command")
+            self._trip_captcha("answering a owner command")
         except discord.HTTPException:
-            self.logger.warning("Could not DM the owner a !scout answer", exc_info=True)
+            self.logger.warning("Could not DM the owner an owner-command answer", exc_info=True)
 
     async def _announce(self, channel: Any, text: str) -> None:
         try:
@@ -618,7 +618,7 @@ class SelfBot(discord.Client):
         return f"• {text[:140]}{'…' if len(text) > 140 else ''}"
 
     def _teaching_reply(self, command: Any, runtime: ScoutRuntime) -> str:
-        """The owner's answer for ``!scout taste|examples|tune|help`` (and their ``add``/``clear`` forms)."""
+        """The owner's answer for ``!taste|examples|tune|help`` (and their ``add``/``clear`` forms)."""
         action = command.action
         if action == "help":
             return HELP_OWNER
@@ -634,7 +634,7 @@ class SelfBot(discord.Client):
                 return "Nothing to add."
             return (
                 f"That would go over the {NOTES_MAX_CHARS}-character limit ({len(notes.text)} used). "
-                "Shorten it, or `!scout taste clear` to start over."
+                "Shorten it, or `!taste clear` to start over."
             )
         if action == "taste_clear":
             notes.clear()
@@ -676,7 +676,7 @@ class SelfBot(discord.Client):
         return True
 
     async def _handle_scout_command(self, message: discord.Message) -> bool:
-        """Run a ``!scout`` command if the owner sent one. Returns True when the message was a command (consumed)."""
+        """Run an owner command (``!on``, ``!taste`` ...) if the owner sent one. Returns True when the message was a command (consumed)."""
         runtime = self.scout
         command = parse_scout_command(message.content or "")
         if runtime is None or command is None or runtime.cfg.owner_id is None or message.author.id != runtime.cfg.owner_id:
@@ -705,7 +705,7 @@ class SelfBot(discord.Client):
                 await self._owner_say(message, "I can't see that chat.")
                 return True
         elif in_dm:
-            await self._owner_say(message, "Run this inside the chat you want, or send `!scout on <chat id>` here.")
+            await self._owner_say(message, "Run this inside the chat you want, or send `!on <chat id>` here.")
             return True
         else:
             channel = message.channel
@@ -758,7 +758,7 @@ class SelfBot(discord.Client):
             ):
                 return
         except Exception:
-            self.logger.exception("Unhandled !scout command error")
+            self.logger.exception("Unhandled owner command error")
             return
         try:
             self._buffer_message(message)
