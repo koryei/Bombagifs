@@ -793,6 +793,54 @@ class SelfBotPostTests(_SelfBotCase):
         self.assertEqual(self.render.call_args.kwargs["scale"], 2)
         self.assertEqual(self.render.call_args.kwargs["theme"], self.runtime.cfg.theme)
 
+    def group_channel(self) -> Mock:
+        """A real GroupChannel has no get_partial_message (the spec'd mock raises AttributeError for it too)."""
+        group = Mock(spec=discord.GroupChannel)
+        group.id = CHAT
+        group.send = AsyncMock(return_value=SimpleNamespace(id=902))
+        self.bot.get_channel = Mock(return_value=group)  # type: ignore[method-assign]
+        return group
+
+    async def test_group_chats_reply_with_a_message_reference(self) -> None:
+        group = self.group_channel()
+        self.assertEqual(await self.bot._post_clip(plan_of(smsg(10, "a line"), smsg(11, "second", deleted=True))), 902)
+        group.send.assert_awaited_once()
+        kwargs = group.send.await_args.kwargs
+        self.assertEqual((kwargs["reference"].message_id, kwargs["reference"].channel_id), (10, CHAT))
+        self.assertIs(kwargs["mention_author"], False)
+        self.assertEqual(kwargs["file"].filename, "clip.png")
+        self.assertIn("**user10**", kwargs["content"])
+        allowed = kwargs["allowed_mentions"]
+        self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
+        self.assertIn(902, self.bot._clip_message_ids)
+
+    async def test_a_group_reply_to_a_vanished_message_falls_back_to_a_plain_send(self) -> None:
+        group = self.group_channel()
+        group.send.side_effect = [discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "Unknown Message"), SimpleNamespace(id=903)]
+        self.assertEqual(await self.bot._post_clip(plan_of(smsg(10, "a line"))), 903)
+        self.assertEqual(group.send.await_count, 2)
+        self.assertNotIn("reference", group.send.await_args.kwargs)
+
+    async def test_a_group_clip_of_only_deleted_messages_is_a_plain_send(self) -> None:
+        group = self.group_channel()
+        self.assertEqual(await self.bot._post_clip(plan_of(smsg(10, "gone", deleted=True))), 902)
+        self.assertNotIn("reference", group.send.await_args.kwargs)
+
+    async def test_a_group_captcha_trips_the_guard(self) -> None:
+        group = self.group_channel()
+        group.send.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.assertIsNone(await self.bot._post_clip(plan_of(smsg(10, "a line"))))
+        self.assertEqual(self.bot.captcha_guard.reason, "posting a clip")
+
+    async def test_owner_route_builds_a_jump_link_for_group_chats(self) -> None:
+        self.group_channel()
+        owner = Mock()
+        owner.send = AsyncMock(return_value=SimpleNamespace(id=777000))
+        self.bot.get_user = Mock(return_value=owner)  # type: ignore[method-assign]
+        await self.bot._post_clip(plan_of(smsg(10, "regretted", deleted=True), to_owner=True))
+        self.assertIn(f"https://discord.com/channels/@me/{CHAT}/10", owner.send.await_args.kwargs["content"])
+
     async def test_all_deleted_uses_channel_send(self) -> None:
         plan = plan_of(smsg(10, "gone", deleted=True), smsg(11, "also gone", deleted=True))
         self.assertEqual(await self.bot._post_clip(plan), 901)
@@ -1635,6 +1683,20 @@ class SelfBotManualClipTests(_SelfBotCase):
         request = make_message(author_id=99, channel_cls=discord.TextChannel, mentions=[self.me], reference=reference)
         await self.bot.on_message(request)
         self.assertEqual(request.reply.await_args.args[0], NO_MEDIA_TEXT)
+
+    async def test_clip_that_works_in_a_group_chat(self) -> None:
+        group = Mock(spec=discord.GroupChannel)
+        group.id = CHAT
+        group.send = AsyncMock(return_value=SimpleNamespace(id=902))
+        self.bot.get_channel = Mock(return_value=group)  # type: ignore[method-assign]
+        target = make_message(author_id=10, channel_cls=discord.GroupChannel, content=self.TARGET_TEXT, message_id=700, channel_id=CHAT)
+        reference = SimpleNamespace(message_id=700, resolved=target, cached_message=None)
+        request = make_message(author_id=99, channel_cls=discord.GroupChannel, mentions=[self.me], reference=reference, channel_id=CHAT, message_id=800)
+        await self.bot.on_message(request)
+        group.send.assert_awaited_once()
+        self.assertEqual(group.send.await_args.kwargs["reference"].message_id, 700)
+        request.reply.assert_not_awaited()
+        self.assertEqual(self.bot.stats.clips_posted, 1)
 
     async def test_dry_run_still_posts_manual_clips(self) -> None:
         from selfbot import SelfBot

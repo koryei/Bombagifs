@@ -509,6 +509,25 @@ class SelfBot(discord.Client):
                 resolved[user_id] = str(shown)
         return resolved
 
+    @staticmethod
+    def _jump_url(channel: Any, message_id: int) -> str:
+        """A link to a message. Group DMs have no partial messages, so the link is built by hand."""
+        getter = getattr(channel, "get_partial_message", None)
+        if getter is not None:
+            return str(getter(message_id).jump_url)
+        private = isinstance(channel, (discord.GroupChannel, discord.DMChannel))
+        guild = None if private else getattr(channel, "guild", None)
+        return f"https://discord.com/channels/{guild.id if guild is not None else '@me'}/{channel.id}/{message_id}"
+
+    @staticmethod
+    async def _reply_in(channel: Any, message_id: int, **kwargs: Any) -> Any:
+        """Reply to a message in any channel. Group DMs (which have no ``get_partial_message``) use a message reference."""
+        getter = getattr(channel, "get_partial_message", None)
+        if getter is not None:
+            return await getter(message_id).reply(**kwargs)
+        reference = discord.MessageReference(message_id=message_id, channel_id=channel.id)
+        return await channel.send(reference=reference, **kwargs)
+
     async def _send_clip(self, plan: ClipPlan, channel: Any, png: bytes, notice: str, runtime: ScoutRuntime) -> Any:
         none = discord.AllowedMentions.none()
 
@@ -521,13 +540,13 @@ class SelfBot(discord.Client):
                 self.logger.warning("Deleted clip not sent: SELFBOT_OWNER_ID is not set")
                 return None
             owner = self.get_user(owner_id) or await self.fetch_user(owner_id)
-            link = channel.get_partial_message(plan.messages[0].id).jump_url
+            link = self._jump_url(channel, plan.messages[0].id)
             return await owner.send(content=f"{notice}\n{link}", file=attachment(), allowed_mentions=none)
         live = [m for m in plan.messages if not m.deleted]
         if live:
             try:
-                return await channel.get_partial_message(live[-1].id).reply(
-                    content=notice, file=attachment(), mention_author=False, allowed_mentions=none
+                return await self._reply_in(
+                    channel, live[-1].id, content=notice, file=attachment(), mention_author=False, allowed_mentions=none
                 )
             except discord.NotFound:
                 pass
