@@ -38,6 +38,7 @@ class ClipPlan:
     verdict: Verdict
     deleted: bool
     to_owner: bool
+    requested_by: str | None = None  # set for manual ("clip that") clips
 
 
 @dataclass
@@ -349,15 +350,16 @@ def _notice_name(name: str) -> str:
     return name.replace("<", "<\u200b").replace("@", "@\u200b")
 
 
-def format_clip_notice(names: Sequence[str], deleted: bool) -> str:
-    """The text posted with a clip: who is in it, how to opt out, and a snark when something was deleted."""
+def format_clip_notice(names: Sequence[str], deleted: bool, requested_by: str | None = None) -> str:
+    """The text posted with a clip: who is in it, who asked (for manual clips), how to opt out, and a deleted snark."""
     unique = [_notice_name(name) for name in dict.fromkeys(names)]
     bold = [f"**{name}**" for name in unique]
     if len(bold) <= 1:
         who = "".join(bold)
     else:
         who = ", ".join(bold[:-1]) + " and " + bold[-1]
-    text = f"🎬 Clipped {who} — DM me `stop` to opt out of clips."
+    asked = f" at **{_notice_name(requested_by)}**'s request" if requested_by and requested_by.strip() else ""
+    text = f"🎬 Clipped {who}{asked} — DM me `stop` to opt out of clips."
     return text + DELETED_SUFFIX if deleted else text
 
 

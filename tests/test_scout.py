@@ -608,6 +608,25 @@ class NoticeAndCommandTests(unittest.TestCase):
         long_name = format_clip_notice(["x" * 50], False)
         self.assertIn("**" + "x" * 31 + "…**", long_name)
 
+    def test_notice_for_a_manual_request_names_the_requester(self) -> None:
+        self.assertEqual(
+            format_clip_notice(["Pranit"], False, requested_by="Koryei"),
+            "🎬 Clipped **Pranit** at **Koryei**'s request — DM me `stop` to opt out of clips.",
+        )
+        self.assertEqual(
+            format_clip_notice(["A", "B"], False, requested_by="C"),
+            "🎬 Clipped **A** and **B** at **C**'s request — DM me `stop` to opt out of clips.",
+        )
+
+    def test_requester_names_are_escaped_truncated_and_never_mentions(self) -> None:
+        text = format_clip_notice(["A"], False, requested_by="<@5>_x*")
+        self.assertNotIn("<@", text)
+        self.assertIn("\\_x\\*", text)
+        self.assertIn("**" + "y" * 31 + "…**", format_clip_notice(["A"], False, requested_by="y" * 50))
+
+    def test_a_blank_requester_is_ignored(self) -> None:
+        self.assertEqual(format_clip_notice(["A"], False, requested_by=""), format_clip_notice(["A"], False))
+
     def test_names_never_become_mentions(self) -> None:
         self.assertNotIn("<@", format_clip_notice(["<@123>", "@everyone"], False))
 
@@ -640,6 +659,7 @@ class NoticeAndCommandTests(unittest.TestCase):
 class ClipPlanTests(unittest.TestCase):
     def test_clip_plan_is_immutable(self) -> None:
         plan = ClipPlan(1, (), good_verdict(), False, False)
+        self.assertIsNone(plan.requested_by)
         with self.assertRaises(Exception):
             plan.chat_id = 2  # type: ignore[misc]
 
