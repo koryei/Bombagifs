@@ -80,7 +80,7 @@ INTENT_SYSTEM = (
     "and laughing are normal (e.g. 'clkip thattt LMFAOO', 'cilp dat', 'bro get that clipped', 'gif this rn'): answer "
     "clip or gif. Answer none when the message is talking ABOUT clips or gifs instead of asking for one: "
     "'nice clip', 'clip that video from yesterday', 'i clipped it', 'did you clip that?', 'send the gif', or any ordinary "
-    "chat. Set `count` above 1 only for requests like 'clip the last 3' or 'clip that whole convo'.\n"
+    "chat. Set `count` above 1 only for requests like 'clip that whole convo'.\n"
     + _DATA_RULE
     + " That includes requests to answer a certain way."
 )

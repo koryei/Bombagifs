@@ -1,4 +1,4 @@
-"""Spoken-style triggers for clips (discord-free): "clip that", "clip last 3", "gif that", and their typos.
+"""Spoken-style triggers for clips (discord-free): "clip that", "clip that convo", "gif that", and their typos.
 
 ``parse_trigger`` reads one chat message. It returns a ``Trigger`` that is **sure** (the whole message is a known phrase,
 filler and laughter aside) or **unsure** (it looks like a request but is typo'd or oddly worded, so an AI check must
@@ -20,7 +20,6 @@ MAX_TRIGGER_CHARS = 80
 MAX_TRIGGER_TOKENS = 8
 MAX_COUNT = 5
 CONVO_COUNT = 4
-FEW_COUNT = 3
 
 _MENTION_RE = re.compile(r"<[@#][!&]?\d+>|@everyone|@here", re.IGNORECASE)
 _CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
@@ -37,7 +36,7 @@ _FILLER = frozenset(
     "bro bruh bru yo ayo aye fr frfr ong rn now pls plz please dude man guys guy hey ok okay just quick quickly someone somebody "
     "anyone can could would will you u ya we gotta gonna need needs should must to be get got the a an and immediately asap hurry "
     "omg wtf damn dam fam chat gang boys bois buddy mate sir sorry thx ty thanks for me us my real really legit literally lowkey "
-    "highkey actually um uh uhh hm hmm so like wait bombaclip bombagif bombaclat bot is are was it's thats".split()
+    "highkey actually whole entire full um uh uhh hm hmm so like wait bombaclip bombagif bombaclat bot is are was it's thats".split()
 )
 _OBJECT = frozenset(
     "that this it dat dis tht those these them dem one message msg text moment shi shit convo conversation exchange thread "
@@ -48,8 +47,6 @@ _CLIP_VERBS = frozenset({"clip", "clips", "clipping"})
 _CLIPPED = frozenset({"clipped"})
 _GIF_WORDS = frozenset({"gif", "gifs", "jif"})
 _GIF_ALLOWED = frozenset({"make", "turn", "convert", "into", "to", "as", "gif", "gifs", "jif"})
-_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
-_LAST_NOUNS = frozenset({"message", "messages", "msg", "msgs", "text", "texts", "line", "lines", "ones", "one"})
 
 
 @dataclass(frozen=True)
@@ -98,22 +95,6 @@ def _is_filler(word: str) -> bool:
     return word in _FILLER or any(pattern.match(word) for pattern in _LAUGH_RES)
 
 
-def _count_after_last(rest: Sequence[str]) -> int | None:
-    """The count in ``last N [messages]`` / ``last few`` (tokens after the word "last"), or None if it is not that."""
-    if not rest:
-        return None
-    head, tail = rest[0], rest[1:]
-    if head == "few" or head == "couple":
-        count = FEW_COUNT
-    elif head.isdigit():
-        count = max(1, min(MAX_COUNT, int(head)))
-    elif head in _NUMBERS:
-        count = max(1, min(MAX_COUNT, _NUMBERS[head]))
-    else:
-        return None
-    return count if all(word in _LAST_NOUNS for word in tail) else None
-
-
 def _sure_clip(core: list[str], is_reply: bool) -> Trigger | None:
     if not core:
         return None
@@ -123,9 +104,6 @@ def _sure_clip(core: list[str], is_reply: bool) -> Trigger | None:
     verb = verbs[0]
     index = core.index(verb)
     before, after = core[:index], core[index + 1 :]
-    if after and after[0] == "last":
-        count = _count_after_last(after[1:])
-        return Trigger("clip", count) if count is not None and not before else None
     if before and verb in _CLIPPED and all(word in _OBJECT for word in before) and not after:
         return Trigger("clip")  # "that needs to be clipped"
     if not before and not after:
@@ -144,13 +122,8 @@ def _sure_gif(core: list[str], is_reply: bool) -> Trigger | None:
     return Trigger("gif") if has_object or is_reply else None
 
 
-def _loose_count(tokens: list[str]) -> int:
-    """The message count in an unsure request ("clkip last 2", "cilp that convo"), read from the same words as a sure one."""
-    if "last" in tokens:
-        rest = [word for word in tokens[tokens.index("last") + 1 :] if not _is_filler(word)]
-        count = _count_after_last(rest)
-        if count is not None:
-            return count
+def _convo_count(tokens: list[str]) -> int:
+    """4 messages for "that convo" / "this whole conversation", else 1 (what an unsure request asks for)."""
     return CONVO_COUNT if any(word in _CONVO_WORDS for word in tokens) else 1
 
 
@@ -158,7 +131,7 @@ def _looks_like_clip(tokens: list[str]) -> bool:
     """Close enough to a request to be worth an AI check: the verb (or a typo of it), and a short message."""
     if any(word in _CLIP_VERBS or word in _CLIPPED for word in tokens):
         return True
-    has_object = any(word in _OBJECT or word == "last" for word in tokens)
+    has_object = any(word in _OBJECT for word in tokens)
     close = any(len(word) >= 3 and (edit_distance(word, "clip") <= 1 or edit_distance(word, "clipped") <= 1) for word in tokens)
     return close and has_object
 
@@ -175,7 +148,7 @@ def parse_trigger(text: str, *, is_reply: bool = False) -> Trigger | None:
     if sure is not None:
         return sure
     if _looks_like_clip(tokens):
-        return Trigger("clip", _loose_count(tokens), sure=False)
+        return Trigger("clip", _convo_count(tokens), sure=False)
     return None
 
 

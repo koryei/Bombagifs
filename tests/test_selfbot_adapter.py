@@ -2115,7 +2115,7 @@ class FakeIntent:
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
 class SelfBotTriggerTests(_SelfBotCase):
-    """Spoken triggers: "clip that" / "clip last 3" / "gif that" and their typos, with no ping."""
+    """Spoken triggers: "clip that" / "clip that convo" / "gif that" and their typos, with no ping."""
 
     TEXT = "If I ever inherit a successful billboard business, I won't tell anybody, but there will be signs."
 
@@ -2220,10 +2220,10 @@ class SelfBotTriggerTests(_SelfBotCase):
         await self.bot.on_message(self.say("clip that"))
         self.assertEqual(self.card_texts(), ["setup of the joke", "and the punchline"])
 
-    async def test_clip_last_n_takes_the_last_messages_across_people(self) -> None:
-        self.buffer(smsg(699, "too early to count", author=10), smsg(700, "first thing said", author=10), smsg(701, "a reply to it", author=20), smsg(702, "and the capper", author=30))
-        await self.bot.on_message(self.say("clip last 3"))
-        self.assertEqual(self.card_texts(), ["first thing said", "a reply to it", "and the capper"])
+    async def test_clip_that_convo_takes_the_last_few_messages_across_people(self) -> None:
+        self.buffer(smsg(698, "too early to count", author=40), smsg(699, "the start of it", author=10), smsg(700, "first thing said", author=10), smsg(701, "a reply to it", author=20), smsg(702, "and the capper", author=30))
+        await self.bot.on_message(self.say("clip that convo"))
+        self.assertEqual(self.card_texts(), ["the start of it", "first thing said", "a reply to it", "and the capper"])
 
     async def test_a_stale_or_missing_message_is_not_clipped(self) -> None:
         request = self.say("clip that")
@@ -2255,7 +2255,7 @@ class SelfBotTriggerTests(_SelfBotCase):
     async def test_the_ai_can_ask_for_more_than_one_message(self) -> None:
         self.intent.intent = self.Intent("clip", 2)
         self.buffer(smsg(700, "something was said here", author=10), smsg(701, "and answered right after", author=20))
-        await self.bot.on_message(self.say("clkip last 2"))
+        await self.bot.on_message(self.say("clkip that convo"))
         self.assertEqual(self.card_texts(), ["something was said here", "and answered right after"])
 
     async def test_when_the_ai_says_no_it_is_just_chat(self) -> None:

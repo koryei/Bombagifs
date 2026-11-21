@@ -34,17 +34,16 @@ class ParseSureTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_trigger(text), CLIP)
 
-    def test_counts(self) -> None:
-        self.assertEqual(parse_trigger("clip last 3"), Trigger("clip", 3))
-        self.assertEqual(parse_trigger("clip the last 3 messages"), Trigger("clip", 3))
-        self.assertEqual(parse_trigger("clip last three"), Trigger("clip", 3))
-        self.assertEqual(parse_trigger("clip the last two msgs lmao"), Trigger("clip", 2))
-        self.assertEqual(parse_trigger("clip last few"), Trigger("clip", 3))
-        self.assertEqual(parse_trigger("clip that convo"), Trigger("clip", 4))
-        self.assertEqual(parse_trigger("clip this conversation"), Trigger("clip", 4))
-        self.assertEqual(parse_trigger("clip last 1"), Trigger("clip", 1))
-        self.assertEqual(parse_trigger("clip last 99"), Trigger("clip", 5))  # capped
-        self.assertEqual(parse_trigger("clip last 0"), Trigger("clip", 1))
+    def test_a_whole_convo(self) -> None:
+        for text in ("clip that convo", "clip this conversation", "bro clip this whole convo lmao", "clip that exchange"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_trigger(text), Trigger("clip", 4))
+
+    def test_clip_last_n_is_not_a_phrase_anymore(self) -> None:
+        for text in ("clip last 3", "clip the last 3 messages", "clip last three", "clip last few", "clip last 99"):
+            with self.subTest(text=text):
+                result = parse_trigger(text)
+                self.assertTrue(result is None or (not result.sure and result.count == 1), result)
 
     def test_a_bare_verb_needs_a_reply(self) -> None:
         self.assertEqual(parse_trigger("clip", is_reply=True), CLIP)
@@ -92,11 +91,8 @@ class ParseTyposTests(unittest.TestCase):
                 self.assertEqual(parse_trigger(text), Trigger("clip", 1, sure=False))
 
     def test_unsure_requests_keep_a_count_the_ai_does_not_have_to_guess(self) -> None:
-        self.assertEqual(parse_trigger("clkip last 2"), Trigger("clip", 2, sure=False))
-        self.assertEqual(parse_trigger("cilp the last three msgs"), Trigger("clip", 3, sure=False))
         self.assertEqual(parse_trigger("clkip that convo"), Trigger("clip", 4, sure=False))
-        self.assertEqual(parse_trigger("clkip last 99"), Trigger("clip", 5, sure=False))
-        self.assertEqual(parse_trigger("clkip last banana"), Trigger("clip", 1, sure=False))
+        self.assertEqual(parse_trigger("cilp this whole conversation"), Trigger("clip", 4, sure=False))
 
     def test_look_alike_words_may_be_sent_to_the_ai_but_never_post_alone(self) -> None:
         for text in ("flip that", "chip it", "slip that", "clap that"):
