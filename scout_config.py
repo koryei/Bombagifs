@@ -14,6 +14,7 @@ Screen = Literal["all", "signals"]
 DeletedPolicy = Literal["on", "owner", "off"]
 Theme = Literal["onyx", "dark"]
 ReviewMode = Literal["off", "dry-run", "always"]
+TriggerMode = Literal["off", "phrases", "ai"]
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -53,6 +54,10 @@ class ScoutConfig:
     examples_per_label: int = 8
     manual_limit_per_10_min: int = 3
     manual_author_cooldown_s: int = 120
+    triggers: TriggerMode = "ai"
+    trigger_anyone: bool = False
+    trigger_ai_per_day: int = 300
+    trigger_max_age_s: int = 180
 
 
 def _text(env: Mapping[str, str], name: str) -> str:
@@ -164,6 +169,10 @@ def read_scout_config(env: Mapping[str, str]) -> ScoutConfig:
         examples_per_label=_positive_int(env, "SCOUT_EXAMPLES", 8),
         manual_limit_per_10_min=_positive_int(env, "SCOUT_MANUAL_LIMIT_PER_10_MIN", 3),
         manual_author_cooldown_s=_positive_int(env, "SCOUT_MANUAL_AUTHOR_COOLDOWN_SECONDS", 120),
+        triggers=_choice(env, "SCOUT_TRIGGERS", ("off", "phrases", "ai"), "ai"),  # type: ignore[arg-type]
+        trigger_anyone=_choice(env, "SCOUT_TRIGGER_ANYONE", ("on", "off"), "off") == "on",
+        trigger_ai_per_day=_positive_int(env, "SCOUT_TRIGGER_AI_PER_DAY", 300),
+        trigger_max_age_s=_positive_int(env, "SCOUT_TRIGGER_MAX_AGE_SECONDS", 180),
     )
     if cfg.judge == "openai":
         for name, value in (

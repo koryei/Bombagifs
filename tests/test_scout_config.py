@@ -26,6 +26,22 @@ class ScoutConfigTests(unittest.TestCase):
         self.assertEqual((cfg.manual, cfg.review, cfg.review_per_hour, cfg.examples_per_label), (True, "dry-run", 6, 8))
         self.assertEqual((cfg.manual_limit_per_10_min, cfg.manual_author_cooldown_s), (3, 120))
 
+    def test_trigger_defaults(self) -> None:
+        cfg = read_scout_config({})
+        self.assertEqual((cfg.triggers, cfg.trigger_anyone, cfg.trigger_ai_per_day, cfg.trigger_max_age_s), ("ai", False, 300, 180))
+
+    def test_trigger_overrides_and_validation(self) -> None:
+        cfg = read_scout_config(
+            {"SCOUT_TRIGGERS": " Phrases ", "SCOUT_TRIGGER_ANYONE": "on", "SCOUT_TRIGGER_AI_PER_DAY": "40", "SCOUT_TRIGGER_MAX_AGE_SECONDS": "60"}
+        )
+        self.assertEqual((cfg.triggers, cfg.trigger_anyone, cfg.trigger_ai_per_day, cfg.trigger_max_age_s), ("phrases", True, 40, 60))
+        self.assertEqual(read_scout_config({"SCOUT_TRIGGERS": "off"}).triggers, "off")
+        for name, value in (("SCOUT_TRIGGERS", "maybe"), ("SCOUT_TRIGGER_ANYONE", "yes"), ("SCOUT_TRIGGER_AI_PER_DAY", "0"),
+                            ("SCOUT_TRIGGER_MAX_AGE_SECONDS", "-1"), ("SCOUT_TRIGGER_MAX_AGE_SECONDS", "abc")):
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(RuntimeError, name):
+                    read_scout_config({name: value})
+
     def test_v3_1_overrides(self) -> None:
         cfg = read_scout_config(
             {
