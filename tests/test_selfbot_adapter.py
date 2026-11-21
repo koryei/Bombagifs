@@ -1383,6 +1383,26 @@ class SelfBotScoutUiTests(_SelfBotCase):
         self.assertIn("Improve the model for everyone", info["reminder"])
         self.assertNotIn("inception-secret-key", " ".join(str(v) for v in info.values()))
 
+    async def test_boot_info_teaching_rows(self) -> None:
+        bot = self.bot_with("dry-run")
+        info = bot._boot_info()
+        self.assertEqual((info["manual clips"], info["review"]), ("on", "dry-run"))
+        self.assertEqual(info["taste"], "0 chars of notes, 0 good / 0 bad examples")
+        bot.scout.taste_notes.add("we like deadpan")
+        bot.scout.taste_store.add("good", [("A", "a line")])
+        bot.scout.taste_store.add("bad", [("A", "another line")])
+        bot.scout.taste_store.add("bad", [("A", "third line")])
+        self.assertEqual(bot._boot_info()["taste"], "15 chars of notes, 1 good / 2 bad examples")
+
+    async def test_boot_info_reflects_manual_and_review_settings(self) -> None:
+        info = self.bot_with("on", SCOUT_MANUAL="off", SCOUT_REVIEW="always")._boot_info()
+        self.assertEqual((info["manual clips"], info["review"]), ("off", "always"))
+
+    async def test_boot_info_never_leaks_the_notes_themselves(self) -> None:
+        bot = self.bot_with("dry-run")
+        bot.scout.taste_notes.add("secret taste instruction")
+        self.assertNotIn("secret taste instruction", " ".join(bot._boot_info().values()))
+
     async def test_scout_view_is_none_when_off_and_a_tuple_otherwise(self) -> None:
         self.assertIsNone(self.bot.scout_view())
         self.assertIsNone(self.bot_with("off").scout_view())
@@ -1415,6 +1435,16 @@ class CreateBotTests(unittest.TestCase):
         self.assertIsNone(bot.scout)
         self.assertFalse(bot.auto_accept_friends)
         self.assertEqual(bot.captcha_guard.path.name, "captcha-blocked.json")
+
+    def test_teaching_settings_reach_the_runtime(self) -> None:
+        bot = self.create(SELFBOT_SCOUT_MODE="dry-run", SCOUT_EXAMPLES="5", SCOUT_REVIEW="off", SCOUT_MANUAL="off")
+        self.assertEqual(bot.scout.taste_store.per_label, 5)
+        self.assertEqual((bot.scout.cfg.review, bot.scout.cfg.manual), ("off", False))
+        self.assertIsNotNone(bot._manual_gate)
+
+    def test_the_owner_is_registered_at_startup(self) -> None:
+        bot = self.create(SELFBOT_SCOUT_MODE="dry-run", SELFBOT_OWNER_ID="42")
+        self.assertIn(42, bot.allowlist)
 
     def test_scout_settings_build_a_runtime(self) -> None:
         bot = self.create(SELFBOT_SCOUT_MODE="dry-run", SELFBOT_OWNER_ID="42", INCEPTION_API_KEY="k")

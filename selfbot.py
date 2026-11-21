@@ -173,6 +173,11 @@ class SelfBot(discord.Client):
         judge = runtime.judge
         info["judge"] = judge.status if judge is not None else "starting"
         info["scout chats"] = str(len(runtime.chats.list()))
+        info["manual clips"] = "on" if runtime.cfg.manual else "off"
+        info["review"] = runtime.cfg.review
+        notes = runtime.taste_notes.text if runtime.taste_notes is not None else ""
+        counts = runtime.taste_store.counts() if runtime.taste_store is not None else {"good": 0, "bad": 0}
+        info["taste"] = f"{len(notes)} chars of notes, {counts['good']} good / {counts['bad']} bad examples"
         active = judge.active if judge is not None else None
         if active is not None and active.name == "inception":
             info["reminder"] = "Inception: turn OFF 'Improve the model for everyone' in its API settings"
