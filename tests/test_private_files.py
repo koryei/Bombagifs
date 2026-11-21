@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from private_files import append_private_line, write_private_json
+from private_files import append_private_line, write_private_json, write_private_text
 
 
 class PrivateFilesTests(unittest.TestCase):
@@ -31,6 +31,14 @@ class PrivateFilesTests(unittest.TestCase):
         append_private_line(path, "second")
         self.assertEqual(path.read_text(encoding="utf-8").splitlines(), ["first", "second"])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_write_private_text_is_atomic_mode_600_and_replaces(self) -> None:
+        path = self.dir / "sub" / "notes.txt"
+        write_private_text(path, "first")
+        write_private_text(path, "second\nline")
+        self.assertEqual(path.read_text(encoding="utf-8"), "second\nline")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["notes.txt"])
 
     def test_append_creates_parent_dirs(self) -> None:
         path = self.dir / "a" / "b" / "log.jsonl"
