@@ -10,17 +10,18 @@ import asyncio
 import logging
 import re
 import time
-from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from scout_buffer import ScoutBuffer, ScoutMessage
 from scout_config import ScoutConfig
-from scout_judge import JudgeChain, Verdict, build_judge_window
+from scout_judge import JudgeChain, JudgeWindow, Verdict, build_judge_window
 from scout_safety import check_window, load_blocklist
 from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
+from scout_taste import TasteStore
 from selfbot_logic import BotStats
 
 logger = logging.getLogger("bombagif.scout")
@@ -39,6 +40,25 @@ class ClipPlan:
     deleted: bool
     to_owner: bool
     requested_by: str | None = None  # set for manual ("clip that") clips
+
+
+NEAR_MISS_DECIDE_FUNNY = 0.6
+NEAR_MISS_FINAL_FUNNY = 6.0
+REMEMBERED_REVIEWS = 200
+
+
+@dataclass(frozen=True)
+class ReviewItem:
+    """A candidate the owner may rate. ``lines`` are anonymous (speaker label, original text); ``names`` are for the DM."""
+
+    id: int
+    chat_id: int
+    names: tuple[str, ...]
+    lines: tuple[tuple[str, str], ...]
+    funny: float
+    decide: Mapping[str, float]
+    reason: str
+    would_clip: bool
 
 
 @dataclass
@@ -76,6 +96,8 @@ class Scout:
         stats: BotStats | None = None,
         paused: Callable[[], bool] = lambda: False,
         blocklist: frozenset[str] = frozenset(),
+        on_review: Callable[[ReviewItem], Awaitable[int | None]] | None = None,
+        taste: TasteStore | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.cfg = cfg
@@ -92,6 +114,11 @@ class Scout:
         self._chat_last: dict[int, float] = {}
         self._author_last: dict[int, float] = {}
         self._posts: deque[float] = deque()
+        self.on_review = on_review
+        self.taste = taste
+        self.reviews: OrderedDict[int, ReviewItem] = OrderedDict()  # DM message id -> item awaiting a rating
+        self._review_times: deque[float] = deque()
+        self._review_seq = 0
 
     # scheduling -----------------------------------------------------------------------------------------------
 
@@ -163,9 +190,58 @@ class Scout:
             chat_id, verdict.clip, verdict.funny, verdict.provider, verdict.reason,
         )
         if not verdict.clip:
+            await self._maybe_review(window, verdict, window.run_start, window.run_end, would_clip=False)
             return
         self.stats.scout_passed += 1
-        await self._act(chat_id, window.messages[verdict.start : verdict.end + 1], verdict)
+        await self._act(chat_id, window.messages[verdict.start : verdict.end + 1], verdict, window)
+
+    # teaching: candidates the owner can rate ------------------------------------------------------------------
+
+    def _review_enabled(self) -> bool:
+        if self.on_review is None:
+            return False
+        return self.cfg.review == "always" or (self.cfg.review == "dry-run" and self.cfg.mode == "dry-run")
+
+    async def _maybe_review(self, window: JudgeWindow, verdict: Verdict, start: int, end: int, *, would_clip: bool) -> None:
+        """Send the owner a candidate to rate: would-be clips and near-misses, a few per hour, never raising."""
+        if not self._review_enabled():
+            return
+        near_miss = verdict.decide.get("funny", 0.0) >= NEAR_MISS_DECIDE_FUNNY or verdict.funny >= NEAR_MISS_FINAL_FUNNY
+        if not (would_clip or near_miss):
+            return
+        now = self.clock()
+        while self._review_times and now - self._review_times[0] >= HOUR_S:
+            self._review_times.popleft()
+        if len(self._review_times) >= self.cfg.review_per_hour:
+            return
+        lines = tuple((line.speaker, line.text) for line in window.lines[start : end + 1] if line.speaker != "-")
+        if not lines:
+            return
+        names = tuple(dict.fromkeys(m.author_name for m in window.messages[start : end + 1] if m.eligible))
+        self._review_seq += 1
+        item = ReviewItem(self._review_seq, window.messages[start].chat_id, names, lines, verdict.funny, dict(verdict.decide), verdict.reason, would_clip)
+        self._review_times.append(now)
+        try:
+            dm_id = await self.on_review(item)  # type: ignore[misc]
+        except Exception:
+            logger.exception("could not send a review candidate")
+            return
+        if dm_id is None:
+            return
+        self.reviews[dm_id] = item
+        while len(self.reviews) > REMEMBERED_REVIEWS:
+            self.reviews.popitem(last=False)
+
+    async def rate(self, message_id: int, label: str, *, source: str = "review") -> bool:
+        """Apply the owner's rating (``good``/``bad``/``skip``) to a reviewed candidate. True if it was saved or skipped."""
+        item = self.reviews.pop(message_id, None)
+        if item is None:
+            return False
+        if label == "skip":
+            return True
+        if self.taste is None:
+            return False
+        return self.taste.add(label, item.lines, funny=item.funny, decide=item.decide, source=source)
 
     # decisions ------------------------------------------------------------------------------------------------
 
@@ -224,7 +300,7 @@ class Scout:
         self._chat_last[chat_id] = now
         self._posts.append(now)
 
-    async def _act(self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict) -> None:
+    async def _act(self, chat_id: int, chosen: tuple[ScoutMessage, ...], verdict: Verdict, window: JudgeWindow) -> None:
         """Apply the gates to a clip the judge approved, then post it."""
         now = self.clock()
         reason = self._gate(chat_id, chosen, verdict, now)
@@ -235,6 +311,7 @@ class Scout:
         if self.cfg.mode == "dry-run":
             self._commit(chat_id, chosen, now)  # mimic cooldowns so dry-run counts match what "on" would do
             self._record_dry_run(chat_id, chosen, verdict)
+            await self._maybe_review(window, verdict, verdict.start, verdict.end, would_clip=True)
             return
         plan = ClipPlan(
             chat_id=chat_id,

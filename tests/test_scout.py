@@ -14,6 +14,7 @@ from scout import (
     ANNOUNCE_OFF,
     ANNOUNCE_ON,
     ClipPlan,
+    ReviewItem,
     Scout,
     ScoutCommand,
     build_scout_runtime,
@@ -24,6 +25,7 @@ from scout_buffer import ScoutBuffer, ScoutMessage, Version
 from scout_config import read_scout_config
 from scout_judge import HeuristicJudge, JudgeChain, JudgeWindow, Verdict
 from scout_stores import ClipLedger, OptOutStore
+from scout_taste import TasteStore
 from selfbot_logic import BotStats
 
 T0 = 1_000_000.0
@@ -114,7 +116,7 @@ class ScoutCase(unittest.IsolatedAsyncioTestCase):
         self.posted.append(plan)
         return self.post_result
 
-    def scout(self, judge, *, cfg=None, blocklist=frozenset()) -> Scout:
+    def scout(self, judge, *, cfg=None, blocklist=frozenset(), on_review=None, taste=None) -> Scout:
         chain = judge if isinstance(judge, JudgeChain) else JudgeChain([judge, HeuristicJudge()])
         return Scout(
             cfg or self.cfg,
@@ -126,6 +128,8 @@ class ScoutCase(unittest.IsolatedAsyncioTestCase):
             stats=self.stats,
             paused=lambda: self.paused,
             blocklist=blocklist,
+            on_review=on_review,
+            taste=taste,
             clock=self.clock,
         )
 
@@ -595,6 +599,188 @@ class ModeAndLedgerTests(ScoutCase):
                 await scout.run()
         self.assertEqual(len(calls), 3)
         sleep.assert_awaited_with(self.cfg.tick_s)
+
+
+class ReviewTests(ScoutCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.reviews: list[ReviewItem] = []
+        self.next_dm = 5000
+        self.dm_result: int | None = None  # None = "use the counter"
+        self.taste = TasteStore(self.dir / "taste.jsonl")
+
+    async def on_review(self, item: ReviewItem) -> int | None:
+        self.reviews.append(item)
+        self.next_dm += 1
+        return self.next_dm
+
+    def scout_with(self, judge, **env_overrides):
+        cfg = replace(self.cfg, **env_overrides)
+        return self.scout(judge, cfg=cfg, on_review=self.on_review, taste=self.taste)
+
+    async def settle(self, scout: Scout, seconds: float = 60) -> None:
+        self.clock.now += seconds
+        await scout.tick()
+
+    def near_miss(self, funny: float = 6.5, decide_funny: float = 0.2):
+        return lambda w: good_verdict(clip=False, funny=funny, decide={"funny": decide_funny, "standalone": 0.5, "sensitive": 0.0})
+
+    async def test_a_would_clip_candidate_in_dry_run_is_reviewed_with_anonymised_lines(self) -> None:
+        scout = self.scout_with(FakeJudge(approve(funny=8.7)), mode="dry-run")
+        self.add(1, "the better one was me", author=10)
+        await self.settle(scout)
+        self.assertEqual(len(self.reviews), 1)
+        item = self.reviews[0]
+        self.assertEqual((item.would_clip, item.chat_id, item.names, item.funny), (True, 1, ("user10",), 8.7))
+        self.assertEqual(item.lines, (("A", "the better one was me"),))
+        self.assertNotIn("user10", str(item.lines))
+        self.assertEqual(dict(item.decide)["funny"], 0.95)
+        self.assertIn(5001, scout.reviews)
+
+    async def test_near_misses_by_either_score_qualify_but_ordinary_misses_do_not(self) -> None:
+        cases = {"final funny 6.0": (self.near_miss(6.0), 1), "decide funny 0.6": (self.near_miss(0.0, 0.6), 1),
+                 "ordinary": (self.near_miss(5.9, 0.59), 0), "zero": (self.near_miss(0.0, 0.0), 0)}
+        for name, (responder, expected) in cases.items():
+            with self.subTest(name=name):
+                self.setUp()
+                scout = self.scout_with(FakeJudge(responder), mode="dry-run")
+                self.add(1)
+                await self.settle(scout)
+                self.assertEqual(len(self.reviews), expected)
+                if expected:
+                    self.assertFalse(self.reviews[0].would_clip)
+
+    async def test_near_miss_lines_are_the_candidate_run_only(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run")
+        self.add(1, "context before", author=20)
+        self.add(2, "the candidate line", author=10, at=T0 + 1)
+        self.add(3, "context after", author=30, at=T0 + 2)
+        await self.settle(scout)
+        candidate = [r for r in self.reviews if r.lines == (("B", "the candidate line"),)]
+        self.assertEqual(len(candidate), 1)  # speaker labels come from the window, so the run is "B" here
+
+    async def test_review_modes(self) -> None:
+        cases = [
+            ("off", "dry-run", 0), ("off", "on", 0),
+            ("dry-run", "dry-run", 1), ("dry-run", "on", 0),
+            ("always", "dry-run", 1), ("always", "on", 1),
+        ]
+        for review, mode, expected in cases:
+            with self.subTest(review=review, mode=mode):
+                self.setUp()
+                scout = self.scout_with(FakeJudge(self.near_miss()), review=review, mode=mode)
+                self.add(1)
+                await self.settle(scout)
+                self.assertEqual(len(self.reviews), expected)
+
+    async def test_in_live_mode_posted_clips_are_not_reviewed_only_near_misses_are(self) -> None:
+        scout = self.scout_with(FakeJudge(lambda w: approve()(w) if w.lines[w.run_start].text == "good one" else self.near_miss()(w)), review="always", mode="on")
+        self.add(1, "good one", author=10, chat=1)
+        self.add(2, "nearly funny", author=20, chat=2)
+        await self.settle(scout)
+        self.assertEqual(len(self.posted), 1)
+        self.assertEqual([r.would_clip for r in self.reviews], [False])
+
+    async def test_rejected_candidates_are_never_reviewed(self) -> None:
+        scout = self.scout_with(FakeJudge(approve()), mode="dry-run")
+        self.add(1, "call me on 415-555-0132 lol")
+        await self.settle(scout)
+        self.assertEqual(self.reviews, [])
+
+    async def test_reviews_are_capped_per_hour_and_resume_after(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run", review_per_hour=2)
+        for i in range(1, 4):
+            self.add(i, f"candidate {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        self.assertEqual(len(self.reviews), 2)
+        self.clock.now += 3601
+        self.add(9, "later candidate", author=99, chat=9)
+        await self.settle(scout, 46)
+        self.assertEqual(len(self.reviews), 3)
+
+    async def test_no_callback_or_a_failing_callback_never_breaks_screening(self) -> None:
+        silent = self.scout(FakeJudge(self.near_miss()), cfg=replace(self.cfg, mode="dry-run"))
+        self.add(1)
+        await self.settle(silent)
+        self.assertEqual(self.stats.scout_screened, 1)
+
+        async def boom(item: ReviewItem) -> int | None:
+            raise RuntimeError("dm failed")
+
+        self.setUp()
+        failing = self.scout(FakeJudge(approve()), cfg=replace(self.cfg, mode="dry-run"), on_review=boom)
+        self.add(1)
+        with self.assertLogs("bombagif.scout", "ERROR"):
+            await self.settle(failing)
+        self.assertEqual((self.stats.scout_screened, self.stats.dry_run_hits), (1, 1))  # the dry-run hit was still recorded
+
+    async def test_a_callback_returning_none_is_not_remembered(self) -> None:
+        async def refuses(item: ReviewItem) -> int | None:
+            return None
+
+        scout = self.scout(FakeJudge(self.near_miss()), cfg=replace(self.cfg, mode="dry-run"), on_review=refuses)
+        self.add(1)
+        await self.settle(scout)
+        self.assertEqual(scout.reviews, {})
+
+    async def test_remembered_reviews_are_capped_at_200(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run", review_per_hour=1000)
+        for i in range(1, 251):
+            self.clock.now = T0 + i * 100
+            self.add(i, f"candidate {i}", author=10 + i, chat=i, at=self.clock.now)
+            self.clock.now += 50
+            await scout.tick()
+        self.assertEqual(len(scout.reviews), 200)
+        self.assertNotIn(5001, scout.reviews)  # the oldest were dropped
+        self.assertIn(5000 + 250, scout.reviews)
+
+    async def test_rate_good_and_bad_store_examples_and_skip_drops(self) -> None:
+        scout = self.scout_with(FakeJudge(approve(funny=8.7)), mode="dry-run")
+        for i in range(1, 4):
+            self.add(i, f"line number {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        ids = sorted(scout.reviews)
+        self.assertTrue(await scout.rate(ids[0], "good"))
+        self.assertTrue(await scout.rate(ids[1], "bad", source="clip"))
+        self.assertTrue(await scout.rate(ids[2], "skip"))
+        examples = self.taste.all()
+        self.assertEqual([(e.label, e.source, e.funny) for e in examples], [("good", "review", 8.7), ("bad", "clip", 8.7)])
+        self.assertEqual(examples[0].decide["funny"], 0.95)
+        self.assertEqual(scout.reviews, {})
+
+    async def test_rate_unknown_or_repeated_ids_do_nothing(self) -> None:
+        scout = self.scout_with(FakeJudge(approve()), mode="dry-run")
+        self.add(1)
+        await self.settle(scout)
+        (dm_id,) = scout.reviews
+        self.assertFalse(await scout.rate(999, "good"))
+        self.assertTrue(await scout.rate(dm_id, "good"))
+        self.assertFalse(await scout.rate(dm_id, "bad"))
+        self.assertEqual(self.taste.counts(), {"good": 1, "bad": 0})
+
+    async def test_rate_without_a_taste_store_cannot_save(self) -> None:
+        scout = self.scout(FakeJudge(approve()), cfg=replace(self.cfg, mode="dry-run"), on_review=self.on_review)
+        self.add(1)
+        await self.settle(scout)
+        (dm_id,) = scout.reviews
+        self.assertFalse(await scout.rate(dm_id, "good"))
+
+    async def test_a_duplicate_ruling_reports_false(self) -> None:
+        scout = self.scout_with(FakeJudge(approve()), mode="dry-run", review_per_hour=10)
+        self.add(1, "same words", author=10, chat=1)
+        self.add(2, "same words", author=20, chat=2)
+        await self.settle(scout)
+        first, second = sorted(scout.reviews)
+        self.assertTrue(await scout.rate(first, "good"))
+        self.assertFalse(await scout.rate(second, "good"))  # identical lines as the latest good example
+
+    async def test_review_lines_use_the_original_text_and_skip_placeholders(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run")
+        self.add(1, "", author=20, eligible=False)
+        message = self.add(2, "the original words", author=10, at=T0 + 1)
+        self.buffer.edit(1, 2, "edited words")
+        await self.settle(scout)
+        self.assertEqual([r.lines for r in self.reviews], [(("A", "the original words"),)])
 
 
 class NoticeAndCommandTests(unittest.TestCase):
