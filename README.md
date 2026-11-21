@@ -218,6 +218,28 @@ No judge is involved, since a person chose it. It posts even in `dry-run`.
   (`SCOUT_MANUAL_LIMIT_PER_10_MIN`, `SCOUT_MANUAL_AUTHOR_COOLDOWN_SECONDS`). `SCOUT_MANUAL=off` turns it off.
 - When the **owner** clips something this way it is saved as a "good" example.
 
+#### Without a ping (spoken triggers)
+
+In a chat where the owner ran `!on`, nobody has to `@` the account. Say or reply:
+
+| Say | What happens |
+|---|---|
+| reply `clip that` (also `clip this`, `clip it`, `clip dat`, `clip that one`, ...) | clips the message you replied to |
+| `clip that` (no reply) | clips the latest message in the chat (and that person's run), if it is under `SCOUT_TRIGGER_MAX_AGE_SECONDS` old (180) |
+| `clip last 3`, `clip that convo` | clips the last few messages (up to 5, at most 3 people) |
+| reply `gif that` / `make that a gif` | converts the media in the message you replied to |
+
+Filler, laughing, emoji and stretched letters are ignored, so `bro clip thattt LMFAOOO 😭` works. **Typos and odd
+wording** (`clkip that LMFAII`, `cilp dat`) are confirmed by a small AI check (Mercury 3, then any `SCOUT_LLM_*` model):
+it sees only that one line, as data, under a daily cap (`SCOUT_TRIGGER_AI_PER_DAY`, 300), and "nice clip" or "clip that
+video" are correctly ignored. With no provider, only the exact phrases work.
+- **Who:** registered members; `SCOUT_TRIGGER_ANYONE=on` lets anyone in an enabled chat ask for a clip (never a GIF).
+- **Quiet:** refusals (opted out, sensitive, already clipped, slow down, nothing recent) are never posted, since nobody
+  pinged the account and it can't know the message was meant for it. They show in the terminal feed. A pinged request
+  still gets its refusal, as before.
+- **Off switches:** `SCOUT_TRIGGERS=off`, or `phrases` for exact phrases only (no AI). Chats without `!on` are not
+  listened to, and a request message is never buffered as chat.
+
 ### Teaching it
 
 The judge starts with a fixed idea of "funny out of context". You can steer it three ways (all owner-only, answers

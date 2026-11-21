@@ -25,6 +25,8 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `scout_manual.py` (`ManualGate`: refusals + limits for manual clips); `scout.py` also holds the review queue
   (`ReviewItem`, `Scout.rate`), `HELP_OWNER`/`HELP_USER`, and the `!scout` parser. Files in `SELFBOT_DATA_DIR`:
   `scout-taste.txt`, `taste.jsonl`, `optout.json`, `scout-chats.json`, `clips.jsonl`, `scout-blocklist.txt`.
+- Spoken triggers: `scout_trigger.py` (`parse_trigger`: sure/unsure phrases + typo tolerance, `pick_targets`),
+  `scout_intent.py` (`IntentClassifier`: the AI check for unsure ones; one line of chat text, as data, daily cap).
 - `console_ui.py` — discord-free Rich terminal UI for the self-bot (boot banner, live status panel, pretty log
   handler, `TerminalUi`, `demo()`); needs `rich` (in `requirements-selfbot.txt`). Preview: `python console_ui.py`.
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
@@ -78,6 +80,13 @@ Built per the spec in 18 plan tasks (see `PLAN.md`): buffer -> candidate runs ->
 local gates -> pure Pillow renderer -> post with a who-was-clipped + `stop` notice. Extras beyond the spec are listed in
 the spec's "Implementation notes". Strangers who ping the account now get a help reply. `stop` in any DM opts out of
 clipping and conversions; `start` opts back in.
+
+## v3.2 spoken triggers (branch `clip-triggers`)
+
+In enabled chats, "clip that", "clip last 3" and a reply "gif that" work with no ping. Known phrases are matched locally;
+typos ("clkip that LMFAII") go to one small AI call that sees only that line (as data). Refusals are silent (nobody pinged);
+pings keep their old path. Settings: `SCOUT_TRIGGERS=ai|phrases|off`, `SCOUT_TRIGGER_ANYONE`, `SCOUT_TRIGGER_AI_PER_DAY`,
+`SCOUT_TRIGGER_MAX_AGE_SECONDS`. Not yet run in a real chat.
 
 ## v3.1 teaching (branch `v3.1-teach`, stacked on v3)
 
