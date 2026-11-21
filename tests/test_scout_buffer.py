@@ -39,6 +39,37 @@ def msg(
     )
 
 
+class BufferRecentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.opted_out: set[int] = set()
+        self.buffer = ScoutBuffer(
+            max_age_s=900, max_per_chat=50, is_opted_out=lambda user_id: user_id in self.opted_out, clock=self.clock
+        )
+        for i in range(1, 6):
+            self.buffer.add(msg(i, f"line {i}", author=10 + i % 2, at=self.clock.now - 10 + i))
+        self.buffer.add(msg(9, "other chat", chat=2))
+
+    def test_the_messages_just_before_an_id_oldest_first(self) -> None:
+        self.assertEqual([m.id for m in self.buffer.recent(1, before_id=6, limit=3)], [3, 4, 5])
+        self.assertEqual([m.id for m in self.buffer.recent(1, before_id=4, limit=8)], [1, 2, 3])
+        self.assertEqual([m.id for m in self.buffer.recent(1, before_id=6, limit=1)], [5])
+
+    def test_the_trigger_itself_and_newer_messages_are_excluded(self) -> None:
+        self.assertEqual([m.id for m in self.buffer.recent(1, before_id=5, limit=8)], [1, 2, 3, 4])
+
+    def test_other_chats_unknown_chats_and_empty_limits(self) -> None:
+        self.assertEqual([m.id for m in self.buffer.recent(2, before_id=100, limit=5)], [9])
+        self.assertEqual(self.buffer.recent(77, before_id=100, limit=5), [])
+        self.assertEqual(self.buffer.recent(1, before_id=100, limit=0), [])
+
+    def test_ineligible_messages_stay_as_placeholders_but_opted_out_people_vanish(self) -> None:
+        self.buffer.add(msg(6, "[photo]", eligible=False, at=self.clock.now))
+        self.opted_out.add(11)
+        ids = [m.id for m in self.buffer.recent(1, before_id=7, limit=8)]
+        self.assertEqual(ids, [2, 4, 6])  # odd ids are author 11 (opted out)
+
+
 class BufferCoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()

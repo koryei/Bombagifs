@@ -104,6 +104,19 @@ class ScoutBuffer:
         self.prune()
         return self._chats.get(chat_id, {}).get(message_id)
 
+    def recent(self, chat_id: int, before_id: int, limit: int) -> list[ScoutMessage]:
+        """The last ``limit`` messages with an id below ``before_id`` (oldest first), minus opted-out authors.
+
+        Ineligible messages stay in as placeholders, so "clip that" after a photo refuses instead of reaching past it.
+        """
+        self.prune()
+        if limit <= 0:
+            return []
+        older = [
+            m for mid, m in self._chats.get(chat_id, {}).items() if mid < before_id and not self.is_opted_out(m.author_id)
+        ]
+        return older[-limit:]
+
     def add(self, message: ScoutMessage) -> bool:
         """Store a message; False if its author opted out or the id is already buffered."""
         self.prune()
