@@ -204,6 +204,43 @@ Preview the card without Discord: `python clip_render.py demo out.png`. Everythi
 `SELFBOT_DATA_DIR`: `optout.json`, `scout-chats.json`, `clips.jsonl` (all mode 600), `emoji-cache/`, and an optional
 `scout-blocklist.txt` (one term per line, `#` comments). Bundled fonts: Noto Sans (SIL OFL, `assets/fonts/OFL.txt`).
 
+### Clip that (manual clips)
+
+Reply to any **text** message and `@` the account: it posts that message (and the rest of that person's run, if it
+is still buffered) as a card, with ``🎬 Clipped **Name** at **You**'s request — DM me `stop` to opt out of clips.``
+No judge is involved, since a person chose it. It posts even in `dry-run`.
+- **Who:** people who have DMed the account first. Members can only do it in chats where the owner ran `!scout on`;
+  the owner (`SELFBOT_OWNER_ID`) can do it anywhere except NSFW channels and 1:1 DMs.
+- **Always refused:** opted-out people, bots, the account itself, non-text messages (links, images, stickers,
+  spoilers), anything the local sensitive filter catches, and a message that was already clipped. Refusals are one
+  short reply and never quote the message.
+- **Limits** (members): 3 clips per 10 minutes each, and one clip per person per 2 minutes
+  (`SCOUT_MANUAL_LIMIT_PER_10_MIN`, `SCOUT_MANUAL_AUTHOR_COOLDOWN_SECONDS`). `SCOUT_MANUAL=off` turns it off.
+- When the **owner** clips something this way it is saved as a "good" example.
+
+### Teaching it
+
+The judge starts with a fixed idea of "funny out of context". You can steer it three ways (all owner-only, answers
+come by DM):
+1. **Taste notes**, plain English, up to 1,500 characters: `!scout taste add we like deadpan one-liners, skip
+   anything about exams`. They go into the judge's instructions. `!scout taste` shows them, `!scout taste clear` wipes
+   them, and `data/scout-taste.txt` can be edited by hand (changes apply on the next judging call).
+2. **Rate examples.** In dry-run the account DMs you each candidate (what it would clip, plus some near-misses; at most
+   `SCOUT_REVIEW_PER_HOUR`). React 👍 clip-worthy, 👎 never, 🙈 skip. You can also 👍/👎 any clip it posted. Your
+   ratings are stored in `data/taste.jsonl` (only lines you rated, anonymous speaker labels, mode 600) and the newest
+   `SCOUT_EXAMPLES` good and bad ones are shown to the judge as examples. `!scout examples` lists them,
+   `!scout examples clear` forgets them.
+3. **Tune the bar.** `!scout tune` compares your 👍/👎 with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN` (needs
+   5 scored of each).
+
+Privacy: the examples are real chat lines sent (anonymised) to the model on every judging call, and review DMs show you
+real names and text. Only lines you chose to rate are kept. Say so in the chat.
+
+### `!help`
+
+`!help` (or `!scout help`) from the owner DMs the full command list. Anyone else gets the short guide, and only in a
+1:1 DM with the account; elsewhere it is ignored. Handy for testers.
+
 ## Secret hygiene before publishing
 
 - [`.gitignore`](.gitignore) excludes local env files, virtualenvs, and Python caches. [`.dockerignore`](.dockerignore) keeps env files out of Docker build context.
