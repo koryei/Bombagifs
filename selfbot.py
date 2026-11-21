@@ -18,7 +18,7 @@ import signal
 import sys
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -42,6 +42,7 @@ from bombagif_core import (
 )
 from clip_assets import asset_url_allowed, build_card, custom_emoji_url, mentioned_ids, twemoji_url
 from clip_render import collect_asset_keys, render_clip
+from scout_buffer import ScoutMessage
 from scout import (
     ANNOUNCE_OFF,
     ANNOUNCE_ON,
@@ -53,7 +54,9 @@ from scout import (
     parse_scout_command,
 )
 from scout_config import read_scout_config
-from scout_judge import build_judge_chain
+from scout_judge import Verdict, build_judge_chain
+from scout_manual import ManualGate
+from scout_stores import ClipRecord
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
@@ -101,6 +104,9 @@ class SelfBot(discord.Client):
         self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
         self.scout = scout  # None unless the clip scout is configured
         self._scout_task: asyncio.Task[None] | None = None
+        self._manual_gate = ManualGate(scout.cfg) if scout is not None else None
+        if scout is not None and scout.cfg.owner_id is not None:
+            self.allowlist.add(scout.cfg.owner_id)  # the operator never has to DM their own account first
         self._help_user_cooldown = Cooldown(3600.0)  # a stranger gets the help text at most once an hour...
         self._help_chat_cooldown = Cooldown(600.0)  # ...and a chat at most once every 10 minutes
         self._clip_message_ids: set[int] = set()  # clips we posted, so a reply of `stop` to one can be recognised
@@ -431,7 +437,7 @@ class SelfBot(discord.Client):
             png = await loop.run_in_executor(
                 self.executor, partial(render_clip, card, scale=2, theme=runtime.cfg.theme, emoji=emoji)
             )
-            notice = format_clip_notice([m.author_name for m in plan.messages], plan.deleted)
+            notice = format_clip_notice([m.author_name for m in plan.messages], plan.deleted, plan.requested_by)
             sent = await self._send_clip(plan, channel, png, notice, runtime)
         except discord.CaptchaRequired:
             self._trip_captcha("posting a clip")
@@ -653,10 +659,14 @@ class SelfBot(discord.Client):
         self.stats.triggers += 1
         guild_id = message.guild.id if message.guild is not None else None
         async with message.channel.typing():
+            referenced = None
             collected = collect_media(message)
             if not collected.sources and message.reference is not None:
-                collected = collect_media(message, await self._resolve_reference(message))
+                referenced = await self._resolve_reference(message)
+                collected = collect_media(message, referenced)
             if not collected.sources:
+                if referenced is not None and await self._try_manual_clip(message, referenced):
+                    return
                 # Only complain when the person clearly asked: they pinged us or attached something.
                 # A plain DM reply (e.g. "thanks!" to one of our messages) is just conversation.
                 if message.attachments or self._incoming(message).mentions_me:
@@ -676,6 +686,77 @@ class SelfBot(discord.Client):
                     self.stats.conversions_failed += 1
                     self.stats.note("fail", f"{who}: {source.filename}: {result[1]}")
             await self._reply(message, format_results(results, collected.skipped))
+
+    def _teach(self, label: str, chosen: Sequence[ScoutMessage], source: str) -> None:
+        """Save a ruling as a taste example (wired up with the review loop)."""
+
+    def _manual_chosen(self, referenced: discord.Message, runtime: ScoutRuntime) -> list[ScoutMessage]:
+        """The messages a "clip that" request covers: the replied-to message's buffered run, else just that message."""
+        chat_id = referenced.channel.id
+        buffered = runtime.buffer.get(chat_id, referenced.id)
+        if buffered is not None:
+            for run in runtime.buffer.runs(chat_id):
+                if any(m.id == referenced.id for m in run):
+                    return list(run)
+            return [buffered]
+        return [to_scout_message(referenced, eligible=message_is_clippable(referenced))]
+
+    async def _try_manual_clip(self, message: discord.Message, referenced: discord.Message) -> bool:
+        """Handle "@account" as a reply to a text message: clip it. Returns True if the request was handled."""
+        runtime, gate = self.scout, self._manual_gate
+        if runtime is None or gate is None or runtime.cfg.mode == "off" or not runtime.cfg.manual:
+            return False
+        channel = message.channel
+        if not chat_is_scoutable(channel):
+            return False
+        requester = message.author.id
+        is_owner = runtime.cfg.owner_id == requester
+        chosen = self._manual_chosen(referenced, runtime)
+        me = self.user
+        reason = gate.check(
+            chosen,
+            requester_id=requester,
+            is_owner=is_owner,
+            chat_enabled=runtime.chats.enabled(channel.id),
+            optout=runtime.optout,
+            blocklist=runtime.blocklist,
+            self_id=me.id if me is not None else None,
+            target_is_bot=bool(referenced.author.bot),
+        )
+        if reason is not None:
+            await self._reply(message, reason)
+            return True
+        who = self._who(message.author)
+        deleted = any(m.deleted for m in chosen)
+        plan = ClipPlan(
+            chat_id=channel.id,
+            messages=tuple(chosen),
+            verdict=Verdict(True, 0, len(chosen) - 1, 0.0, True, (), "manual", {}, "manual"),
+            deleted=deleted,
+            to_owner=False,
+            requested_by=who,
+        )
+        sent_id = await self._post_clip(plan)
+        if sent_id is None:
+            return True  # _post_clip already logged why; the requester is not told twice
+        gate.commit(chosen, requester, is_owner)
+        self.stats.clips_posted += 1
+        names = ", ".join(dict.fromkeys(m.author_name for m in chosen))
+        self.stats.note("ok", f"manual clip: {who} clipped {names}")
+        try:
+            runtime.ledger.append(
+                ClipRecord(
+                    at=time.time(), chat_id=channel.id, message_ids=tuple(m.id for m in chosen),
+                    author_ids=tuple(dict.fromkeys(m.author_id for m in chosen)), mode="posted", funny=0.0, decide={},
+                    deleted=deleted, provider="manual", reason=f"requested by {requester}", posted_message_id=sent_id,
+                    text=tuple(m.original for m in chosen),
+                )
+            )
+        except OSError:
+            self.logger.exception("could not write the clip ledger")
+        if is_owner:
+            self._teach("good", chosen, "manual")
+        return True
 
     async def close(self) -> None:
         """Close HTTP resources and drain image work before disconnecting."""

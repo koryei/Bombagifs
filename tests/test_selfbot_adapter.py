@@ -16,6 +16,7 @@ from scout_buffer import ScoutMessage, Version
 from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
 from scout_config import read_scout_config
+from scout_manual import REFUSAL_CANT, REFUSAL_NOT_ENABLED, REFUSAL_NOT_TEXT, REFUSAL_OPTED_OUT, REFUSAL_SLOW
 from scout_stores import ClipLedger, OptOutStore, ScoutChatStore
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
@@ -1417,6 +1418,204 @@ class CreateBotTests(unittest.TestCase):
     def test_invalid_scout_settings_fail_fast_with_the_variable_name(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "SELFBOT_SCOUT_MODE"):
             self.create(SELFBOT_SCOUT_MODE="sometimes")
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotManualClipTests(_SelfBotCase):
+    TARGET_TEXT = "If I ever inherit a successful billboard business, I won't tell anybody, but there will be signs."
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        import aiohttp
+        from selfbot import SelfBot
+
+        self.root = Path(self._tmp.name)
+        self.runtime = make_runtime(self.root, mode="on", SELFBOT_OWNER_ID=str(OWNER))
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.bot.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.bot.close)
+        self.allowlist.add(99)
+        self.partial = Mock()
+        self.partial.reply = AsyncMock(return_value=SimpleNamespace(id=900))
+        self.partial.jump_url = "https://discord.com/channels/1/777/700"
+        self.channel = Mock()
+        self.channel.get_partial_message = Mock(return_value=self.partial)
+        self.channel.send = AsyncMock(return_value=SimpleNamespace(id=901))
+        self.bot.get_channel = Mock(return_value=self.channel)  # type: ignore[method-assign]
+        self.render = patch("selfbot.render_clip", return_value=b"\x89PNG fake").start()
+        self.addCleanup(patch.stopall)
+        patch.object(self.bot, "_fetch_asset", AsyncMock(return_value=None)).start()
+        self.convert = patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK).start()
+
+    def target(self, text: str | None = None, *, author: int = 10, message_id: int = 700, **kwargs):
+        return make_message(
+            author_id=author, channel_cls=discord.TextChannel, content=self.TARGET_TEXT if text is None else text,
+            message_id=message_id, channel_id=kwargs.pop("channel_id", CHAT), **kwargs,
+        )
+
+    def ping(self, target, *, author: int = 99, chat: int = CHAT, **kwargs):
+        reference = SimpleNamespace(message_id=target.id, resolved=target, cached_message=None)
+        message = make_message(
+            author_id=author, channel_cls=discord.TextChannel, mentions=[self.me], reference=reference,
+            channel_id=chat, message_id=kwargs.pop("message_id", 800), **kwargs,
+        )
+        return message
+
+    def posted_notice(self) -> str:
+        return self.partial.reply.await_args.kwargs["content"]
+
+    def rows(self) -> list[dict]:
+        path = self.root / "clips.jsonl"
+        import json as _json
+
+        return [_json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    async def test_a_member_reply_pinging_a_text_message_clips_it(self) -> None:
+        target = self.target(author_extra={"display_name": "Koryei"})
+        request = self.ping(target, author_extra={"display_name": "Pranit"})
+        await self.bot.on_message(request)
+        self.partial.reply.assert_awaited_once()
+        self.assertEqual(self.posted_notice(), "🎬 Clipped **Koryei** at **Pranit**'s request — DM me `stop` to opt out of clips.")
+        self.channel.get_partial_message.assert_called_with(700)
+        card = self.render.call_args.args[0]
+        self.assertEqual([m.text for m in card.messages], [self.TARGET_TEXT])
+        request.reply.assert_not_awaited()  # the clip is the answer, not "no media"
+        self.convert.assert_not_awaited()
+
+    async def test_manual_clips_are_ledgered_counted_and_remembered(self) -> None:
+        await self.bot.on_message(self.ping(self.target()))
+        row = self.rows()[0]
+        self.assertEqual((row["mode"], row["provider"], row["chat_id"], row["message_ids"], row["posted_message_id"]), ("posted", "manual", CHAT, [700], 900))
+        self.assertEqual(row["text"], [self.TARGET_TEXT])
+        self.assertEqual(self.bot.stats.clips_posted, 1)
+        self.assertIn(900, self.bot._clip_message_ids)
+        self.assertTrue(any("manual" in e.text for e in self.bot.stats.activity))
+
+    async def test_the_buffered_run_of_the_replied_to_message_is_used(self) -> None:
+        for i, line in enumerate(("first line of the story", "second line of the story", "third line of the story")):
+            self.runtime.buffer.add(smsg(700 + i, line, author=10))
+        target = self.target("first line of the story")
+        await self.bot.on_message(self.ping(target))
+        card = self.render.call_args.args[0]
+        self.assertEqual([m.text for m in card.messages], ["first line of the story", "second line of the story", "third line of the story"])
+
+    async def test_an_unbuffered_message_is_clipped_alone(self) -> None:
+        await self.bot.on_message(self.ping(self.target()))
+        self.assertEqual(len(self.render.call_args.args[0].messages), 1)
+
+    async def refused(self, request, expected: str) -> None:
+        posted_before = self.partial.reply.await_count
+        await self.bot.on_message(request)
+        self.assertEqual(request.reply.await_args.args[0], expected)
+        self.assertEqual(self.partial.reply.await_count, posted_before)  # nothing was posted
+        self.channel.send.assert_not_awaited()
+
+    async def test_opted_out_authors_are_refused(self) -> None:
+        self.runtime.optout.add(10)
+        await self.refused(self.ping(self.target()), REFUSAL_OPTED_OUT)
+
+    async def test_messages_with_links_or_attachments_are_refused(self) -> None:
+        await self.refused(self.ping(self.target("look at https://example.com please")), REFUSAL_NOT_TEXT)
+        await self.refused(self.ping(self.target("see this one ||spoiler|| text", message_id=701)), REFUSAL_NOT_TEXT)
+        await self.refused(self.ping(self.target("!scout on", message_id=702)), REFUSAL_NOT_TEXT)
+
+    async def test_sensitive_text_is_refused_without_quoting_it(self) -> None:
+        request = self.ping(self.target("call me on 415-555-0132 right now"))
+        await self.bot.on_message(request)
+        self.assertEqual(request.reply.await_args.args[0], REFUSAL_CANT)
+        self.assertNotIn("415", request.reply.await_args.args[0])
+
+    async def test_bots_cannot_be_clipped(self) -> None:
+        target = self.target()
+        target.author.bot = True
+        await self.refused(self.ping(target), REFUSAL_CANT)
+
+    async def test_members_need_an_enabled_chat_but_the_owner_does_not(self) -> None:
+        self.runtime.chats.disable(CHAT)
+        await self.refused(self.ping(self.target(), chat=CHAT), REFUSAL_NOT_ENABLED)
+        self.allowlist.add(OWNER)
+        await self.bot.on_message(self.ping(self.target(message_id=702), author=OWNER, message_id=801))
+        self.partial.reply.assert_awaited_once()
+        self.assertIn("at **user4242**'s request", self.posted_notice())
+
+    async def test_requests_are_rate_limited_for_members(self) -> None:
+        for i in range(3):
+            await self.bot.on_message(self.ping(self.target(message_id=710 + i, author=20 + i), message_id=810 + i))
+        self.assertEqual(self.partial.reply.await_count, 3)
+        await self.refused(self.ping(self.target(message_id=720, author=30), message_id=820), REFUSAL_SLOW)
+
+    async def test_a_message_cannot_be_clipped_twice(self) -> None:
+        await self.bot.on_message(self.ping(self.target()))
+        again = self.ping(self.target(), message_id=801)
+        await self.bot.on_message(again)
+        self.assertEqual(self.partial.reply.await_count, 1)
+        self.assertIn("already clipped", again.reply.await_args.args[0])
+
+    async def test_a_failed_post_is_silent_and_starts_no_cooldown(self) -> None:
+        self.partial.reply.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+        request = self.ping(self.target())
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            await self.bot.on_message(request)
+        request.reply.assert_not_awaited()
+        self.assertEqual(self.bot.stats.clips_posted, 0)
+        self.partial.reply.side_effect = None
+        await self.bot.on_message(self.ping(self.target(), message_id=801))
+        self.assertEqual(self.bot.stats.clips_posted, 1)  # the same message could still be clipped
+
+    async def test_nsfw_and_dm_chats_fall_back_to_the_no_media_text(self) -> None:
+        nsfw = self.ping(self.target(), nsfw=True)
+        await self.bot.on_message(nsfw)
+        self.assertEqual(nsfw.reply.await_args.args[0], NO_MEDIA_TEXT)
+        self.partial.reply.assert_not_awaited()
+
+    async def test_without_a_reply_or_a_runtime_or_with_manual_off_it_is_the_old_behaviour(self) -> None:
+        from selfbot import SelfBot
+
+        bare = make_message(author_id=99, channel_cls=discord.TextChannel, mentions=[self.me])
+        await self.bot.on_message(bare)
+        self.assertEqual(bare.reply.await_args.args[0], NO_MEDIA_TEXT)
+        for scout in (None, make_runtime(self.root / "off", mode="off", SELFBOT_OWNER_ID=str(OWNER)), make_runtime(self.root / "man", mode="on", SCOUT_MANUAL="off")):
+            bot = SelfBot(SETTINGS, self.allowlist, scout=scout)
+            self.addAsyncCleanup(bot.close)
+            request = self.ping(self.target(message_id=730))
+            await bot.on_message(request)
+            self.assertEqual(request.reply.await_args.args[0], NO_MEDIA_TEXT)
+        self.partial.reply.assert_not_awaited()
+
+    async def test_media_in_the_message_or_the_target_still_wins(self) -> None:
+        await self.bot.on_message(self.ping(self.target("a text message"), attachments=[attachment()]))
+        self.convert.assert_awaited_once()
+        self.partial.reply.assert_not_awaited()
+        self.convert.reset_mock()
+        with_media = self.target("caption text", attachments=[attachment("theirs.png")], message_id=740)
+        await self.bot.on_message(self.ping(with_media, message_id=840))
+        self.convert.assert_awaited_once()
+
+    async def test_a_deleted_target_is_the_no_media_text(self) -> None:
+        reference = SimpleNamespace(message_id=700, resolved=SimpleNamespace(id=700), cached_message=None)  # the deleted marker has no attachments
+        request = make_message(author_id=99, channel_cls=discord.TextChannel, mentions=[self.me], reference=reference)
+        await self.bot.on_message(request)
+        self.assertEqual(request.reply.await_args.args[0], NO_MEDIA_TEXT)
+
+    async def test_dry_run_still_posts_manual_clips(self) -> None:
+        from selfbot import SelfBot
+
+        bot = SelfBot(SETTINGS, self.allowlist, scout=make_runtime(self.root / "dry", mode="dry-run"))
+        bot.http_session = self.bot.http_session
+        bot.get_channel = self.bot.get_channel  # type: ignore[method-assign]
+        patch.object(bot, "_fetch_asset", AsyncMock(return_value=None)).start()
+        await bot.on_message(self.ping(self.target()))
+        self.partial.reply.assert_awaited_once()
+
+    async def test_the_owner_is_always_a_registered_member(self) -> None:
+        self.assertIn(OWNER, self.allowlist)
+
+    async def test_owner_requests_teach_a_good_example_but_members_do_not(self) -> None:
+        taught = []
+        self.bot._teach = lambda label, chosen, source: taught.append((label, [m.id for m in chosen], source))  # type: ignore[method-assign]
+        await self.bot.on_message(self.ping(self.target(message_id=750), author=OWNER, message_id=850))
+        await self.bot.on_message(self.ping(self.target(message_id=751, author=20), author=99, message_id=851))
+        self.assertEqual(taught, [("good", [750], "manual")])
 
 
 if __name__ == "__main__":
