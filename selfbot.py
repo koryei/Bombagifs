@@ -48,19 +48,22 @@ from scout_buffer import ScoutMessage
 from scout import (
     ANNOUNCE_OFF,
     ANNOUNCE_ON,
+    HELP_OWNER,
+    HELP_USER,
     ClipPlan,
     ReviewItem,
     Scout,
     ScoutRuntime,
     build_scout_runtime,
     format_clip_notice,
+    parse_help_command,
     parse_scout_command,
 )
 from scout_config import read_scout_config
 from scout_judge import Verdict, build_judge_chain
 from scout_manual import ManualGate
 from scout_stores import ClipRecord
-from scout_taste import TasteBook
+from scout_taste import NOTES_MAX_CHARS, TasteBook, tune_report
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
@@ -577,6 +580,69 @@ class SelfBot(discord.Client):
         except discord.HTTPException:
             self.logger.exception("Could not post a scout announcement")
 
+    @staticmethod
+    def _example_line(lines: Sequence[tuple[str, str]], multi: bool) -> str:
+        text = " | ".join(f"{speaker}: {line}" if multi else line for speaker, line in lines)
+        return f"• {text[:140]}{'…' if len(text) > 140 else ''}"
+
+    def _teaching_reply(self, command: Any, runtime: ScoutRuntime) -> str:
+        """The owner's answer for ``!scout taste|examples|tune|help`` (and their ``add``/``clear`` forms)."""
+        action = command.action
+        if action == "help":
+            return HELP_OWNER
+        notes, store = runtime.taste_notes, runtime.taste_store
+        if notes is None or store is None:
+            return "Teaching isn't set up on this account."
+        if action == "taste":
+            return f"{notes.show()}\n({len(notes.text)}/{NOTES_MAX_CHARS} characters)"
+        if action == "taste_add":
+            if notes.add(command.arg or ""):
+                return f"Added. ({len(notes.text)}/{NOTES_MAX_CHARS} characters)"
+            if not notes.clean(command.arg or ""):
+                return "Nothing to add."
+            return (
+                f"That would go over the {NOTES_MAX_CHARS}-character limit ({len(notes.text)} used). "
+                "Shorten it, or `!scout taste clear` to start over."
+            )
+        if action == "taste_clear":
+            notes.clear()
+            return "Cleared the taste notes."
+        if action == "examples_clear":
+            store.clear()
+            return "Cleared all rated examples."
+        if action == "tune":
+            return tune_report(store.all(), runtime.cfg.judge_funny_min)
+        counts = store.counts()  # examples
+        if not any(counts.values()):
+            return "No rated examples yet. React 👍/👎 on review DMs or posted clips to teach me."
+        found = store.examples()
+        parts = [f"Rated examples: good {counts['good']}, bad {counts['bad']} (the judge sees the newest {store.per_label} of each)."]
+        for label, title in (("good", "👍 newest"), ("bad", "👎 newest")):
+            if found[label]:
+                parts.append(f"{title}:")
+                parts.extend(self._example_line(e.lines, len({s for s, _ in e.lines}) > 1) for e in found[label][:3])
+        return "\n".join(parts)[:1900]
+
+    async def _handle_help(self, message: discord.Message) -> bool:
+        """``!help``: the owner gets the full guide by DM; anyone else only in a 1:1 DM, with the short one."""
+        if not parse_help_command(message.content or ""):
+            return False
+        me = self.user
+        if message.author.bot or (me is not None and message.author.id == me.id):
+            return False
+        runtime = self.scout
+        is_owner = runtime is not None and runtime.cfg.owner_id == message.author.id
+        in_dm = isinstance(message.channel, discord.DMChannel)
+        if not (is_owner or in_dm):
+            return False
+        if self.captcha_guard.blocked:
+            return True
+        if is_owner:
+            await self._owner_say(message, HELP_OWNER)
+        else:
+            await self._reply(message, HELP_USER)
+        return True
+
     async def _handle_scout_command(self, message: discord.Message) -> bool:
         """Run a ``!scout`` command if the owner sent one. Returns True when the message was a command (consumed)."""
         runtime = self.scout
@@ -586,6 +652,9 @@ class SelfBot(discord.Client):
         if self.captcha_guard.blocked:
             return True
         cfg = runtime.cfg
+        if command.action in ("taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help"):
+            await self._owner_say(message, self._teaching_reply(command, runtime))
+            return True
         if cfg.mode == "off":
             await self._owner_say(message, "Scouting is off. Set SELFBOT_SCOUT_MODE=dry-run or on and restart me.")
             return True
@@ -650,7 +719,7 @@ class SelfBot(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
         try:
-            if await self._handle_scout_command(message):
+            if await self._handle_help(message) or await self._handle_scout_command(message):
                 return
         except Exception:
             self.logger.exception("Unhandled !scout command error")

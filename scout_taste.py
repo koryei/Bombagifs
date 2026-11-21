@@ -43,9 +43,14 @@ class TasteNotes:
     def show(self) -> str:
         return self.text or "(no taste notes yet)"
 
+    @staticmethod
+    def clean(line: str) -> str:
+        """A line as it would be stored: control characters removed and whitespace (including newlines) collapsed."""
+        return " ".join(_CONTROL_RE.sub("", line).split())
+
     def add(self, line: str) -> bool:
         """Append one line of guidance; False if it is empty or would push the notes past the cap."""
-        cleaned = " ".join(_CONTROL_RE.sub("", line).split())
+        cleaned = self.clean(line)
         if not cleaned:
             return False
         current = self.text

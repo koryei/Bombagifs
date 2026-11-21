@@ -13,12 +13,15 @@ from pathlib import Path
 from scout import (
     ANNOUNCE_OFF,
     ANNOUNCE_ON,
+    HELP_OWNER,
+    HELP_USER,
     ClipPlan,
     ReviewItem,
     Scout,
     ScoutCommand,
     build_scout_runtime,
     format_clip_notice,
+    parse_help_command,
     parse_scout_command,
 )
 from scout_buffer import ScoutBuffer, ScoutMessage, Version
@@ -836,6 +839,47 @@ class NoticeAndCommandTests(unittest.TestCase):
         self.assertEqual(parse_scout_command("!scout list"), ScoutCommand("list", None))
         self.assertEqual(parse_scout_command("!scout on 123456789"), ScoutCommand("on", 123456789))
         self.assertEqual(parse_scout_command("!scout off 42"), ScoutCommand("off", 42))
+
+    def test_parse_teaching_commands(self) -> None:
+        self.assertEqual(parse_scout_command("!scout taste"), ScoutCommand("taste", None))
+        self.assertEqual(parse_scout_command("  !SCOUT   TASTE  "), ScoutCommand("taste", None))
+        self.assertEqual(parse_scout_command("!scout taste clear"), ScoutCommand("taste_clear", None))
+        self.assertEqual(parse_scout_command("!scout examples"), ScoutCommand("examples", None))
+        self.assertEqual(parse_scout_command("!scout examples clear"), ScoutCommand("examples_clear", None))
+        self.assertEqual(parse_scout_command("!scout tune"), ScoutCommand("tune", None))
+        self.assertEqual(parse_scout_command("!scout help"), ScoutCommand("help", None))
+
+    def test_taste_add_keeps_the_text_as_written(self) -> None:
+        self.assertEqual(parse_scout_command("!scout taste add We like deadpan"), ScoutCommand("taste_add", None, "We like deadpan"))
+        self.assertEqual(parse_scout_command("!SCOUT Taste ADD   Keep   inner  spaces. "), ScoutCommand("taste_add", None, "Keep   inner  spaces."))
+        self.assertEqual(parse_scout_command("!scout taste add line one\nline two").arg, "line one\nline two")
+
+    def test_parse_teaching_commands_rejects_malformed_input(self) -> None:
+        for text in (
+            "!scout taste add", "!scout taste add   ", "!scout taste remove", "!scout taste clear now", "!scout taste 5",
+            "!scout examples clear all", "!scout examples now", "!scout tune now", "!scout help me", "!scoutx taste", "scout taste",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_scout_command(text))
+
+    def test_parse_help_command(self) -> None:
+        for text in ("!help", " !HELP ", "!help\n"):
+            with self.subTest(text=text):
+                self.assertTrue(parse_help_command(text))
+        for text in ("!help me", "help", "!helpful", "!scout help", "", "!help !help"):
+            with self.subTest(text=text):
+                self.assertFalse(parse_help_command(text))
+
+    def test_help_texts_cover_every_command_and_fit_in_one_message(self) -> None:
+        for needle in ("!scout on", "!scout off", "!scout status", "!scout list", "!scout taste", "!scout taste add", "!scout taste clear",
+                       "!scout examples", "!scout examples clear", "!scout tune", "👍", "👎", "🙈", "`stop`", "`start`", "!help"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, HELP_OWNER)
+        self.assertLessEqual(len(HELP_OWNER), 1900)
+        for needle in ("`stop`", "`start`", "DM"):
+            self.assertIn(needle, HELP_USER)
+        self.assertLessEqual(len(HELP_USER), 1000)
+        self.assertNotIn("!scout", HELP_USER)  # owner-only commands are not advertised to everyone
 
     def test_parse_scout_command_rejects_everything_else(self) -> None:
         for text in ("!scoutx on", "scout on", "!scout", "!scout maybe", "!scout on abc", "!scout status 1", "!scout on 1 2", "hello !scout on", "!scout on 0", "!scout on -5", ""):

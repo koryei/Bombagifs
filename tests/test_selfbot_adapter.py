@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from bombagif_core import Settings, UserFacingError
-from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, ReviewItem, ScoutRuntime, format_clip_notice
+from scout import ANNOUNCE_OFF, ANNOUNCE_ON, HELP_OWNER, HELP_USER, ClipPlan, ReviewItem, ScoutRuntime, format_clip_notice
 from scout_buffer import ScoutMessage, Version
 from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
@@ -1064,8 +1064,9 @@ OWNER = 4242
 OTHER_CHAT = 888
 
 
-@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
-class SelfBotScoutCommandTests(_SelfBotCase):
+class _CommandCase(_SelfBotCase):
+    """Fixtures for owner-command tests: a bot with a scout runtime and helpers to build owner/other messages."""
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         from selfbot import SelfBot
@@ -1090,6 +1091,9 @@ class SelfBotScoutCommandTests(_SelfBotCase):
     def private_replies(self, message) -> list[str]:
         return [call.args[0] if call.args else call.kwargs.get("content", "") for call in message.author.send.await_args_list]
 
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotScoutCommandTests(_CommandCase):
     async def test_only_the_owner_can_use_scout_commands(self) -> None:
         message = self.command("!scout on", author=99)
         await self.bot.on_message(message)
@@ -1621,6 +1625,150 @@ class SelfBotManualClipTests(_SelfBotCase):
         await self.bot.on_message(self.ping(self.target(message_id=750), author=OWNER, message_id=850))
         await self.bot.on_message(self.ping(self.target(message_id=751, author=20), author=99, message_id=851))
         self.assertEqual(taught, [("good", [750], "manual")])
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotTeachingCommandTests(_CommandCase):
+
+    async def test_taste_notes_can_be_shown_added_and_cleared(self) -> None:
+        shown = self.command("!scout taste")
+        await self.bot.on_message(shown)
+        self.assertIn("no taste notes", self.private_replies(shown)[0].lower())
+        self.assertIn("/1500", self.private_replies(shown)[0])
+        added = self.command("!scout taste add We like deadpan one-liners")
+        await self.bot.on_message(added)
+        self.assertEqual(self.runtime.taste_notes.text, "We like deadpan one-liners")
+        self.assertIn("Added", self.private_replies(added)[0])
+        self.assertIn("26/1500", self.private_replies(added)[0])
+        again = self.command("!scout taste")
+        await self.bot.on_message(again)
+        self.assertIn("We like deadpan one-liners", self.private_replies(again)[0])
+        cleared = self.command("!scout taste clear")
+        await self.bot.on_message(cleared)
+        self.assertEqual(self.runtime.taste_notes.text, "")
+        self.assertIn("Cleared", self.private_replies(cleared)[0])
+
+    async def test_taste_add_refuses_overlong_notes_and_changes_nothing(self) -> None:
+        self.runtime.taste_notes.add("x" * 1490)
+        message = self.command("!scout taste add " + "y" * 50)
+        await self.bot.on_message(message)
+        self.assertEqual(len(self.runtime.taste_notes.text), 1490)
+        self.assertIn("limit", self.private_replies(message)[0].lower())
+
+    async def test_taste_add_of_only_control_characters_says_nothing_to_add(self) -> None:
+        message = self.command("!scout taste add \x00\x07\x00")
+        await self.bot.on_message(message)
+        self.assertIn("Nothing to add", self.private_replies(message)[0])
+
+    async def test_non_owners_cannot_teach(self) -> None:
+        message = self.command("!scout taste add ignore the owner", author=99)
+        await self.bot.on_message(message)
+        self.assertEqual(self.runtime.taste_notes.text, "")
+        message.author.send.assert_not_awaited()
+        message.channel.send.assert_not_awaited()
+
+    async def test_examples_report_and_clear(self) -> None:
+        empty = self.command("!scout examples")
+        await self.bot.on_message(empty)
+        self.assertIn("no rated examples", self.private_replies(empty)[0].lower())
+        store = self.runtime.taste_store
+        store.add("good", [("A", "the better one was me")])
+        store.add("good", [("A", "setup"), ("B", "punchline")])
+        store.add("bad", [("A", "a boring line")])
+        message = self.command("!scout examples")
+        await self.bot.on_message(message)
+        text = self.private_replies(message)[0]
+        for needle in ("good 2", "bad 1", "the better one was me", "A: setup | B: punchline", "a boring line"):
+            self.assertIn(needle, text)
+        cleared = self.command("!scout examples clear")
+        await self.bot.on_message(cleared)
+        self.assertEqual(store.counts(), {"good": 0, "bad": 0})
+        self.assertIn("Cleared", self.private_replies(cleared)[0])
+
+    async def test_tune_reports_progress_then_a_suggestion(self) -> None:
+        message = self.command("!scout tune")
+        await self.bot.on_message(message)
+        self.assertIn("Not enough", self.private_replies(message)[0])
+        store = self.runtime.taste_store
+        for i in range(5):
+            store.add("good", [("A", f"good line {i}")], funny=9.0)
+            store.add("bad", [("A", f"bad line {i}")], funny=6.0)
+        again = self.command("!scout tune")
+        await self.bot.on_message(again)
+        self.assertIn("SCOUT_JUDGE_FUNNY_MIN=7.5", self.private_replies(again)[0])
+
+    async def test_scout_help_dms_the_owner_guide(self) -> None:
+        message = self.command("!scout help")
+        await self.bot.on_message(message)
+        self.assertEqual(self.private_replies(message), [HELP_OWNER])
+        message.channel.send.assert_not_awaited()
+
+    async def test_help_from_the_owner_anywhere_dms_the_owner_guide(self) -> None:
+        for channel_cls, channel_id in ((discord.TextChannel, CHAT), (discord.DMChannel, 5)):
+            message = self.command("!help", channel_cls=channel_cls, channel_id=channel_id)
+            await self.bot.on_message(message)
+            self.assertEqual(self.private_replies(message), [HELP_OWNER])
+            message.reply.assert_not_awaited()
+
+    async def test_help_from_others_only_answers_in_a_one_to_one_dm(self) -> None:
+        dm = self.command("!help", author=99, channel_cls=discord.DMChannel, channel_id=5)
+        await self.bot.on_message(dm)
+        self.assertEqual(dm.reply.await_args.args[0], HELP_USER)
+        public = self.command("!help", author=99)
+        await self.bot.on_message(public)
+        public.reply.assert_not_awaited()
+        public.author.send.assert_not_awaited()
+        public.channel.send.assert_not_awaited()
+
+    async def test_help_works_without_a_scout_runtime(self) -> None:
+        bot = self.make_bot(None)
+        self.addAsyncCleanup(bot.close)
+        message = self.command("!help", author=OWNER, channel_cls=discord.DMChannel, channel_id=5)
+        await bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], HELP_USER)  # no runtime, so nobody is "the owner"
+
+    async def test_help_is_silent_while_captcha_paused_and_ignores_bots(self) -> None:
+        bot_dm = self.command("!help", author=99, channel_cls=discord.DMChannel, channel_id=5)
+        bot_dm.author.bot = True
+        await self.bot.on_message(bot_dm)
+        bot_dm.reply.assert_not_awaited()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.bot.captcha_guard.trip("test")
+        dm = self.command("!help", author=99, channel_cls=discord.DMChannel, channel_id=5)
+        await self.bot.on_message(dm)
+        dm.reply.assert_not_awaited()
+        owner = self.command("!help")
+        await self.bot.on_message(owner)
+        owner.author.send.assert_not_awaited()
+
+    async def test_teaching_commands_work_when_scouting_is_off(self) -> None:
+        runtime = make_runtime(Path(self._tmp.name) / "offmode", mode="off", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
+        bot = self.make_bot(runtime)
+        self.addAsyncCleanup(bot.close)
+        message = self.command("!scout taste add keep it dry")
+        await bot.on_message(message)
+        self.assertEqual(runtime.taste_notes.text, "keep it dry")
+        on = self.command("!scout on")
+        await bot.on_message(on)
+        self.assertIn("SELFBOT_SCOUT_MODE", self.private_replies(on)[0])  # the scouting commands are still refused
+
+    async def test_teaching_without_stores_says_so(self) -> None:
+        self.runtime.taste_notes = None
+        self.runtime.taste_store = None
+        for text in ("!scout taste", "!scout taste add x here", "!scout examples", "!scout tune"):
+            message = self.command(text)
+            await self.bot.on_message(message)
+            self.assertIn("isn't set up", self.private_replies(message)[0])
+
+    async def test_help_and_teaching_messages_are_never_buffered_or_converted(self) -> None:
+        self.runtime.chats.enable(CHAT)
+        self.allowlist.add(OWNER)
+        for text in ("!help", "!scout taste add something good", "!scout tune"):
+            message = self.command(text, attachments=[attachment()], mentions=[self.me])
+            with patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK) as convert:
+                await self.bot.on_message(message)
+            convert.assert_not_awaited()
+        self.assertEqual(self.runtime.buffer.chats(), [])
 
 
 def review_item(*, id: int = 1, would_clip: bool = True, names=("Pranit",), lines=(("A", "the better one was me"),), funny: float = 8.7) -> ReviewItem:

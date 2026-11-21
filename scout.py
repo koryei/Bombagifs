@@ -447,18 +447,33 @@ def format_clip_notice(names: Sequence[str], deleted: bool, requested_by: str | 
 
 @dataclass(frozen=True)
 class ScoutCommand:
-    """A parsed owner command: ``!scout on|off [chat id]``, ``!scout status``, ``!scout list``."""
+    """A parsed owner command (``!scout on|off [chat id]``, ``status``, ``list``, ``taste``, ``examples``, ``tune``, ``help``)."""
 
-    action: Literal["on", "off", "status", "list"]
+    action: Literal["on", "off", "status", "list", "taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help"]
     chat_id: int | None
+    arg: str | None = None
 
 
 _COMMAND_RE = re.compile(r"^!scout\s+(on|off|status|list)(?:\s+(\d+))?$", re.IGNORECASE)
+_SIMPLE_RE = re.compile(r"^!scout\s+(taste|examples|tune|help)(?:\s+(clear))?$", re.IGNORECASE)
+_TASTE_ADD_RE = re.compile(r"^!scout\s+taste\s+add\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_SIMPLE_ACTIONS = {"taste": "taste", "examples": "examples", "tune": "tune", "help": "help"}
 
 
 def parse_scout_command(text: str) -> ScoutCommand | None:
     """Parse a ``!scout`` command; anything that is not exactly a command returns ``None``."""
-    match = _COMMAND_RE.match(text.strip())
+    text = text.strip()
+    added = _TASTE_ADD_RE.match(text)
+    if added is not None:
+        body = added.group(1).strip()
+        return ScoutCommand("taste_add", None, body) if body else None
+    simple = _SIMPLE_RE.match(text)
+    if simple is not None:
+        action, clear = simple.group(1).lower(), simple.group(2)
+        if clear:
+            return ScoutCommand(f"{action}_clear", None) if action in ("taste", "examples") else None  # type: ignore[arg-type]
+        return ScoutCommand(_SIMPLE_ACTIONS[action], None)  # type: ignore[arg-type]
+    match = _COMMAND_RE.match(text)
     if match is None:
         return None
     action = match.group(1).lower()
@@ -468,3 +483,41 @@ def parse_scout_command(text: str) -> ScoutCommand | None:
             return None
         return ScoutCommand(action, int(raw_id))  # type: ignore[arg-type]
     return ScoutCommand(action, None)  # type: ignore[arg-type]
+
+
+_HELP_RE = re.compile(r"^!help$", re.IGNORECASE)
+
+
+def parse_help_command(text: str) -> bool:
+    """True for exactly ``!help`` (any case, surrounding whitespace ignored)."""
+    return _HELP_RE.match(text.strip()) is not None
+
+
+HELP_OWNER = (
+    "**Bombagif: owner guide** (I answer commands by DM)\n"
+    "**Clip scout**\n"
+    "`!scout on` / `!scout off`: turn clipping on or off in the chat you type it in "
+    "(DM me `!scout on <chat id>` for another chat)\n"
+    "`!scout status` and `!scout list`: how the scout is doing, and where it is on\n"
+    "**Teaching it**\n"
+    "`!scout taste` shows my taste notes, `!scout taste add <text>` adds a line (e.g. \"we like deadpan one-liners, skip "
+    "anything about exams\"), `!scout taste clear` wipes them\n"
+    "`!scout examples` shows what you've rated, `!scout examples clear` forgets it\n"
+    "`!scout tune` compares your ratings with my scores and suggests thresholds\n"
+    "In dry-run I DM you candidates and near-misses: react 👍 clip-worthy, 👎 never, 🙈 skip. You can also 👍/👎 any "
+    "clip I posted. Your ratings become examples the judge sees.\n"
+    "**Clip that**\n"
+    "Reply to any text message and @ me: I clip it. Members can do this in chats where scouting is on; you can do it "
+    "anywhere. Opted-out people and sensitive text are always refused.\n"
+    "**Everyone**\n"
+    "`stop` in a DM opts out of clips and conversions, `start` brings you back. "
+    "`!help` in a DM with me shows the short guide. Settings live in `.env` (see `.env.example`)."
+)
+
+HELP_USER = (
+    "**Hi, I'm Bombagif.** I turn images and videos into GIF links.\n"
+    "• DM me `hi` first, then @ me on an image or video, or reply to one and @ me.\n"
+    "• Reply to a text message and @ me and I'll clip it as a quote card, in chats where clipping is on.\n"
+    "• In those chats I also clip messages that are funny out of context, and I say who's in them.\n"
+    "Send `stop` in a DM to opt out of clips and conversions, and `start` to come back."
+)
