@@ -57,6 +57,7 @@ from scout import (
     build_scout_runtime,
     format_clip_notice,
     parse_help_command,
+    parse_rating,
     parse_scout_command,
 )
 from scout_config import read_scout_config
@@ -398,7 +399,7 @@ class SelfBot(discord.Client):
                 *shown,
                 scores,
                 f"Judge: {item.reason}" if item.reason else "",
-                "React 👍 clip-worthy · 👎 never · 🙈 skip",
+                "Reply to this message with `good` (clip-worthy) · `bad` (never) · `skip`",
             ]
         )
         return "\n".join(line for line in text.split("\n") if line)[:1900]
@@ -417,38 +418,45 @@ class SelfBot(discord.Client):
         except discord.HTTPException:
             self.logger.warning("Could not DM a review candidate to the owner", exc_info=True)
             return None
-        for emoji in ("👍", "👎", "🙈"):
-            try:
-                await sent.add_reaction(emoji)
-            except discord.CaptchaRequired:
-                self._trip_captcha("adding review reactions")
-                break
-            except discord.HTTPException:
-                self.logger.warning("Could not add the review reactions", exc_info=True)
-                break
-        return int(sent.id)
+        return int(sent.id)  # no reactions are added: they are rate limited, so you rate by replying
 
     async def _handle_rating(self, payload: discord.RawReactionActionEvent) -> None:
-        """The owner reacting 👍/👎/🙈 on a review DM, or 👍/👎 on a clip we posted, teaches the judge."""
+        """The owner reacting 👍/👎/🙈 on a review DM or 👍/👎 on a clip we posted also teaches (reacting is free for them)."""
         runtime = self.scout
         if runtime is None or runtime.cfg.owner_id is None or payload.user_id != runtime.cfg.owner_id:
             return
         label = {"👍": "good", "👎": "bad", "🙈": "skip"}.get(str(payload.emoji)[:1])
-        if label is None:
-            return
+        if label is not None:
+            await self._apply_rating(runtime, payload.message_id, label)
+
+    async def _apply_rating(self, runtime: ScoutRuntime, message_id: int, label: str) -> bool:
+        """Rate a review DM or a posted clip by its message id. True when ``message_id`` was one of ours."""
         scout = runtime.scout
-        if scout is not None and payload.message_id in scout.reviews:
-            saved = await scout.rate(payload.message_id, label)
+        if scout is not None and message_id in scout.reviews:
+            saved = await scout.rate(message_id, label)
             self.stats.note("info", f"you rated a candidate {label}" + (" (saved)" if saved and label != "skip" else ""))
-            return
-        if label in ("good", "bad") and payload.message_id in self._clip_message_ids and runtime.taste_store is not None:
-            record = runtime.ledger.find_posted(payload.message_id)
-            if record is None or not record.text:
-                return
-            speakers = record.speakers or ()
-            lines = [(speakers[i] if i < len(speakers) else "A", text) for i, text in enumerate(record.text)]
-            if runtime.taste_store.add(label, lines, funny=record.funny, decide=record.decide, source="clip"):
-                self.stats.note("info", f"you rated a posted clip {label} (saved)")
+            return True
+        if message_id in self._clip_message_ids and runtime.taste_store is not None:
+            if label in ("good", "bad"):
+                record = runtime.ledger.find_posted(message_id)
+                if record is not None and record.text:
+                    speakers = record.speakers or ()
+                    lines = [(speakers[i] if i < len(speakers) else "A", text) for i, text in enumerate(record.text)]
+                    if runtime.taste_store.add(label, lines, funny=record.funny, decide=record.decide, source="clip"):
+                        self.stats.note("info", f"you rated a posted clip {label} (saved)")
+            return True
+        return False
+
+    async def _handle_rating_reply(self, message: discord.Message) -> bool:
+        """The owner replying ``good``/``bad``/``skip`` to a review DM or a posted clip. True when the reply was consumed."""
+        runtime = self.scout
+        if runtime is None or runtime.cfg.owner_id is None or message.author.id != runtime.cfg.owner_id:
+            return False
+        target = getattr(getattr(message, "reference", None), "message_id", None)
+        label = parse_rating(message.content or "")
+        if target is None or label is None:
+            return False
+        return await self._apply_rating(runtime, int(target), label)
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         self._count_reaction(payload, False)
@@ -638,7 +646,7 @@ class SelfBot(discord.Client):
             return tune_report(store.all(), runtime.cfg.judge_funny_min)
         counts = store.counts()  # examples
         if not any(counts.values()):
-            return "No rated examples yet. React 👍/👎 on review DMs or posted clips to teach me."
+            return "No rated examples yet. Reply `good` or `bad` to a review DM or a posted clip to teach me."
         found = store.examples()
         parts = [f"Rated examples: good {counts['good']}, bad {counts['bad']} (the judge sees the newest {store.per_label} of each)."]
         for label, title in (("good", "👍 newest"), ("bad", "👎 newest")):
@@ -743,7 +751,11 @@ class SelfBot(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
         try:
-            if await self._handle_help(message) or await self._handle_scout_command(message):
+            if (
+                await self._handle_rating_reply(message)
+                or await self._handle_help(message)
+                or await self._handle_scout_command(message)
+            ):
                 return
         except Exception:
             self.logger.exception("Unhandled !scout command error")

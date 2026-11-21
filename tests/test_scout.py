@@ -22,6 +22,7 @@ from scout import (
     build_scout_runtime,
     format_clip_notice,
     parse_help_command,
+    parse_rating,
     parse_scout_command,
 )
 from scout_buffer import ScoutBuffer, ScoutMessage, Version
@@ -870,11 +871,27 @@ class NoticeAndCommandTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(parse_help_command(text))
 
+    def test_parse_rating(self) -> None:
+        good = ("good", " Good ", "GOOD\n", "!good", "yes", "y", "👍", "👍🏽")
+        bad = ("bad", "!BAD", " no ", "n", "👎", "👎🏿")
+        skip = ("skip", "!skip", " SKIP ", "🙈")
+        for label, words in (("good", good), ("bad", bad), ("skip", skip)):
+            for word in words:
+                with self.subTest(word=word):
+                    self.assertEqual(parse_rating(word), label)
+
+    def test_parse_rating_ignores_everything_else(self) -> None:
+        for text in ("", "   ", "thanks", "good one", "not bad", "good bad", "goodbye", "!good!", "👍👍", "great", "stop", "lol 👍", "!!good"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_rating(text))
+
     def test_help_texts_cover_every_command_and_fit_in_one_message(self) -> None:
         for needle in ("!scout on", "!scout off", "!scout status", "!scout list", "!scout taste", "!scout taste add", "!scout taste clear",
-                       "!scout examples", "!scout examples clear", "!scout tune", "👍", "👎", "🙈", "`stop`", "`start`", "!help"):
+                       "!scout examples", "!scout examples clear", "!scout tune", "`good`", "`bad`", "`skip`", "`stop`", "`start`", "!help"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, HELP_OWNER)
+        self.assertIn("Reply", HELP_OWNER)
+        self.assertNotIn("react", HELP_OWNER.lower())  # the account never reacts; you rate by replying
         self.assertLessEqual(len(HELP_OWNER), 1900)
         for needle in ("`stop`", "`start`", "DM"):
             self.assertIn(needle, HELP_USER)

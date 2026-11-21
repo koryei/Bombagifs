@@ -1897,11 +1897,12 @@ class SelfBotReviewTests(_SelfBotCase):
         self.assertEqual(await self.bot._send_review(review_item()), 6001)
         self.bot.get_user.assert_called_once_with(OWNER)
         content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
-        for needle in ("would clip", "Pranit", "the better one was me", "8.7", "deadpan and standalone", "👍", "👎", "🙈"):
+        for needle in ("would clip", "Pranit", "the better one was me", "8.7", "deadpan and standalone", "Reply to this message", "`good`", "`bad`", "`skip`"):
             self.assertIn(needle, content)
+        self.assertNotIn("React", content)
         allowed = self.owner.send.await_args.kwargs["allowed_mentions"]
         self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
-        self.assertEqual([c.args[0] for c in self.sent.add_reaction.await_args_list], ["👍", "👎", "🙈"])
+        self.sent.add_reaction.assert_not_awaited()  # reactions are rate limited, so the account never adds any
 
     async def test_near_miss_dms_say_so(self) -> None:
         await self.bot._send_review(review_item(would_clip=False))
@@ -1929,10 +1930,88 @@ class SelfBotReviewTests(_SelfBotCase):
             self.assertIsNone(await self.bot._send_review(review_item()))
         self.assertEqual(self.bot.captcha_guard.reason, "sending a review")
 
-    async def test_failing_reactions_do_not_lose_the_review(self) -> None:
-        self.sent.add_reaction.side_effect = discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
-        with self.assertLogs("bombagif.selfbot", "WARNING"):
-            self.assertEqual(await self.bot._send_review(review_item()), 6001)
+    async def test_the_account_never_adds_reactions_anywhere(self) -> None:
+        await self.bot._send_review(review_item())
+        await self.bot._send_review(review_item(would_clip=False))
+        self.sent.add_reaction.assert_not_awaited()
+
+    def owner_reply(self, text: str, *, to: int = 6001, author: int = OWNER, channel_cls=None, **kwargs):
+        reference = SimpleNamespace(message_id=to, resolved=None, cached_message=None)
+        return make_message(author_id=author, channel_cls=channel_cls or discord.DMChannel, content=text, reference=reference, message_id=9100, **kwargs)
+
+    async def rate_by_reply(self, text: str, **kwargs):
+        self.scout.reviews[6001] = review_item()
+        message = self.owner_reply(text, **kwargs)
+        await self.bot.on_message(message)
+        return message
+
+    async def test_replying_good_or_bad_to_a_review_dm_rates_it(self) -> None:
+        message = await self.rate_by_reply("good")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 0})
+        self.assertEqual(self.runtime.taste_store.all()[0].lines, (("A", "the better one was me"),))
+        self.assertNotIn(6001, self.scout.reviews)
+        message.reply.assert_not_awaited()  # rating is silent: no "no media" reply, no confirmation noise
+        await self.rate_by_reply("bad")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 1})
+
+    async def test_reply_aliases_and_skip(self) -> None:
+        for text, expected in (("!good", {"good": 1, "bad": 0}), ("yes", {"good": 1, "bad": 0}), ("👍🏽", {"good": 1, "bad": 0}), ("no", {"good": 0, "bad": 1}), ("👎", {"good": 0, "bad": 1}), ("skip", {"good": 0, "bad": 0}), ("🙈", {"good": 0, "bad": 0})):
+            with self.subTest(text=text):
+                self.runtime.taste_store.clear()
+                await self.rate_by_reply(text)
+                self.assertEqual(self.runtime.taste_store.counts(), expected)
+                self.assertNotIn(6001, self.scout.reviews)
+
+    async def test_replies_from_other_people_or_with_other_text_do_not_rate(self) -> None:
+        await self.rate_by_reply("good", author=99)
+        await self.rate_by_reply("thanks, that one was great")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertIn(6001, self.scout.reviews)  # still waiting for the owner
+
+    async def test_replying_to_an_unknown_message_does_nothing(self) -> None:
+        self.scout.reviews[6001] = review_item()
+        await self.bot.on_message(self.owner_reply("good", to=424242))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertIn(6001, self.scout.reviews)
+
+    async def test_a_second_reply_to_the_same_review_does_nothing(self) -> None:
+        await self.rate_by_reply("good")
+        await self.bot.on_message(self.owner_reply("bad"))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 0})
+
+    async def test_rating_by_reply_shows_in_the_feed(self) -> None:
+        await self.rate_by_reply("bad")
+        self.assertTrue(any("bad" in e.text and "rated" in e.text for e in self.bot.stats.activity))
+
+    async def test_replying_good_or_bad_to_a_posted_clip_teaches_from_the_ledger(self) -> None:
+        self.runtime.ledger.append(ClipRecord(1.0, CHAT, (1, 2), (10, 20), "posted", 8.9, {"funny": 0.9}, False, "inception", posted_message_id=900, text=("setup", "punchline"), speakers=("A", "B")))
+        self.bot._clip_message_ids.add(900)
+        message = self.owner_reply("bad", to=900, channel_cls=discord.TextChannel, channel_id=CHAT)
+        await self.bot.on_message(message)
+        example = self.runtime.taste_store.all()[0]
+        self.assertEqual((example.label, example.source, example.funny, example.lines), ("bad", "clip", 8.9, (("A", "setup"), ("B", "punchline"))))
+        message.reply.assert_not_awaited()
+
+    async def test_clip_replies_ignore_skip_non_owners_non_clips_and_old_rows(self) -> None:
+        self.runtime.ledger.append(ClipRecord(1.0, CHAT, (1,), (10,), "posted", 8.0, {}, False, "manual", posted_message_id=900, text=("old row",)))
+        self.bot._clip_message_ids.add(900)
+        await self.bot.on_message(self.owner_reply("skip", to=900, channel_cls=discord.TextChannel, channel_id=CHAT))
+        await self.bot.on_message(self.owner_reply("good", to=900, author=99, channel_cls=discord.TextChannel, channel_id=CHAT))
+        await self.bot.on_message(self.owner_reply("good", to=555, channel_cls=discord.TextChannel, channel_id=CHAT))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        await self.bot.on_message(self.owner_reply("good", to=900, channel_cls=discord.TextChannel, channel_id=CHAT))
+        self.assertEqual(self.runtime.taste_store.all()[0].lines, (("A", "old row"),))  # a row without speakers uses one speaker
+
+    async def test_rating_replies_work_without_a_scout_task_or_judge(self) -> None:
+        self.scout.reviews[6001] = review_item()
+        self.runtime.scout = None  # e.g. a bot that has not finished starting
+        await self.bot.on_message(self.owner_reply("good"))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})  # nothing to rate against; no crash
+
+    async def test_owner_reactions_still_count_for_free(self) -> None:
+        self.scout.reviews[6001] = review_item()
+        await self.bot.on_raw_reaction_add(self.reaction("👍"))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 0})
 
     async def rate(self, emoji: str, *, user: int = OWNER) -> None:
         self.scout.reviews[6001] = review_item()

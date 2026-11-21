@@ -493,6 +493,21 @@ def parse_help_command(text: str) -> bool:
     return _HELP_RE.match(text.strip()) is not None
 
 
+_RATING_WORDS = {"good": "good", "yes": "good", "y": "good", "👍": "good", "bad": "bad", "no": "bad", "n": "bad", "👎": "bad", "skip": "skip", "🙈": "skip"}
+_EMOJI_MODIFIERS = re.compile("[\U0001F3FB-\U0001F3FF\uFE0F]")
+
+
+def parse_rating(text: str) -> Literal["good", "bad", "skip"] | None:
+    """Read an owner's reply as a rating: ``good``/``bad``/``skip`` (optionally ``!``-prefixed), ``yes``/``no``, or one 👍/👎/🙈.
+
+    Anything else (including a sentence that merely contains one of those words) is not a rating.
+    """
+    word = _EMOJI_MODIFIERS.sub("", text.strip().lower())
+    if word.startswith("!"):
+        word = word[1:]
+    return _RATING_WORDS.get(word)  # type: ignore[return-value]
+
+
 HELP_OWNER = (
     "**Bombagif: owner guide** (I answer commands by DM)\n"
     "**Clip scout**\n"
@@ -504,8 +519,8 @@ HELP_OWNER = (
     "anything about exams\"), `!scout taste clear` wipes them\n"
     "`!scout examples` shows what you've rated, `!scout examples clear` forgets it\n"
     "`!scout tune` compares your ratings with my scores and suggests thresholds\n"
-    "In dry-run I DM you candidates and near-misses: react 👍 clip-worthy, 👎 never, 🙈 skip. You can also 👍/👎 any "
-    "clip I posted. Your ratings become examples the judge sees.\n"
+    "In dry-run I DM you candidates and near-misses. Reply to that message with `good` (clip-worthy), `bad` (never) or "
+    "`skip`. You can also reply `good`/`bad` to any clip I posted. Your ratings become examples the judge sees.\n"
     "**Clip that**\n"
     "Reply to any text message and @ me: I clip it. Members can do this in chats where scouting is on; you can do it "
     "anywhere. Opted-out people and sensitive text are always refused.\n"
