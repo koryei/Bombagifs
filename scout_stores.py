@@ -102,6 +102,7 @@ class ClipRecord:
     reason: str = ""
     posted_message_id: int | None = None
     text: tuple[str, ...] | None = None
+    speakers: tuple[str, ...] | None = None  # anonymous speaker label per text line (A, B, C), for teaching examples
 
 
 class ClipLedger:
@@ -130,3 +131,39 @@ class ClipLedger:
             if isinstance(value, int) and not isinstance(value, bool):
                 found.add(value)
         return found
+
+
+    def find_posted(self, message_id: int, limit: int = 500) -> ClipRecord | None:
+        """The ledger record of the clip we posted as ``message_id`` (searching the last ``limit`` lines), if any."""
+        try:
+            with self.path.open(encoding="utf-8") as handle:
+                lines = list(deque((line for line in handle if line.strip()), maxlen=limit))
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict) or row.get("posted_message_id") != message_id:
+                continue
+            try:
+                text, speakers = row.get("text"), row.get("speakers")
+                return ClipRecord(
+                    at=float(row["at"]),
+                    chat_id=int(row["chat_id"]),
+                    message_ids=tuple(int(i) for i in row["message_ids"]),
+                    author_ids=tuple(int(i) for i in row["author_ids"]),
+                    mode=row["mode"],
+                    funny=float(row["funny"]),
+                    decide={str(k): float(v) for k, v in dict(row["decide"]).items()},
+                    deleted=bool(row["deleted"]),
+                    provider=str(row["provider"]),
+                    reason=str(row.get("reason", "")),
+                    posted_message_id=message_id,
+                    text=tuple(str(x) for x in text) if isinstance(text, list) else None,
+                    speakers=tuple(str(x) for x in speakers) if isinstance(speakers, list) else None,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return None

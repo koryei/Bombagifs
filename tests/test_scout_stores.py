@@ -124,6 +124,35 @@ class ClipLedgerTests(TempDirCase):
             handle.write("not json\n\n{\"posted_message_id\": \"7\"}\n")  # junk and a wrong type
         self.assertEqual(ledger.recent_posted_ids(), {100})
 
+    def test_find_posted_returns_the_record_with_text_and_speakers(self) -> None:
+        ledger = ClipLedger(self.dir / "clips.jsonl")
+        ledger.append(record(posted_message_id=100, text=("first line",), speakers=("A",)))
+        ledger.append(record(posted_message_id=101, text=("one", "two"), speakers=("A", "B"), funny=9.1))
+        found = ledger.find_posted(101)
+        self.assertEqual((found.posted_message_id, found.text, found.speakers, found.funny), (101, ("one", "two"), ("A", "B"), 9.1))
+        self.assertEqual(found.decide["funny"], 0.9)
+        self.assertEqual(ledger.find_posted(100).text, ("first line",))
+
+    def test_find_posted_handles_old_rows_missing_junk_and_unknown_ids(self) -> None:
+        path = self.dir / "clips.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write('{"at": 1, "chat_id": 1, "message_ids": [1], "author_ids": [2], "mode": "posted", "funny": 8.0, "decide": {}, "deleted": false, "provider": "x", "posted_message_id": 55, "text": ["old row"]}\n')
+            handle.write("not json\n\n")
+            handle.write('{"posted_message_id": 56}\n')
+        ledger = ClipLedger(path)
+        old = ledger.find_posted(55)
+        self.assertEqual((old.text, old.speakers), (("old row",), None))
+        self.assertIsNone(ledger.find_posted(56))  # incomplete row
+        self.assertIsNone(ledger.find_posted(999))
+        self.assertIsNone(ClipLedger(self.dir / "missing.jsonl").find_posted(1))
+
+    def test_find_posted_only_looks_at_recent_lines(self) -> None:
+        ledger = ClipLedger(self.dir / "clips.jsonl")
+        for i in range(30):
+            ledger.append(record(posted_message_id=1000 + i))
+        self.assertIsNotNone(ledger.find_posted(1000, limit=30))
+        self.assertIsNone(ledger.find_posted(1000, limit=10))
+
     def test_recent_posted_ids_of_a_missing_file_is_empty(self) -> None:
         self.assertEqual(ClipLedger(self.dir / "none.jsonl").recent_posted_ids(), set())
 

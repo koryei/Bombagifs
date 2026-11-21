@@ -11,13 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from bombagif_core import Settings, UserFacingError
-from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, ScoutRuntime, format_clip_notice
+from scout import ANNOUNCE_OFF, ANNOUNCE_ON, ClipPlan, ReviewItem, ScoutRuntime, format_clip_notice
 from scout_buffer import ScoutMessage, Version
 from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
 from scout_config import read_scout_config
 from scout_manual import REFUSAL_CANT, REFUSAL_NOT_ENABLED, REFUSAL_NOT_TEXT, REFUSAL_OPTED_OUT, REFUSAL_SLOW
-from scout_stores import ClipLedger, OptOutStore, ScoutChatStore
+from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
     NO_MEDIA_TEXT,
@@ -573,7 +573,12 @@ def make_runtime(root: Path, *, mode: str = "dry-run", enabled: tuple[int, ...] 
     buffer = ScoutBuffer(
         max_age_s=10**9, max_per_chat=100, is_opted_out=lambda user_id: user_id in optout, clock=lambda: NOW + 10
     )
-    return ScoutRuntime(cfg=cfg, buffer=buffer, chats=chats, optout=optout, ledger=ClipLedger(root / "clips.jsonl"))
+    from scout_taste import TasteNotes, TasteStore
+
+    return ScoutRuntime(
+        cfg=cfg, buffer=buffer, chats=chats, optout=optout, ledger=ClipLedger(root / "clips.jsonl"),
+        taste_notes=TasteNotes(root / "scout-taste.txt"), taste_store=TasteStore(root / "taste.jsonl", cfg.examples_per_label),
+    )
 
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
@@ -1616,6 +1621,165 @@ class SelfBotManualClipTests(_SelfBotCase):
         await self.bot.on_message(self.ping(self.target(message_id=750), author=OWNER, message_id=850))
         await self.bot.on_message(self.ping(self.target(message_id=751, author=20), author=99, message_id=851))
         self.assertEqual(taught, [("good", [750], "manual")])
+
+
+def review_item(*, id: int = 1, would_clip: bool = True, names=("Pranit",), lines=(("A", "the better one was me"),), funny: float = 8.7) -> ReviewItem:
+    return ReviewItem(id, CHAT, tuple(names), tuple(lines), funny, {"funny": 0.93, "standalone": 0.88, "sensitive": 0.02}, "deadpan and standalone", would_clip)
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotReviewTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        import aiohttp
+        from selfbot import SelfBot
+
+        self.root = Path(self._tmp.name)
+        self.runtime = make_runtime(self.root, mode="dry-run", SELFBOT_OWNER_ID=str(OWNER))
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.bot.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.bot.close)
+        self.bot._start_scout()
+        self.scout = self.runtime.scout
+        self.sent = SimpleNamespace(id=6001, add_reaction=AsyncMock())
+        self.owner = Mock()
+        self.owner.send = AsyncMock(return_value=self.sent)
+        self.bot.get_user = Mock(return_value=self.owner)  # type: ignore[method-assign]
+
+    def reaction(self, emoji: str, *, user: int = OWNER, message_id: int = 6001):
+        return SimpleNamespace(channel_id=5, message_id=message_id, user_id=user, emoji=emoji)
+
+    async def test_start_scout_wires_review_and_taste(self) -> None:
+        self.assertEqual(self.scout.on_review, self.bot._send_review)
+        self.assertIs(self.scout.taste, self.runtime.taste_store)
+
+    async def test_review_dm_shows_the_candidate_to_the_owner_only(self) -> None:
+        self.assertEqual(await self.bot._send_review(review_item()), 6001)
+        self.bot.get_user.assert_called_once_with(OWNER)
+        content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
+        for needle in ("would clip", "Pranit", "the better one was me", "8.7", "deadpan and standalone", "👍", "👎", "🙈"):
+            self.assertIn(needle, content)
+        allowed = self.owner.send.await_args.kwargs["allowed_mentions"]
+        self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
+        self.assertEqual([c.args[0] for c in self.sent.add_reaction.await_args_list], ["👍", "👎", "🙈"])
+
+    async def test_near_miss_dms_say_so(self) -> None:
+        await self.bot._send_review(review_item(would_clip=False))
+        content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
+        self.assertIn("near miss", content)
+        self.assertNotIn("would clip", content)
+
+    async def test_multi_speaker_reviews_label_each_line(self) -> None:
+        await self.bot._send_review(review_item(names=("A name", "B name"), lines=(("A", "setup"), ("B", "punch"))))
+        content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
+        self.assertIn("(A)", content)
+        self.assertIn("(B)", content)
+
+    async def test_no_owner_or_closed_dms_return_none(self) -> None:
+        self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "dry-run"})
+        self.assertIsNone(await self.bot._send_review(review_item()))
+        self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "dry-run", "SELFBOT_OWNER_ID": str(OWNER)})
+        self.owner.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages to this user")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            self.assertIsNone(await self.bot._send_review(review_item()))
+
+    async def test_a_captcha_while_sending_a_review_trips_the_guard(self) -> None:
+        self.owner.send.side_effect = make_captcha()
+        with self.assertLogs("bombagif.selfbot", "ERROR"):
+            self.assertIsNone(await self.bot._send_review(review_item()))
+        self.assertEqual(self.bot.captcha_guard.reason, "sending a review")
+
+    async def test_failing_reactions_do_not_lose_the_review(self) -> None:
+        self.sent.add_reaction.side_effect = discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            self.assertEqual(await self.bot._send_review(review_item()), 6001)
+
+    async def rate(self, emoji: str, *, user: int = OWNER) -> None:
+        self.scout.reviews[6001] = review_item()
+        await self.bot.on_raw_reaction_add(self.reaction(emoji, user=user))
+
+    async def test_owner_reactions_rate_the_candidate(self) -> None:
+        await self.rate("👍")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 0})
+        self.assertEqual(self.runtime.taste_store.all()[0].lines, (("A", "the better one was me"),))
+        self.assertNotIn(6001, self.scout.reviews)
+        await self.rate("👎")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 1})
+
+    async def test_skin_tone_thumbs_count(self) -> None:
+        await self.rate("👍🏽")
+        self.assertEqual(self.runtime.taste_store.counts()["good"], 1)
+
+    async def test_skip_drops_the_candidate_without_saving(self) -> None:
+        await self.rate("🙈")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertNotIn(6001, self.scout.reviews)
+
+    async def test_other_people_and_other_emoji_are_ignored(self) -> None:
+        await self.rate("👍", user=99)
+        await self.rate("❤️")
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertIn(6001, self.scout.reviews)  # still waiting for the owner
+
+    async def test_unknown_messages_are_ignored(self) -> None:
+        await self.bot.on_raw_reaction_add(self.reaction("👍", message_id=424242))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+
+    async def test_rating_shows_in_the_feed(self) -> None:
+        await self.rate("👍")
+        self.assertTrue(any("good" in e.text for e in self.bot.stats.activity))
+
+    async def test_reacting_to_a_posted_clip_teaches_from_the_ledger(self) -> None:
+        self.runtime.ledger.append(ClipRecord(1.0, CHAT, (1, 2), (10, 20), "posted", 8.9, {"funny": 0.9}, False, "inception", posted_message_id=900, text=("setup", "punchline"), speakers=("A", "B")))
+        self.bot._clip_message_ids.add(900)
+        await self.bot.on_raw_reaction_add(self.reaction("👎", message_id=900))
+        example = self.runtime.taste_store.all()[0]
+        self.assertEqual((example.label, example.source, example.funny), ("bad", "clip", 8.9))
+        self.assertEqual(example.lines, (("A", "setup"), ("B", "punchline")))
+
+    async def test_clip_reactions_without_speakers_use_one_speaker(self) -> None:
+        self.runtime.ledger.append(ClipRecord(1.0, CHAT, (1,), (10,), "posted", 8.0, {}, False, "manual", posted_message_id=901, text=("old style row",)))
+        self.bot._clip_message_ids.add(901)
+        await self.bot.on_raw_reaction_add(self.reaction("👍", message_id=901))
+        self.assertEqual(self.runtime.taste_store.all()[0].lines, (("A", "old style row"),))
+
+    async def test_clip_reactions_ignore_skip_non_owners_and_unknown_clips(self) -> None:
+        self.runtime.ledger.append(ClipRecord(1.0, CHAT, (1,), (10,), "posted", 8.0, {}, False, "x", posted_message_id=900, text=("a line",)))
+        self.bot._clip_message_ids.add(900)
+        await self.bot.on_raw_reaction_add(self.reaction("🙈", message_id=900))
+        await self.bot.on_raw_reaction_add(self.reaction("👍", user=99, message_id=900))
+        await self.bot.on_raw_reaction_add(self.reaction("👍", message_id=555))  # not one of our clips
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+
+    async def test_laugh_counting_still_works_alongside_rating(self) -> None:
+        self.runtime.chats.enable(CHAT)
+        await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="a funny line", message_id=1))
+        await self.bot.on_raw_reaction_add(SimpleNamespace(channel_id=CHAT, message_id=1, user_id=5, emoji="😂"))
+        self.assertEqual(self.runtime.buffer.get(CHAT, 1).laugh_reactions, 1)
+
+    async def test_teach_saves_labelled_examples_from_messages(self) -> None:
+        chosen = [smsg(1, "setup line", author=10), smsg(2, "the punchline", author=20), smsg(3, "tag on", author=10)]
+        self.bot._teach("good", chosen, "manual")
+        example = self.runtime.taste_store.all()[0]
+        self.assertEqual((example.label, example.source, example.funny), ("good", "manual", 0.0))
+        self.assertEqual(example.lines, (("A", "setup line"), ("B", "the punchline"), ("A", "tag on")))
+
+    async def test_teach_without_a_store_is_a_no_op(self) -> None:
+        self.runtime.taste_store = None
+        self.bot._teach("good", [smsg(1, "x line")], "manual")  # must not raise
+
+    async def test_the_judge_chain_reads_the_live_taste_notes(self) -> None:
+        self.runtime.taste_notes.add("we like deadpan")
+        self.assertEqual(self.runtime.judge.active.name, "heuristic")  # no keys in this test: the chain is the fallback
+        from selfbot import SelfBot
+
+        runtime = make_runtime(self.root / "keyed", mode="dry-run", INCEPTION_API_KEY="k")
+        runtime.taste_notes.add("we like deadpan")
+        bot = SelfBot(SETTINGS, self.allowlist, scout=runtime)
+        bot.http_session = self.bot.http_session
+        bot._start_scout()
+        self.addAsyncCleanup(bot.close)
+        self.assertEqual(runtime.judge.active.taste.notes(), "we like deadpan")
 
 
 if __name__ == "__main__":

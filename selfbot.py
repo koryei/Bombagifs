@@ -14,7 +14,9 @@ import io
 import logging
 import os
 import platform
+import re
 import signal
+import string
 import sys
 import time
 import uuid
@@ -47,6 +49,7 @@ from scout import (
     ANNOUNCE_OFF,
     ANNOUNCE_ON,
     ClipPlan,
+    ReviewItem,
     Scout,
     ScoutRuntime,
     build_scout_runtime,
@@ -57,6 +60,7 @@ from scout_config import read_scout_config
 from scout_judge import Verdict, build_judge_chain
 from scout_manual import ManualGate
 from scout_stores import ClipRecord
+from scout_taste import TasteBook
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
@@ -80,6 +84,14 @@ from selfbot_logic import (
     resolve_ui_mode,
     welcome_text,
 )
+
+
+_MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
+
+
+def _escape_markdown(text: str) -> str:
+    """Backslash-escape Discord markdown characters (so a quoted line shows exactly as written)."""
+    return _MARKDOWN_SPECIALS.sub(r"\\\1", text)
 
 
 class SelfBot(discord.Client):
@@ -277,7 +289,12 @@ class SelfBot(discord.Client):
         runtime = self._scouting()
         if runtime is None or self.http_session is None:
             return
-        runtime.judge = build_judge_chain(runtime.cfg, self.http_session)
+        taste = (
+            TasteBook(runtime.taste_notes, runtime.taste_store)
+            if runtime.taste_notes is not None and runtime.taste_store is not None
+            else None
+        )
+        runtime.judge = build_judge_chain(runtime.cfg, self.http_session, taste=taste)
         runtime.scout = Scout(
             runtime.cfg,
             runtime.buffer,
@@ -288,6 +305,8 @@ class SelfBot(discord.Client):
             stats=self.stats,
             paused=lambda: self.captcha_guard.blocked,
             blocklist=runtime.blocklist,
+            on_review=self._send_review,
+            taste=runtime.taste_store,
         )
         self._clip_message_ids |= runtime.ledger.recent_posted_ids()
         self._scout_task = asyncio.create_task(runtime.scout.run(), name="clip-scout")
@@ -334,6 +353,94 @@ class SelfBot(discord.Client):
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         self._count_reaction(payload, True)
+        try:
+            await self._handle_rating(payload)
+        except Exception:
+            self.logger.exception("Could not handle a rating reaction")
+
+    # clip scout: teaching (review DMs, ratings) ---------------------------------------------------------------
+
+    @staticmethod
+    def _labelled_lines(chosen: Sequence[ScoutMessage]) -> list[tuple[str, str]]:
+        """(speaker label, text) pairs with anonymous labels A, B, C by first appearance; non-text messages are skipped."""
+        labels: dict[int, str] = {}
+        lines: list[tuple[str, str]] = []
+        for message in chosen:
+            if not message.eligible or not message.original:
+                continue
+            label = labels.setdefault(message.author_id, string.ascii_uppercase[len(labels) % 26])
+            lines.append((label, message.original))
+        return lines
+
+    def _review_text(self, item: ReviewItem) -> str:
+        speakers = {speaker for speaker, _ in item.lines}
+        shown = [
+            f"> ({speaker}) {_escape_markdown(text)}" if len(speakers) > 1 else f"> {_escape_markdown(text)}"
+            for speaker, text in item.lines
+        ]
+        scores = f"funny {item.funny:.1f}"
+        parts = [f"{key} {item.decide[key]:.2f}" for key in ("funny", "standalone", "sensitive") if key in item.decide]
+        if parts:
+            scores += " · decide " + " / ".join(parts)
+        names = ", ".join(_escape_markdown(name) for name in item.names) or "someone"
+        text = "\n".join(
+            [
+                f"🔎 **Review candidate** ({'would clip' if item.would_clip else 'near miss'})",
+                f"From: {names}",
+                *shown,
+                scores,
+                f"Judge: {item.reason}" if item.reason else "",
+                "React 👍 clip-worthy · 👎 never · 🙈 skip",
+            ]
+        )
+        return "\n".join(line for line in text.split("\n") if line)[:1900]
+
+    async def _send_review(self, item: ReviewItem) -> int | None:
+        """DM a candidate to the owner for rating. Returns the DM's message id, or ``None`` if it could not be sent."""
+        runtime = self._scouting()
+        if runtime is None or runtime.cfg.owner_id is None:
+            return None
+        try:
+            owner = self.get_user(runtime.cfg.owner_id) or await self.fetch_user(runtime.cfg.owner_id)
+            sent = await owner.send(self._review_text(item), allowed_mentions=discord.AllowedMentions.none())
+        except discord.CaptchaRequired:
+            self._trip_captcha("sending a review")
+            return None
+        except discord.HTTPException:
+            self.logger.warning("Could not DM a review candidate to the owner", exc_info=True)
+            return None
+        for emoji in ("👍", "👎", "🙈"):
+            try:
+                await sent.add_reaction(emoji)
+            except discord.CaptchaRequired:
+                self._trip_captcha("adding review reactions")
+                break
+            except discord.HTTPException:
+                self.logger.warning("Could not add the review reactions", exc_info=True)
+                break
+        return int(sent.id)
+
+    async def _handle_rating(self, payload: discord.RawReactionActionEvent) -> None:
+        """The owner reacting 👍/👎/🙈 on a review DM, or 👍/👎 on a clip we posted, teaches the judge."""
+        runtime = self.scout
+        if runtime is None or runtime.cfg.owner_id is None or payload.user_id != runtime.cfg.owner_id:
+            return
+        label = {"👍": "good", "👎": "bad", "🙈": "skip"}.get(str(payload.emoji)[:1])
+        if label is None:
+            return
+        scout = runtime.scout
+        if scout is not None and payload.message_id in scout.reviews:
+            saved = await scout.rate(payload.message_id, label)
+            self.stats.note("info", f"you rated a candidate {label}" + (" (saved)" if saved and label != "skip" else ""))
+            return
+        if label in ("good", "bad") and payload.message_id in self._clip_message_ids and runtime.taste_store is not None:
+            record = runtime.ledger.find_posted(payload.message_id)
+            if record is None or not record.text:
+                return
+            speakers = record.speakers or ()
+            lines = [(speakers[i] if i < len(speakers) else "A", text) for i, text in enumerate(record.text)]
+            if runtime.taste_store.add(label, lines, funny=record.funny, decide=record.decide, source="clip"):
+                self.stats.note("info", f"you rated a posted clip {label} (saved)")
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         self._count_reaction(payload, False)
@@ -688,7 +795,14 @@ class SelfBot(discord.Client):
             await self._reply(message, format_results(results, collected.skipped))
 
     def _teach(self, label: str, chosen: Sequence[ScoutMessage], source: str) -> None:
-        """Save a ruling as a taste example (wired up with the review loop)."""
+        """Save a ruling as a taste example (anonymised; no scores for rulings that did not come from the judge)."""
+        runtime = self.scout
+        store = runtime.taste_store if runtime is not None else None
+        if store is None:
+            return
+        lines = self._labelled_lines(chosen)
+        if lines and store.add(label, lines, source=source):
+            self.stats.note("info", f"taught: saved a {label} example ({source})")
 
     def _manual_chosen(self, referenced: discord.Message, runtime: ScoutRuntime) -> list[ScoutMessage]:
         """The messages a "clip that" request covers: the replied-to message's buffered run, else just that message."""

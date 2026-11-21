@@ -534,6 +534,7 @@ class ModeAndLedgerTests(ScoutCase):
         rows = self.ledger_rows()
         self.assertEqual((rows[0]["mode"], rows[0]["posted_message_id"], rows[0]["text"]), ("posted", 9001, ["the posted line"]))
         self.assertEqual((rows[0]["chat_id"], rows[0]["message_ids"], rows[0]["author_ids"], rows[0]["deleted"]), (1, [1], [10], False))
+        self.assertEqual(rows[0]["speakers"], ["A"])  # anonymous labels, so a 👍/👎 on the clip can teach later
         self.assertEqual((self.stats.clips_posted, self.stats.deleted_rescued, self.stats.scout_rejected), (1, 0, 0))
         self.assertTrue(message.clipped)
         self.assertTrue(any(e.level == "ok" and "user10" in e.text for e in self.stats.activity))
@@ -877,6 +878,8 @@ class BuildRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.chats.path, self.dir / "scout-chats.json")
         self.assertEqual(runtime.ledger.path, self.dir / "clips.jsonl")
         self.assertEqual(runtime.emoji_cache, self.dir / "emoji-cache")
+        self.assertEqual(runtime.taste_notes.path, self.dir / "scout-taste.txt")
+        self.assertEqual((runtime.taste_store.path, runtime.taste_store.per_label), (self.dir / "taste.jsonl", 8))
         self.assertTrue(runtime.chats.enabled(5) and runtime.chats.enabled(6))
         self.assertIsNone(runtime.judge)  # built later, with the HTTP session
         self.assertIsNone(runtime.scout)

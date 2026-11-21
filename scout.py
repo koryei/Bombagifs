@@ -21,7 +21,7 @@ from scout_config import ScoutConfig
 from scout_judge import JudgeChain, JudgeWindow, Verdict, build_judge_window
 from scout_safety import check_window, load_blocklist
 from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
-from scout_taste import TasteStore
+from scout_taste import TasteNotes, TasteStore
 from selfbot_logic import BotStats
 
 logger = logging.getLogger("bombagif.scout")
@@ -73,6 +73,8 @@ class ScoutRuntime:
     ledger: ClipLedger
     blocklist: frozenset[str] = frozenset()
     emoji_cache: Path | None = None
+    taste_notes: TasteNotes | None = None
+    taste_store: TasteStore | None = None
     judge: JudgeChain | None = None
     scout: "Scout | None" = field(default=None, repr=False)
 
@@ -347,6 +349,7 @@ class Scout:
                 reason=verdict.reason,
                 posted_message_id=None if plan.to_owner else posted_id,
                 text=tuple(m.original for m in chosen),
+                speakers=tuple(line.speaker for line in window.lines[verdict.start : verdict.end + 1]),
             )
         )
 
@@ -404,6 +407,8 @@ def build_scout_runtime(cfg: ScoutConfig, data_dir: Path) -> ScoutRuntime | None
         ledger=ClipLedger(data_dir / "clips.jsonl"),
         blocklist=load_blocklist(data_dir / "scout-blocklist.txt"),
         emoji_cache=data_dir / "emoji-cache",
+        taste_notes=TasteNotes(data_dir / "scout-taste.txt"),
+        taste_store=TasteStore(data_dir / "taste.jsonl", per_label=cfg.examples_per_label),
     )
 
 
