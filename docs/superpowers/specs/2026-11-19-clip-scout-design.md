@@ -325,3 +325,53 @@ the laughter-word list; ledger rotation; how to pin the Twemoji version; welcome
   `NotoSans-BoldItalic`, an `emoji` package pin with a regex fallback when it is missing, `read_settings(env=...)`,
   `create_bot(...)`, and a `python clip_render.py demo` preview.
 - **Not yet verified live:** real Mercury 3 / Decide behaviour, threshold calibration, posting in a real chat.
+
+## v3.1 addendum: teaching it, "clip that", and `!help`
+
+Added after the first live look (a reply-ping on a plain text message answered "couldn't find a supported image or
+video"). Everything here keeps the v3 rules: the local safety filter, opt-outs, and anonymised provider payloads.
+
+### 1. "Clip that" (manual clips)
+- **Trigger:** an allowlisted member pings the account **as a reply** to a message, and the pinged/replied messages have
+  no media. If the replied-to message is plain text it is clipped instead of answering "no media". A bare ping with no
+  reply is unchanged.
+- **Where:** guild text channels and group DMs (never 1:1 DMs or NSFW). The owner may clip anywhere; everyone else only
+  in chats where the owner ran `!scout on`. Needs a scout runtime with mode `dry-run` or `on` (`SCOUT_MANUAL=off` turns it
+  off). It posts even in `dry-run`: a person asked, so it is not autonomous.
+- **What:** the replied-to message plus the rest of its run when buffered (same author, at most 8 messages / 600
+  characters); otherwise that single fetched message. The judge is **not** consulted.
+- **Gates:** author is not a bot or the account; author has not opted out; text-only (no attachments, stickers, links,
+  spoilers, commands); the local sensitive filter; not already clipped; non-owner limits of 3 clips per 10 minutes per
+  requester and one clip per author per 2 minutes. Refusals are one short reply to the requester and never quote the
+  message.
+- **Notice:** ``🎬 Clipped **A** at **B**'s request — DM me `stop` to opt out of clips.`` The ledger records
+  `provider="manual"`. A manual clip requested by the **owner** is also saved as a "good" example (see 3).
+
+### 2. Taste notes
+`data/scout-taste.txt`: plain-English guidance (at most 1,500 characters) such as "we like deadpan one-liners; skip bot
+spam and anything about exams". It is operator text, so it goes into the Mercury 3 system prompt and the Decide question
+instructions. The owner edits it with `!scout taste`, `!scout taste add <text>`, `!scout taste clear`.
+
+### 3. Teach by example
+- **Review DMs:** with `SCOUT_REVIEW=dry-run` (default; `always` also in live mode, `off` disables) the account DMs the
+  owner each would-clip candidate and a rate-limited sample of near-misses (Decide funny >= 0.6 or final funny >= 6),
+  at most `SCOUT_REVIEW_PER_HOUR` (6). The DM shows the text, who said it, the scores and the judge's reason. The owner
+  reacts 👍 (clip-worthy), 👎 (never) or 🙈 (skip). The owner can also react 👍/👎 to a posted clip.
+- **Storage:** `data/taste.jsonl` (mode 600): only lines the owner rated, with anonymous speaker labels (no names or ids),
+  the label, scores and source (`review`, `clip`, `manual`).
+- **Use:** the latest `SCOUT_EXAMPLES` (8) good and 8 bad examples go to Mercury 3 as data inside the user JSON
+  (never in the system prompt), with the rule that they are the operator's past rulings to calibrate against.
+- **Commands:** `!scout examples` (counts and the latest few), `!scout examples clear`, `!scout tune` (compares the
+  owner's 👍/👎 with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN`; needs at least 5 of each).
+
+### 4. `!help`
+`!help` (or `!scout help`): the owner gets the full command list by DM; anyone else in a 1:1 DM gets the short user help
+(what the account does, how to ping it, `stop`/`start`); `!help` from non-owners in public chats is ignored.
+
+### New settings
+`SCOUT_MANUAL=on|off` (on), `SCOUT_REVIEW=off|dry-run|always` (dry-run), `SCOUT_REVIEW_PER_HOUR` (6), `SCOUT_EXAMPLES` (8),
+`SCOUT_MANUAL_LIMIT_PER_10_MIN` (3), `SCOUT_MANUAL_AUTHOR_COOLDOWN_SECONDS` (120).
+
+### Privacy notes for v3.1
+Examples are real chat lines sent to the provider on every judging call (anonymised, few, only lines the owner rated);
+review DMs show the owner real names and text; both are local to the owner's machine and DMs. Say so in the chat.
