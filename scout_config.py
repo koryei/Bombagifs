@@ -13,6 +13,7 @@ JudgeChoice = Literal["auto", "inception", "openai", "heuristic"]
 Screen = Literal["all", "signals"]
 DeletedPolicy = Literal["on", "owner", "off"]
 Theme = Literal["onyx", "dark"]
+ReviewMode = Literal["off", "dry-run", "always"]
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -46,6 +47,12 @@ class ScoutConfig:
     tick_s: int = 5
     max_calls_per_day: int = 2000
     theme: Theme = "onyx"
+    manual: bool = True
+    review: ReviewMode = "dry-run"
+    review_per_hour: int = 6
+    examples_per_label: int = 8
+    manual_limit_per_10_min: int = 3
+    manual_author_cooldown_s: int = 120
 
 
 def _text(env: Mapping[str, str], name: str) -> str:
@@ -151,6 +158,12 @@ def read_scout_config(env: Mapping[str, str]) -> ScoutConfig:
         tick_s=_positive_int(env, "SCOUT_TICK_SECONDS", 5),
         max_calls_per_day=_positive_int(env, "SCOUT_MAX_CALLS_PER_DAY", 2000),
         theme=_choice(env, "CLIP_THEME", ("onyx", "dark"), "onyx"),  # type: ignore[arg-type]
+        manual=_choice(env, "SCOUT_MANUAL", ("on", "off"), "on") == "on",
+        review=_choice(env, "SCOUT_REVIEW", ("off", "dry-run", "always"), "dry-run"),  # type: ignore[arg-type]
+        review_per_hour=_positive_int(env, "SCOUT_REVIEW_PER_HOUR", 6),
+        examples_per_label=_positive_int(env, "SCOUT_EXAMPLES", 8),
+        manual_limit_per_10_min=_positive_int(env, "SCOUT_MANUAL_LIMIT_PER_10_MIN", 3),
+        manual_author_cooldown_s=_positive_int(env, "SCOUT_MANUAL_AUTHOR_COOLDOWN_SECONDS", 120),
     )
     if cfg.judge == "openai":
         for name, value in (
