@@ -148,7 +148,7 @@ def _looks_like_clip(tokens: list[str]) -> bool:
     """Close enough to a request to be worth an AI check: the verb (or a typo of it), and a short message."""
     if any(word in _CLIP_VERBS or word in _CLIPPED for word in tokens):
         return True
-    has_object = any(word in _OBJECT for word in tokens)
+    has_object = any(word in _OBJECT or word == "last" for word in tokens)
     close = any(len(word) >= 3 and (edit_distance(word, "clip") <= 1 or edit_distance(word, "clipped") <= 1) for word in tokens)
     return close and has_object
 

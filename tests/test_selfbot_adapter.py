@@ -2101,5 +2101,321 @@ class SelfBotReviewTests(_SelfBotCase):
         self.assertEqual(runtime.judge.active.taste.notes(), "we like deadpan")
 
 
+class FakeIntent:
+    """Stands in for scout_intent.IntentClassifier."""
+
+    def __init__(self, intent=None) -> None:
+        self.intent = intent
+        self.calls: list[tuple[str, bool]] = []
+
+    async def classify(self, text: str, *, is_reply: bool, guess: object):
+        self.calls.append((text, is_reply))
+        return self.intent
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotTriggerTests(_SelfBotCase):
+    """Spoken triggers: "clip that" / "clip last 3" / "gif that" and their typos, with no ping."""
+
+    TEXT = "If I ever inherit a successful billboard business, I won't tell anybody, but there will be signs."
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        import aiohttp
+        from scout_intent import Intent
+
+        self.Intent = Intent
+        self.root = Path(self._tmp.name)
+        self.runtime = make_runtime(self.root, mode="on", SELFBOT_OWNER_ID=str(OWNER))
+        self.bot = self.make_bot(self.runtime)
+        self.allowlist.add(99)
+        self.partial = Mock()
+        self.partial.reply = AsyncMock(return_value=SimpleNamespace(id=900))
+        self.channel = Mock()
+        self.channel.get_partial_message = Mock(return_value=self.partial)
+        self.channel.send = AsyncMock(return_value=SimpleNamespace(id=901))
+        self.bot.get_channel = Mock(return_value=self.channel)  # type: ignore[method-assign]
+        self.render = patch("selfbot.render_clip", return_value=b"\x89PNG fake").start()
+        self.addCleanup(patch.stopall)
+        patch.object(self.bot, "_fetch_asset", AsyncMock(return_value=None)).start()
+        self.convert = patch("selfbot.convert_and_upload", new_callable=AsyncMock, return_value=LINK).start()
+        self.intent = FakeIntent()
+        self.bot.intent = self.intent
+
+    def make_bot(self, runtime):
+        import aiohttp
+        from selfbot import SelfBot
+
+        bot = SelfBot(SETTINGS, self.allowlist, scout=runtime)
+        bot.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(bot.close)
+        return bot
+
+    def target(self, text: str | None = None, *, author: int = 10, message_id: int = 700, **kwargs):
+        return make_message(
+            author_id=author, channel_cls=discord.TextChannel, content=self.TEXT if text is None else text,
+            message_id=message_id, channel_id=CHAT, **kwargs,
+        )
+
+    def say(self, text: str, *, author: int = 99, message_id: int = 800, to=None, chat: int = CHAT, channel_cls=None, **kwargs):
+        reference = SimpleNamespace(message_id=to.id, resolved=to, cached_message=None) if to is not None else None
+        return make_message(
+            author_id=author, channel_cls=channel_cls or discord.TextChannel, content=text, reference=reference,
+            channel_id=chat, message_id=message_id, created=NOW + message_id, **kwargs,
+        )
+
+    def card_texts(self) -> list[str]:
+        return [m.text for m in self.render.call_args.args[0].messages]
+
+    def buffer(self, *messages: ScoutMessage) -> None:
+        for message in messages:
+            self.runtime.buffer.add(message)
+
+    async def assert_nothing_happened(self, request) -> None:
+        self.partial.reply.assert_not_awaited()
+        self.channel.send.assert_not_awaited()
+        request.reply.assert_not_awaited()
+        self.convert.assert_not_awaited()
+        self.render.assert_not_called()
+
+    # replies ---------------------------------------------------------------------------------------------------
+
+    async def test_replying_clip_that_clips_the_message_without_a_ping(self) -> None:
+        request = self.say("clip that", to=self.target(author_extra={"display_name": "Koryei"}), author_extra={"display_name": "Pranit"})
+        await self.bot.on_message(request)
+        self.partial.reply.assert_awaited_once()
+        self.assertEqual(self.partial.reply.await_args.kwargs["content"], "🎬 Clipped **Koryei** at **Pranit**'s request — DM me `stop` to opt out of clips.")
+        self.assertEqual(self.card_texts(), [self.TEXT])
+        request.reply.assert_not_awaited()
+        self.assertEqual(self.bot.stats.clips_posted, 1)
+        self.assertEqual(self.intent.calls, [])  # a known phrase never costs an AI call
+
+    async def test_the_request_message_is_not_buffered_as_chat(self) -> None:
+        await self.bot.on_message(self.say("clip that lmao", to=self.target()))
+        self.assertIsNone(self.runtime.buffer.get(CHAT, 800))
+
+    async def test_a_reply_uses_the_buffered_run_of_the_target(self) -> None:
+        self.buffer(smsg(700, "first line of the story"), smsg(701, "second line of the story"))
+        await self.bot.on_message(self.say("clip that", to=self.target("first line of the story")))
+        self.assertEqual(self.card_texts(), ["first line of the story", "second line of the story"])
+
+    async def test_filler_laughter_and_emoji_around_the_phrase_are_fine(self) -> None:
+        for i, text in enumerate(("bro clip that LMFAOOO 😭", "yo can someone clip this fr", "CLIP THAT")):
+            request = self.say(text, to=self.target(f"unique line number {i} for the card", author=20 + i, message_id=710 + i), message_id=810 + i)
+            await self.bot.on_message(request)
+        self.assertEqual(self.partial.reply.await_count, 3)
+
+    # no reply: the latest message -----------------------------------------------------------------------------------
+
+    async def test_without_a_reply_the_latest_message_is_clipped(self) -> None:
+        self.buffer(smsg(700, "an earlier message", author=10), smsg(701, self.TEXT, author=20))
+        request = self.say("clip that")
+        await self.bot.on_message(request)
+        self.assertEqual(self.card_texts(), [self.TEXT])
+        self.channel.get_partial_message.assert_called_with(701)
+        request.reply.assert_not_awaited()
+
+    async def test_without_a_reply_the_latest_run_of_one_person_is_clipped(self) -> None:
+        self.buffer(smsg(700, "setup of the joke", author=10), smsg(701, "and the punchline", author=10))
+        await self.bot.on_message(self.say("clip that"))
+        self.assertEqual(self.card_texts(), ["setup of the joke", "and the punchline"])
+
+    async def test_clip_last_n_takes_the_last_messages_across_people(self) -> None:
+        self.buffer(smsg(699, "too early to count", author=10), smsg(700, "first thing said", author=10), smsg(701, "a reply to it", author=20), smsg(702, "and the capper", author=30))
+        await self.bot.on_message(self.say("clip last 3"))
+        self.assertEqual(self.card_texts(), ["first thing said", "a reply to it", "and the capper"])
+
+    async def test_a_stale_or_missing_message_is_not_clipped(self) -> None:
+        request = self.say("clip that")
+        await self.bot.on_message(request)  # nothing buffered
+        await self.assert_nothing_happened(request)
+        self.buffer(smsg(600, "said a long while ago"))  # 200 seconds before the request, the limit is 180
+        again = self.say("clip that", message_id=801)
+        await self.bot.on_message(again)
+        await self.assert_nothing_happened(again)
+
+    async def test_a_photo_in_between_is_not_reached_past(self) -> None:
+        from dataclasses import replace
+
+        self.buffer(smsg(700, "a text message before the photo"), replace(smsg(701, ""), eligible=False))
+        request = self.say("clip that")
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+
+    # typos: the AI decides -----------------------------------------------------------------------------------------
+
+    async def test_a_typo_is_confirmed_by_the_ai(self) -> None:
+        self.intent.intent = self.Intent("clip", 1)
+        request = self.say("clkip that LMFAII", to=self.target())
+        await self.bot.on_message(request)
+        self.assertEqual(self.intent.calls, [("clkip that LMFAII", True)])
+        self.assertEqual(self.card_texts(), [self.TEXT])
+        request.reply.assert_not_awaited()
+
+    async def test_the_ai_can_ask_for_more_than_one_message(self) -> None:
+        self.intent.intent = self.Intent("clip", 2)
+        self.buffer(smsg(700, "something was said here", author=10), smsg(701, "and answered right after", author=20))
+        await self.bot.on_message(self.say("clkip last 2"))
+        self.assertEqual(self.card_texts(), ["something was said here", "and answered right after"])
+
+    async def test_when_the_ai_says_no_it_is_just_chat(self) -> None:
+        self.intent.intent = self.Intent("none", 1)
+        request = self.say("clip that video", to=self.target())
+        await self.bot.on_message(request)
+        self.assertEqual(len(self.intent.calls), 1)
+        await self.assert_nothing_happened(request)
+        self.assertIsNotNone(self.runtime.buffer.get(CHAT, 800))  # and it is buffered like any message
+
+    async def test_without_an_ai_a_typo_is_ignored(self) -> None:
+        self.bot.intent = None
+        request = self.say("clkip that", to=self.target())
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+
+    async def test_the_ai_is_never_asked_about_ordinary_chat(self) -> None:
+        for text in ("lol that was so funny", "i am heading out", "what are we doing tomorrow"):
+            await self.bot.on_message(self.say(text, message_id=802))
+        self.assertEqual(self.intent.calls, [])
+
+    async def test_phrases_mode_never_calls_the_ai_but_still_hears_known_phrases(self) -> None:
+        bot = self.make_bot(make_runtime(self.root / "ph", mode="on", SCOUT_TRIGGERS="phrases"))
+        self.wire(bot)
+        bot.intent = self.intent
+        self.intent.intent = self.Intent("clip", 1)
+        await bot.on_message(self.say("clkip that", to=self.target()))
+        self.partial.reply.assert_not_awaited()
+        await bot.on_message(self.say("clip that", to=self.target(), message_id=801))
+        self.partial.reply.assert_awaited_once()
+        self.assertEqual(self.intent.calls, [])
+
+    def wire(self, bot) -> None:
+        bot.get_channel = Mock(return_value=self.channel)  # type: ignore[method-assign]
+        patch.object(bot, "_fetch_asset", AsyncMock(return_value=None)).start()
+
+    # who and where ---------------------------------------------------------------------------------------------------
+
+    async def test_strangers_are_ignored_unless_anyone_is_allowed(self) -> None:
+        request = self.say("clip that", author=55, to=self.target())
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+        bot = self.make_bot(make_runtime(self.root / "any", mode="on", SCOUT_TRIGGER_ANYONE="on"))
+        self.wire(bot)
+        await bot.on_message(self.say("clip that", author=55, to=self.target(message_id=710), message_id=810))
+        self.partial.reply.assert_awaited_once()
+
+    async def test_chats_without_scouting_are_not_listened_to(self) -> None:
+        self.runtime.chats.disable(CHAT)
+        self.allowlist.add(OWNER)
+        for author in (99, OWNER):
+            request = self.say("clip that", author=author, to=self.target())
+            await self.bot.on_message(request)
+            await self.assert_nothing_happened(request)
+
+    async def test_the_triggers_setting_off_turns_it_all_off(self) -> None:
+        bot = self.make_bot(make_runtime(self.root / "off", mode="on", SCOUT_TRIGGERS="off"))
+        self.wire(bot)
+        request = self.say("clip that", to=self.target())
+        await bot.on_message(request)
+        await self.assert_nothing_happened(request)
+
+    async def test_manual_off_or_scouting_off_hears_nothing(self) -> None:
+        for name, runtime in (("man", make_runtime(self.root / "man", mode="on", SCOUT_MANUAL="off")), ("off", make_runtime(self.root / "off2", mode="off"))):
+            bot = self.make_bot(runtime)
+            self.wire(bot)
+            request = self.say("clip that", to=self.target())
+            await bot.on_message(request)
+            await self.assert_nothing_happened(request)
+
+    async def test_dms_are_not_listened_to(self) -> None:
+        request = self.say("clip that", to=self.target(), channel_cls=discord.DMChannel)
+        await self.bot.on_message(request)
+        self.partial.reply.assert_not_awaited()
+        self.render.assert_not_called()
+
+    async def test_bots_and_the_account_itself_cannot_trigger(self) -> None:
+        bot_author = self.say("clip that", to=self.target(), author_extra={"bot": True})
+        own = self.say("clip that", author=SELF_ID, to=self.target(message_id=710), message_id=801)
+        for request in (bot_author, own):
+            await self.bot.on_message(request)
+        self.partial.reply.assert_not_awaited()
+        self.render.assert_not_called()
+
+    async def test_a_ping_still_goes_through_the_ping_path_once(self) -> None:
+        request = self.say("clip that", to=self.target(), mentions=[self.me])
+        await self.bot.on_message(request)
+        self.partial.reply.assert_awaited_once()
+        self.assertEqual(self.bot.stats.clips_posted, 1)
+
+    async def test_a_message_aimed_at_someone_else_is_not_ours(self) -> None:
+        request = self.say("<@123456789012345678> clip that", to=self.target())
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+
+    async def test_the_captcha_pause_stops_triggers(self) -> None:
+        self.bot.captcha_guard.trip("test")
+        request = self.say("clip that", to=self.target())
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+
+    # refusals are silent -----------------------------------------------------------------------------------------------
+
+    async def test_refusals_are_silent_but_show_in_the_feed(self) -> None:
+        self.runtime.optout.add(10)
+        request = self.say("clip that", to=self.target())
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+        self.assertTrue(any("ignored" in e.text for e in self.bot.stats.activity))
+
+    async def test_sensitive_text_is_silently_refused(self) -> None:
+        request = self.say("clip that", to=self.target("call me on 415-555-0132 right now"))
+        await self.bot.on_message(request)
+        await self.assert_nothing_happened(request)
+
+    async def test_the_member_limit_is_silent_too(self) -> None:
+        for i in range(3):
+            await self.bot.on_message(self.say("clip that", to=self.target(f"distinct clip number {i} here", author=20 + i, message_id=710 + i), message_id=810 + i))
+        self.assertEqual(self.partial.reply.await_count, 3)
+        fourth = self.say("clip that", to=self.target("a fourth distinct message", author=30, message_id=720), message_id=820)
+        await self.bot.on_message(fourth)
+        self.assertEqual(self.partial.reply.await_count, 3)
+        fourth.reply.assert_not_awaited()
+
+    async def test_a_message_cannot_be_clipped_twice(self) -> None:
+        for message_id in (800, 801):
+            await self.bot.on_message(self.say("clip that", to=self.target(), message_id=message_id))
+        self.assertEqual(self.partial.reply.await_count, 1)
+
+    # gif that ------------------------------------------------------------------------------------------------------------
+
+    async def test_gif_that_converts_the_replied_to_media(self) -> None:
+        request = self.say("gif that", to=self.target("look", attachments=[attachment()]))
+        await self.bot.on_message(request)
+        self.convert.assert_awaited_once()
+        self.assertIn(LINK, request.reply.await_args.args[0])
+        self.render.assert_not_called()
+
+    async def test_gif_that_without_media_or_a_reply_is_silent_and_never_becomes_a_clip(self) -> None:
+        no_media = self.say("gif that", to=self.target("just words in this one"))
+        await self.bot.on_message(no_media)
+        await self.assert_nothing_happened(no_media)
+        no_reply = self.say("gif that", message_id=801)
+        await self.bot.on_message(no_reply)
+        await self.assert_nothing_happened(no_reply)
+
+    async def test_gif_needs_a_registered_member_even_when_anyone_may_clip(self) -> None:
+        bot = self.make_bot(make_runtime(self.root / "any2", mode="on", SCOUT_TRIGGER_ANYONE="on"))
+        self.wire(bot)
+        request = self.say("gif that", author=55, to=self.target("look", attachments=[attachment()]))
+        await bot.on_message(request)
+        self.convert.assert_not_awaited()
+        request.reply.assert_not_awaited()
+
+    async def test_the_ai_can_turn_an_unsure_message_into_a_gif_request(self) -> None:
+        self.intent.intent = self.Intent("gif", 1)
+        request = self.say("clkip that", to=self.target("look", attachments=[attachment()]))
+        await self.bot.on_message(request)
+        self.convert.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

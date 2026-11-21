@@ -61,11 +61,13 @@ from scout import (
     parse_scout_command,
 )
 from scout_config import read_scout_config
-from scout_judge import Verdict, build_judge_chain
+from scout_intent import IntentClassifier, build_intent_classifier
+from scout_judge import MAX_CLIP_MESSAGES, Verdict, build_judge_chain
 from scout_manual import ManualGate
 from scout_stores import ClipRecord
 from scout_taste import NOTES_MAX_CHARS, TasteBook, tune_report
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
+from scout_trigger import Trigger, parse_trigger, pick_targets
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
     NO_MEDIA_TEXT,
@@ -121,6 +123,7 @@ class SelfBot(discord.Client):
         self.scout = scout  # None unless the clip scout is configured
         self._scout_task: asyncio.Task[None] | None = None
         self._manual_gate = ManualGate(scout.cfg) if scout is not None else None
+        self.intent: IntentClassifier | None = None  # confirms typo'd "clip that" requests (set when the scout starts)
         if scout is not None and scout.cfg.owner_id is not None:
             self.allowlist.add(scout.cfg.owner_id)  # the operator never has to DM their own account first
         self._help_user_cooldown = Cooldown(3600.0)  # a stranger gets the help text at most once an hour...
@@ -304,6 +307,7 @@ class SelfBot(discord.Client):
             else None
         )
         runtime.judge = build_judge_chain(runtime.cfg, self.http_session, taste=taste)
+        self.intent = build_intent_classifier(runtime.cfg, self.http_session)
         runtime.scout = Scout(
             runtime.cfg,
             runtime.buffer,
@@ -748,6 +752,76 @@ class SelfBot(discord.Client):
             f"Clips posted: {self.stats.clips_posted}, dry-run hits: {self.stats.dry_run_hits}."
         )
 
+    # clip scout: spoken triggers ("clip that", "gif that"), no ping needed -------------------------------------------------
+
+    async def _handle_trigger(self, message: discord.Message) -> bool:
+        """Hear "clip that" / "clip last 3" / "gif that" (and typos) in a chat the owner turned scouting on in.
+
+        Known phrases are matched locally; typo'd or oddly worded ones are confirmed by the AI check. Returns True when
+        the message was a request (it is then not treated as chat), False for everything else.
+        """
+        runtime = self._scouting()
+        if runtime is None or self._manual_gate is None or not runtime.cfg.manual or runtime.cfg.triggers == "off":
+            return False
+        me = self.user
+        author = message.author
+        if author.bot or (me is not None and author.id == me.id) or message.is_system():
+            return False
+        channel = message.channel
+        if not chat_is_scoutable(channel) or not runtime.chats.enabled(channel.id) or self._incoming(message).mentions_me:
+            return False  # a ping takes the ping path
+        member = runtime.cfg.owner_id == author.id or author.id in self.allowlist
+        if not (member or runtime.cfg.trigger_anyone):
+            return False
+        is_reply = getattr(message.reference, "message_id", None) is not None
+        text = message.content or ""
+        trigger = parse_trigger(text, is_reply=is_reply)
+        if trigger is None or (trigger.kind == "gif" and not member):
+            return False
+        if not trigger.sure:
+            if runtime.cfg.triggers != "ai" or self.intent is None:
+                return False
+            intent = await self.intent.classify(text, is_reply=is_reply, guess=trigger)
+            if intent is None or intent.kind == "none" or (intent.kind == "gif" and not member):
+                return False
+            trigger = Trigger(intent.kind, intent.count)
+        if self.captcha_guard.blocked:
+            return True
+        if not self.rate_limiter.allow(author.id):
+            self.stats.rate_limited += 1
+            return True
+        if trigger.kind == "gif":
+            if is_reply:
+                await self._convert_and_reply(message, gif_only=True)
+            return True
+        await self._clip_on_request(message, trigger, runtime, is_reply)
+        return True
+
+    async def _clip_on_request(self, message: discord.Message, trigger: Trigger, runtime: ScoutRuntime, is_reply: bool) -> None:
+        """Pick what a spoken "clip that" points at (the replied-to message, else the latest chat) and clip it silently."""
+        channel = message.channel
+        if is_reply:
+            referenced = await self._resolve_reference(message)
+            if referenced is None:
+                return
+            await self._manual_clip(
+                message, self._manual_chosen(referenced, runtime), target_is_bot=bool(referenced.author.bot), silent=True
+            )
+            return
+        recent = runtime.buffer.recent(channel.id, message.id, MAX_CLIP_MESSAGES)
+        if not recent:
+            return
+        age = message.created_at.timestamp() - recent[-1].created_at
+        if age > runtime.cfg.trigger_max_age_s:
+            self.stats.note("info", f"{self._who(message.author)}: clip request ignored (nothing recent to clip)")
+            return
+        if trigger.count > 1:
+            chosen = pick_targets(recent, trigger.count)
+        else:
+            newest = recent[-1]
+            chosen = next((run for run in runtime.buffer.runs(channel.id) if any(m.id == newest.id for m in run)), [newest])
+        await self._manual_clip(message, list(chosen), target_is_bot=False, silent=True)
+
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
         try:
@@ -760,6 +834,14 @@ class SelfBot(discord.Client):
         except Exception:
             self.logger.exception("Unhandled owner command error")
             return
+        try:
+            if await self._handle_trigger(message):
+                return
+        except discord.CaptchaRequired:
+            self._trip_captcha("handling a clip request")
+            return
+        except Exception:
+            self.logger.exception("Unhandled clip trigger error", extra={"user_id": message.author.id})
         try:
             self._buffer_message(message)
         except Exception:
@@ -860,8 +942,8 @@ class SelfBot(discord.Client):
             self.logger.exception("Unexpected self-bot processing error", extra=context)
             return source.filename, "Could not process this file.", False
 
-    async def _convert_and_reply(self, message: discord.Message) -> None:
-        """Convert the message's media and answer with a single reply."""
+    async def _convert_and_reply(self, message: discord.Message, *, gif_only: bool = False) -> None:
+        """Convert the message's media and answer with a single reply. ``gif_only`` (a spoken "gif that") never falls back to a clip or a complaint."""
         author_id = message.author.id
         if not self.rate_limiter.allow(author_id):
             self.stats.rate_limited += 1
@@ -877,6 +959,8 @@ class SelfBot(discord.Client):
                 referenced = await self._resolve_reference(message)
                 collected = collect_media(message, referenced)
             if not collected.sources:
+                if gif_only:
+                    return
                 if referenced is not None and await self._try_manual_clip(message, referenced):
                     return
                 # Only complain when the person clearly asked: they pinged us or attached something.
@@ -922,6 +1006,17 @@ class SelfBot(discord.Client):
 
     async def _try_manual_clip(self, message: discord.Message, referenced: discord.Message) -> bool:
         """Handle "@account" as a reply to a text message: clip it. Returns True if the request was handled."""
+        runtime = self.scout
+        if runtime is None or runtime.cfg.mode == "off" or not runtime.cfg.manual:
+            return False
+        return await self._manual_clip(
+            message, self._manual_chosen(referenced, runtime), target_is_bot=bool(referenced.author.bot), silent=False
+        )
+
+    async def _manual_clip(
+        self, message: discord.Message, chosen: list[ScoutMessage], *, target_is_bot: bool, silent: bool
+    ) -> bool:
+        """Clip ``chosen`` because ``message`` asked. ``silent`` requests (spoken triggers) are never answered with a refusal."""
         runtime, gate = self.scout, self._manual_gate
         if runtime is None or gate is None or runtime.cfg.mode == "off" or not runtime.cfg.manual:
             return False
@@ -930,7 +1025,6 @@ class SelfBot(discord.Client):
             return False
         requester = message.author.id
         is_owner = runtime.cfg.owner_id == requester
-        chosen = self._manual_chosen(referenced, runtime)
         me = self.user
         reason = gate.check(
             chosen,
@@ -940,10 +1034,13 @@ class SelfBot(discord.Client):
             optout=runtime.optout,
             blocklist=runtime.blocklist,
             self_id=me.id if me is not None else None,
-            target_is_bot=bool(referenced.author.bot),
+            target_is_bot=target_is_bot,
         )
         if reason is not None:
-            await self._reply(message, reason)
+            if silent:
+                self.stats.note("info", f"{self._who(message.author)}: clip request ignored ({reason.rstrip('.')})")
+            else:
+                await self._reply(message, reason)
             return True
         who = self._who(message.author)
         deleted = any(m.deleted for m in chosen)
