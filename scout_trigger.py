@@ -144,6 +144,16 @@ def _sure_gif(core: list[str], is_reply: bool) -> Trigger | None:
     return Trigger("gif") if has_object or is_reply else None
 
 
+def _loose_count(tokens: list[str]) -> int:
+    """The message count in an unsure request ("clkip last 2", "cilp that convo"), read from the same words as a sure one."""
+    if "last" in tokens:
+        rest = [word for word in tokens[tokens.index("last") + 1 :] if not _is_filler(word)]
+        count = _count_after_last(rest)
+        if count is not None:
+            return count
+    return CONVO_COUNT if any(word in _CONVO_WORDS for word in tokens) else 1
+
+
 def _looks_like_clip(tokens: list[str]) -> bool:
     """Close enough to a request to be worth an AI check: the verb (or a typo of it), and a short message."""
     if any(word in _CLIP_VERBS or word in _CLIPPED for word in tokens):
@@ -165,7 +175,7 @@ def parse_trigger(text: str, *, is_reply: bool = False) -> Trigger | None:
     if sure is not None:
         return sure
     if _looks_like_clip(tokens):
-        return Trigger("clip", 1, sure=False)
+        return Trigger("clip", _loose_count(tokens), sure=False)
     return None
 
 

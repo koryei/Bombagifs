@@ -87,9 +87,16 @@ class ParseNotATriggerTests(unittest.TestCase):
 
 class ParseTyposTests(unittest.TestCase):
     def test_typos_are_unsure_so_the_ai_decides(self) -> None:
-        for text in ("clkip that LMFAII", "cilp that", "clpi that", "clip taht", "clp that", "clipp that", "clkip thattt", "clip thta lmao", "clkip last 2", "cilp the last three msgs"):
+        for text in ("clkip that LMFAII", "cilp that", "clpi that", "clip taht", "clp that", "clipp that", "clkip thattt", "clip thta lmao"):
             with self.subTest(text=text):
                 self.assertEqual(parse_trigger(text), Trigger("clip", 1, sure=False))
+
+    def test_unsure_requests_keep_a_count_the_ai_does_not_have_to_guess(self) -> None:
+        self.assertEqual(parse_trigger("clkip last 2"), Trigger("clip", 2, sure=False))
+        self.assertEqual(parse_trigger("cilp the last three msgs"), Trigger("clip", 3, sure=False))
+        self.assertEqual(parse_trigger("clkip that convo"), Trigger("clip", 4, sure=False))
+        self.assertEqual(parse_trigger("clkip last 99"), Trigger("clip", 5, sure=False))
+        self.assertEqual(parse_trigger("clkip last banana"), Trigger("clip", 1, sure=False))
 
     def test_look_alike_words_may_be_sent_to_the_ai_but_never_post_alone(self) -> None:
         for text in ("flip that", "chip it", "slip that", "clap that"):
