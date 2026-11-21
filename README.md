@@ -226,7 +226,7 @@ In a chat where the owner ran `!on`, nobody has to `@` the account. Say or reply
 |---|---|
 | reply `clip that` (also `clip this`, `clip it`, `clip dat`, `clip that one`, ...) | clips the message you replied to |
 | `clip that` (no reply) | clips the latest message in the chat (and that person's run), if it is under `SCOUT_TRIGGER_MAX_AGE_SECONDS` old (180) |
-| `clip last 3`, `clip that convo` | clips the last few messages (up to 5, at most 3 people) |
+| `clip that convo` / `clip this conversation` | clips the last 4 messages (at most 3 people) |
 | reply `gif that` / `make that a gif` | converts the media in the message you replied to |
 
 Filler, laughing, emoji and stretched letters are ignored, so `bro clip thattt LMFAOOO 😭` works. **Typos and odd
