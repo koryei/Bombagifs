@@ -271,6 +271,25 @@ class SelectionTests(ScoutCase):
         await scout.tick()
         self.assertEqual((self.stats.scout_screened, self.stats.scout_passed), (1, 0))
 
+    async def test_dry_run_logs_every_judged_run_with_its_scores(self) -> None:
+        verdict = good_verdict(clip=False, funny=0.0, reason="decide: funny=0.42 standalone=0.50 sensitive=0.02")
+        scout = self.scout(FakeJudge(lambda w: verdict), cfg=replace(self.cfg, mode="dry-run"))
+        self.add(1)
+        self.clock.now = T0 + 60
+        with self.assertLogs("bombagif.scout", "INFO") as logs:
+            await scout.tick()
+        line = "\n".join(logs.output)
+        self.assertIn("clip=False", line)
+        self.assertIn("decide: funny=0.42", line)
+        self.assertNotIn("some funny words", line)  # the message text itself is never logged
+
+    async def test_live_mode_keeps_per_run_judging_out_of_the_info_log(self) -> None:
+        scout = self.scout(FakeJudge(lambda w: no_verdict()))
+        self.add(1)
+        self.clock.now = T0 + 60
+        with self.assertNoLogs("bombagif.scout", "INFO"):
+            await scout.tick()
+
     async def test_provider_events_reach_the_feed(self) -> None:
         from scout_judge import ProviderUnavailable
 

@@ -155,6 +155,12 @@ class Scout:
         self._retry_at.pop(key, None)
         self._mark_screened(run)
         self.stats.scout_screened += 1
+        # Dry-run is for calibration, so show every verdict (scores only, never the message text); live mode is quiet.
+        logger.log(
+            logging.INFO if self.cfg.mode == "dry-run" else logging.DEBUG,
+            "judged a run in chat %s: clip=%s funny=%.1f via %s (%s)",
+            chat_id, verdict.clip, verdict.funny, verdict.provider, verdict.reason,
+        )
         if not verdict.clip:
             return
         self.stats.scout_passed += 1
