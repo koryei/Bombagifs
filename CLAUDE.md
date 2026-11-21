@@ -21,6 +21,10 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `OpenAICompatJudge`, `JudgeChain`), `scout.py` (the `Scout` orchestrator, `ScoutRuntime`, notice text, `!scout`
   parsing), `clip_render.py` (Pillow card renderer + markdown/emoji), `clip_assets.py` (asset host allowlist, card
   building), `scout_discord.py` (**imports discord**: message mapping), `assets/fonts/` (Noto, SIL OFL).
+- v3.1 (teaching + "clip that"): `scout_taste.py` (`TasteNotes`, `TasteStore`, `TasteBook`, `tune_report`),
+  `scout_manual.py` (`ManualGate`: refusals + limits for manual clips); `scout.py` also holds the review queue
+  (`ReviewItem`, `Scout.rate`), `HELP_OWNER`/`HELP_USER`, and the `!scout` parser. Files in `SELFBOT_DATA_DIR`:
+  `scout-taste.txt`, `taste.jsonl`, `optout.json`, `scout-chats.json`, `clips.jsonl`, `scout-blocklist.txt`.
 - `console_ui.py` — discord-free Rich terminal UI for the self-bot (boot banner, live status panel, pretty log
   handler, `TerminalUi`, `demo()`); needs `rich` (in `requirements-selfbot.txt`). Preview: `python console_ui.py`.
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
@@ -72,7 +76,16 @@ local gates -> pure Pillow renderer -> post with a who-was-clipped + `stop` noti
 the spec's "Implementation notes". Strangers who ping the account now get a help reply. `stop` in any DM opts out of
 clipping and conversions; `start` opts back in.
 
+## v3.1 teaching (branch `v3.1-teach`, stacked on v3)
+
+Spec: the "v3.1 addendum" in the clip scout spec; plan: `PLAN.md`. Reply-ping a text message to clip it ("clip that"),
+owner taste notes, 👍/👎/🙈 review DMs and clip reactions that become few-shot examples, `!scout tune`, and `!help`. Chat
+text can never reach the system prompt (examples ride in the user JSON as data); only the owner teaches.
+
 ## Status
+
+v3.1 (teaching, "clip that", `!help`) is implemented on `v3.1-teach`, stacked on the unmerged `v3-scout`; neither has been
+run against real chats yet (the dry-run is the next step).
 
 v3 (clip scout) is implemented on branch `v3-scout` (not merged or released); the live dry-run is still manual.
 v2, v2.1 (CAPTCHA guard, auto-accept, terminal UI) are merged to `main` and released (tags `v2`, `v2.1`). v2 was implemented on branch `v2-selfbot` (core extraction, allowlist, rate limiter, decision rules, media

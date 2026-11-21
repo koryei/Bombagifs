@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved by the operator; in progress. (The v3 plan is archived at `docs/superpowers/plans/2026-11-19-clip-scout.md`.)
+**Status:** implemented on branch `v3.1-teach` (all 9 tasks, tests green); live dry-run pending. (The v3 plan is archived at `docs/superpowers/plans/2026-11-19-clip-scout.md`.)
 
 **Goal:** Let people say "clip that" by reply-pinging a text message, let the owner teach the judge taste (notes, reviewed examples, a tune report), and add `!help`.
 

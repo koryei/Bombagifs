@@ -375,3 +375,11 @@ instructions. The owner edits it with `!scout taste`, `!scout taste add <text>`,
 ### Privacy notes for v3.1
 Examples are real chat lines sent to the provider on every judging call (anonymised, few, only lines the owner rated);
 review DMs show the owner real names and text; both are local to the owner's machine and DMs. Say so in the chat.
+
+### v3.1 implementation notes
+- The **owner is auto-registered** (added to the allowlist at startup) so "clip that" works without DMing their own account.
+- Manual clips need a scout runtime (mode `dry-run` or `on`) and `SCOUT_MANUAL=on`; mode `off` keeps the old "no media" reply.
+- `ClipRecord` gained an optional `speakers` field (anonymous label per line) so a 👍/👎 on a posted clip teaches with the right labels; old rows fall back to one speaker.
+- Review DMs: would-clip candidates are only reviewed in dry-run (in live mode the posted clip itself is what you react to); near-misses are reviewed in both when `SCOUT_REVIEW=always`.
+- `!scout taste|examples|tune|help` work even when scouting is `off` (only on/off/status/list are refused).
+- Nothing teaches from non-owner reactions or commands. Examples are never placed in the system prompt.
