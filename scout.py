@@ -522,8 +522,10 @@ HELP_OWNER = (
     "In dry-run I DM you candidates and near-misses. Reply to that message with `good` (clip-worthy), `bad` (never) or "
     "`skip`. You can also reply `good`/`bad` to any clip I posted. Your ratings become examples the judge sees.\n"
     "**Clip that**\n"
-    "Reply to any text message and @ me: I clip it. Members can do this in chats where scouting is on; you can do it "
-    "anywhere. Opted-out people and sensitive text are always refused.\n"
+    "In chats where scouting is on, say or reply `clip that` (no ping needed; typos and \"lmfao\" are fine) and I clip "
+    "that message, or the latest one if you don't reply. `clip last 3` clips a few, replying `gif that` to an image or "
+    "video makes a GIF. Members can do this in scouting chats; you can also reply and @ me anywhere. Opted-out people "
+    "and sensitive text are always refused, silently when nobody pinged me.\n"
     "**Everyone**\n"
     "`stop` in a DM opts out of clips and conversions, `start` brings you back. "
     "`!help` in a DM with me shows the short guide. Settings live in `.env` (see `.env.example`)."
@@ -532,7 +534,7 @@ HELP_OWNER = (
 HELP_USER = (
     "**Hi, I'm Bombagif.** I turn images and videos into GIF links.\n"
     "• DM me `hi` first, then @ me on an image or video, or reply to one and @ me.\n"
-    "• Reply to a text message and @ me and I'll clip it as a quote card, in chats where clipping is on.\n"
+    "• In chats where clipping is on, reply `clip that` (no ping needed) and I'll clip that message as a quote card.\n"
     "• In those chats I also clip messages that are funny out of context, and I say who's in them.\n"
     "Send `stop` in a DM to opt out of clips and conversions, and `start` to come back."
 )

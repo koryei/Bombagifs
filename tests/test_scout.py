@@ -887,13 +887,13 @@ class NoticeAndCommandTests(unittest.TestCase):
 
     def test_help_texts_cover_every_command_and_fit_in_one_message(self) -> None:
         for needle in ("!on", "!off", "!status", "!list", "!taste", "!taste add", "!taste clear",
-                       "!examples", "!examples clear", "!tune", "`good`", "`bad`", "`skip`", "`stop`", "`start`", "!help"):
+                       "!examples", "!examples clear", "!tune", "`good`", "`bad`", "`skip`", "clip that", "clip last", "gif that", "`stop`", "`start`", "!help"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, HELP_OWNER)
         self.assertIn("Reply", HELP_OWNER)
         self.assertNotIn("react", HELP_OWNER.lower())  # the account never reacts; you rate by replying
         self.assertLessEqual(len(HELP_OWNER), 1900)
-        for needle in ("`stop`", "`start`", "DM"):
+        for needle in ("`stop`", "`start`", "DM", "clip that"):
             self.assertIn(needle, HELP_USER)
         self.assertLessEqual(len(HELP_USER), 1000)
         self.assertNotIn("!scout", HELP_OWNER)  # the prefix is optional now; the help shows the short form
