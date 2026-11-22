@@ -297,6 +297,28 @@ class ImageTests(unittest.TestCase):
             self.assertEqual(command[command.index("-fs") + 1], str(MAX_OUTPUT_BYTES))
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
+    def test_converts_rotated_phone_mov_upright(self) -> None:
+        """An iPhone-style MOV with rotation metadata converts and comes out portrait."""
+        ffmpeg = shutil.which("ffmpeg")
+        with tempfile.TemporaryDirectory(prefix="bombagif-mov-test-") as work_dir:
+            base_path = Path(work_dir) / "base.mp4"
+            input_path = Path(work_dir) / "rotated.mov"
+            quiet = [str(ffmpeg), "-nostdin", "-loglevel", "error", "-y"]
+            subprocess.run(
+                quiet + ["-f", "lavfi", "-i", "testsrc=size=320x180:rate=30:duration=1",
+                         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(base_path)],
+                check=True,
+            )
+            # A display matrix is how phones record "this clip is sideways".
+            subprocess.run(
+                quiet + ["-display_rotation", "90", "-i", str(base_path), "-c", "copy", str(input_path)],
+                check=True,
+            )
+            gif = convert_video(input_path.read_bytes(), ".mov")
+        with Image.open(io.BytesIO(gif)) as image:
+            self.assertGreater(image.height, image.width)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
     def test_converts_mp4_with_default_moov_atom_at_end(self) -> None:
         """Convert a generated MP4 in the common non-faststart layout end-to-end."""
         ffmpeg = shutil.which("ffmpeg")
