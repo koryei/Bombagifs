@@ -130,11 +130,15 @@ python3 -m venv .venv-selfbot
 
 ```bash
 git clone https://github.com/koryei/Bombagifs.git && cd Bombagifs
-./selfbot-ctl.sh install        # venv, FFmpeg, Cairo, .env (asks for your tokens, hidden), systemd service
+./selfbot-ctl.sh install        # venv, FFmpeg, Cairo, systemd service (you bring your own .env)
 ./selfbot-ctl.sh update         # fast-forward to the latest main, restart, check it stays up
 ./selfbot-ctl.sh auto on 15     # optional: look for updates every 15 minutes
 ./selfbot-ctl.sh status | logs -f | doctor | restart | stop | start | version
 ```
+
+Bring your own `.env`: copy it onto the VM (`scp .env user@vm:~/Bombagifs/.env`) before or after `install`. The script never
+prompts for secrets; it locks the file to mode 600 and checks that `SELFBOT_TOKEN`, `ZIPLINE_URL` and `ZIPLINE_TOKEN` are set. Until they are,
+`install` leaves the service enabled but stopped, and `start`/`restart` refuse and say what is missing.
 
 `update` refuses to run over local edits or diverged history, installs dependencies only when `requirements-selfbot.txt`
 changed, imports the new code before restarting, and **rolls back** to the previous commit if the service does not stay

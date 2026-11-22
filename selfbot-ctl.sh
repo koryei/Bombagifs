@@ -46,30 +46,8 @@ version() {
 }
 
 # --- .env -----------------------------------------------------------------------------------------------------
-# set_env KEY  (value taken from the variable named by $2, so it never appears in argv or the output)
-set_env() {
-  local key="$1" from="$2"
-  KEY="$key" VAL="${!from}" ENVFILE="$DIR/.env" python3 - <<'PY'
-import os, re, tempfile
-path, key, val = os.environ["ENVFILE"], os.environ["KEY"], os.environ["VAL"]
-quoted = "'" + val.replace("\\", "\\\\").replace("'", "\\'") + "'"
-lines = open(path).read().split("\n") if os.path.exists(path) else []
-live = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
-commented = re.compile(r"^\s*#\s*" + re.escape(key) + r"\s*=")
-index = next((i for i, line in enumerate(lines) if live.match(line)), None)
-if index is None:
-    index = next((i for i, line in enumerate(lines) if commented.match(line)), None)
-if index is None:
-    lines.append(f"{key}={quoted}")
-else:
-    lines[index] = f"{key}={quoted}"
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".env.")
-with os.fdopen(fd, "w") as handle:
-    handle.write("\n".join(lines).rstrip("\n") + "\n")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-PY
-}
+# You bring your own .env (e.g. scp it to $DIR/.env); this script never prompts for or rewrites its values.
+REQUIRED_KEYS="SELFBOT_TOKEN ZIPLINE_URL ZIPLINE_TOKEN"
 
 env_has() {  # env_has KEY: non-empty value in .env, without printing it
   KEY="$1" ENVFILE="$DIR/.env" python3 - <<'PY'
@@ -81,45 +59,26 @@ raise SystemExit(0 if value and "your-zipline.example.com" not in value else 1)
 PY
 }
 
-TTY="${SELFBOT_CTL_TTY:-/dev/tty}"
-
-# ask <var> <prompt> [hidden]: read one line into the caller's variable. (Locals here are underscore-prefixed so they
-# can never shadow the variable being filled.)
-ask() {
-  local _var="$1" _prompt="$2" _hidden="${3:-}" _reply=''
-  # Answers come from fd 3 (opened once by collect_env), so a scripted file is consumed line by line like a terminal.
-  if [[ -n "$_hidden" ]]; then read -r -s -p "$_prompt" _reply <&3 || die "No more input; edit $DIR/.env by hand, then re-run install."; printf '\n' >&2
-  else read -r -p "$_prompt" _reply <&3 || die "No more input; edit $DIR/.env by hand, then re-run install."; fi
-  printf -v "$_var" '%s' "$_reply"
+env_missing() {  # prints the names of required keys that are not set; succeeds only when none are missing
+  local key missing=""
+  [[ -f "$DIR/.env" ]] || { printf '%s' "$REQUIRED_KEYS"; return 1; }
+  for key in $REQUIRED_KEYS; do env_has "$key" || missing="$missing $key"; done
+  missing="${missing# }"
+  [[ -z "$missing" ]] || { printf '%s' "$missing"; return 1; }
 }
 
-# prompt_env <KEY> <prompt> <hidden|plain> <required|optional>: ask only when the key is not set yet.
-prompt_env() {
-  local key="$1" prompt="$2" mode="$3" need="$4" answer=''
-  env_has "$key" && return 0
-  while :; do
-    ask answer "$prompt" "$([[ "$mode" == hidden ]] && echo hidden)"
-    if [[ -n "$answer" ]]; then set_env "$key" answer; return 0; fi
-    [[ "$need" == optional ]] && return 0
-    warn "$key is required."
-  done
-}
-
-collect_env() {
+ensure_env() {  # a blank template when there is no .env yet; always mode 600
   if [[ ! -f "$DIR/.env" ]]; then
-    umask 077
-    cp "$DIR/.env.example" "$DIR/.env"
+    (umask 077; cp "$DIR/.env.example" "$DIR/.env")
   fi
   chmod 600 "$DIR/.env"
-  [[ -r "$TTY" ]] || die "Needs a terminal. Edit $DIR/.env by hand (see .env.example), then run: ./selfbot-ctl.sh install"
-  exec 3<"$TTY"
-  prompt_env SELFBOT_TOKEN "Self-bot account token (hidden; use an alt account): " hidden required
-  prompt_env ZIPLINE_URL "Your Zipline URL (https://...): " plain required
-  prompt_env ZIPLINE_TOKEN "Zipline API token (hidden): " hidden required
-  prompt_env SELFBOT_OWNER_ID "Your Discord user ID (the only person who can use !on etc.): " plain required
-  prompt_env INCEPTION_API_KEY "Inception API key for the clip judge (hidden, Enter to skip): " hidden optional
-  exec 3<&-
-  return 0
+}
+
+env_help() {  # what to do when the keys are missing
+  warn "Missing in $DIR/.env: $1"
+  say "  Copy your own .env onto the VM, for example from your computer:"
+  say "    ${C_BOLD}scp .env $(id -un)@<this-vm>:$DIR/.env${C_RESET}"
+  say "  then run:  ${C_BOLD}./selfbot-ctl.sh restart${C_RESET}   (or start)"
 }
 
 # --- the units ------------------------------------------------------------------------------------------------
@@ -221,14 +180,21 @@ cmd_install() {
   "$python_bin" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
   "$VENV/bin/python" -m pip install --quiet -r "$DIR/requirements-selfbot.txt"
-  collect_env
+  ensure_env
   mkdir -p "$DIR/data"; chmod 700 "$DIR/data"
   info "Registering $SERVICE.service..."
   install_file render_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE.service" 0644
   sc_write daemon-reload
-  sc_write enable --now "$SERVICE.service"
-  ok "Installed $(version) and started. Scouting stays off until you run !on in a chat."
-  say "${C_DIM}Next: ./selfbot-ctl.sh status   ./selfbot-ctl.sh logs -f   ./selfbot-ctl.sh update${C_RESET}"
+  local missing
+  if missing="$(env_missing)"; then
+    sc_write enable --now "$SERVICE.service"
+    ok "Installed $(version) and started. Scouting stays off until you run !on in a chat."
+    say "${C_DIM}Next: ./selfbot-ctl.sh status   ./selfbot-ctl.sh logs -f   ./selfbot-ctl.sh update${C_RESET}"
+  else
+    sc_write enable "$SERVICE.service"
+    ok "Installed $(version); it will start on boot, but it is not running yet."
+    env_help "$missing"
+  fi
 }
 
 wait_healthy() {  # healthy = active for the whole window and no restart since $1 (the NRestarts count before)
@@ -334,7 +300,8 @@ cmd_doctor() {
   check "pillow + cairosvg import" py -c 'import PIL, cairosvg'
   check "ffmpeg installed" command -v ffmpeg
   check ".env exists" test -f "$DIR/.env"
-  for key in SELFBOT_TOKEN ZIPLINE_URL ZIPLINE_TOKEN SELFBOT_OWNER_ID; do check "$key is set" env_has "$key"; done
+  for key in $REQUIRED_KEYS; do check "$key is set" env_has "$key"; done
+  env_has SELFBOT_OWNER_ID || warn "SELFBOT_OWNER_ID is not set: nobody can use !on / !help (conversions still work)."
   env_has INCEPTION_API_KEY || env_has SCOUT_LLM_API_KEY || warn "No clip-judge key (INCEPTION_API_KEY or SCOUT_LLM_*): clip scouting can't post."
   [[ "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env" 2>/dev/null)" == 600 ]] || warn ".env should be mode 600: chmod 600 $DIR/.env"
   [[ -e "$DIR/data/captcha-blocked.json" ]] && warn "Paused by a CAPTCHA (data/captcha-blocked.json)."
@@ -344,7 +311,7 @@ cmd_doctor() {
 usage() {
   cat <<USAGE
 Usage: ./selfbot-ctl.sh <command>
-  install            set up the venv, .env, and the systemd service (asks for sudo once)
+  install            set up the venv and the systemd service (you supply .env; asks for sudo once)
   update [--quiet]   fast-forward to the latest commit, restart, roll back if it won't stay up
   auto on [min]|off  check for updates on a timer (default every 15 min)
   status             service state and version
@@ -356,7 +323,7 @@ USAGE
 }
 
 main() {
-  local command="${1:-}"
+  local missing command="${1:-}"
   [[ $# -gt 0 ]] && shift
   for arg in "$@"; do [[ "$arg" == --quiet ]] && QUIET=true; done
   case "$command" in
@@ -366,7 +333,11 @@ main() {
     status) cmd_status ;;
     logs) cmd_logs "$@" ;;
     doctor) cmd_doctor ;;
-    start|stop|restart) sc_write "$command" "$SERVICE.service" && ok "$command: done." ;;
+    stop) sc_write stop "$SERVICE.service" && ok "stop: done." ;;
+    start|restart)
+      ensure_env
+      if missing="$(env_missing)"; then sc_write "$command" "$SERVICE.service" && ok "$command: done."
+      else env_help "$missing"; exit 1; fi ;;
     version) version ;;
     ''|-h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;

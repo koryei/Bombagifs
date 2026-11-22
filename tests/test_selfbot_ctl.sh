@@ -39,53 +39,45 @@ mkdir -p "$TEST_ROOT/unit"
 export SELFBOT_UNIT_DIR="$TEST_ROOT/unit"
 source "$ROOT/selfbot-ctl.sh"
 
-# --- .env writing ------------------------------------------------------------------------------------------
+# --- .env: you bring your own; the script only checks it --------------------------------------------------------
 DIR="$TEST_ROOT/envdir"; mkdir -p "$DIR"
-printf '# comment\nSELFBOT_TOKEN=\n# INCEPTION_API_KEY=\nLOG_LEVEL=INFO\n' >"$DIR/.env"
-secret="tok'en\\with \"odd\" chars"
-set_env SELFBOT_TOKEN secret
-set_env INCEPTION_API_KEY secret
-set_env NEW_KEY secret
-python3 - "$DIR/.env" "$secret" <<'PY'
-import stat, sys
-from dotenv import dotenv_values
-path, secret = sys.argv[1], sys.argv[2]
-values = dotenv_values(path)
-assert values["SELFBOT_TOKEN"] == secret, values
-assert values["INCEPTION_API_KEY"] == secret
-assert values["NEW_KEY"] == secret
-assert values["LOG_LEVEL"] == "INFO"
-assert stat.S_IMODE(__import__("os").stat(path).st_mode) == 0o600
-text = open(path).read()
-assert text.count("SELFBOT_TOKEN=") == 1 and "# comment" in text
-PY
-env_has SELFBOT_TOKEN || fail "env_has should see a set key"
-! env_has LOG_LEVELX || fail "env_has should not see a missing key"
-printf 'EMPTY=\n' >"$DIR/.env"
-! env_has EMPTY || fail "an empty value is not set"
-
-# --- the prompts (scripted answers through a fake terminal) ----------------------------------------------------
-DIR="$TEST_ROOT/promptdir"; mkdir -p "$DIR"
 cp "$ROOT/.env.example" "$DIR/.env.example"
-export SELFBOT_CTL_TTY="$TEST_ROOT/tty"; TTY="$SELFBOT_CTL_TTY"
-# an empty answer to a required prompt asks again; the optional key may be skipped
-printf '\nacct-token\nhttps://zip.example.test\nzip-token\n12345\n\n' >"$TTY"
-collect_env 2>/dev/null
-python3 - "$DIR/.env" <<'PY'
-import stat, sys, os
-from dotenv import dotenv_values
-v = dotenv_values(sys.argv[1])
-assert v["SELFBOT_TOKEN"] == "acct-token", v
-assert v["ZIPLINE_URL"] == "https://zip.example.test"
-assert v["ZIPLINE_TOKEN"] == "zip-token"
-assert v["SELFBOT_OWNER_ID"] == "12345"
-assert not v.get("INCEPTION_API_KEY")
-assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600
-PY
-# a second run keeps what is set (it only asks again for the skipped optional key)
-printf '\n' >"$TTY"
-collect_env 2>/dev/null
-assert_equal acct-token "$(python3 -c 'import sys; from dotenv import dotenv_values; print(dotenv_values(sys.argv[1])["SELFBOT_TOKEN"])' "$DIR/.env")" "existing values kept"
+
+# no .env: a blank mode-600 template is made, everything required is reported missing
+ensure_env
+[[ -f "$DIR/.env" ]] || fail "ensure_env should create a template"
+assert_equal 600 "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env")" "template is mode 600"
+missing="$(env_missing || true)"
+assert_contains "$missing" "SELFBOT_TOKEN" "blank template misses the token"
+assert_contains "$missing" "ZIPLINE_URL" "the placeholder Zipline URL does not count"
+assert_contains "$missing" "ZIPLINE_TOKEN" "blank template misses the zipline token"
+
+# a pasted-in .env with odd characters, wide permissions and CRLF line endings is accepted and locked down
+printf 'SELFBOT_TOKEN="tok.en-with_dots"\r\nZIPLINE_URL=https://zip.example.test\r\nZIPLINE_TOKEN=abc#def\r\n' >"$DIR/.env"
+chmod 644 "$DIR/.env"
+ensure_env
+assert_equal 600 "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env")" "an imported .env is locked to mode 600"
+if ! missing="$(env_missing)"; then fail "a complete .env should pass (missing: $missing)"; fi
+assert_equal "" "$missing" "nothing missing"
+assert_equal "tok.en-with_dots" "$(python3 -c 'import sys; from dotenv import dotenv_values; print(dotenv_values(sys.argv[1])["SELFBOT_TOKEN"])' "$DIR/.env")" "value read as dotenv reads it"
+# ensure_env never rewrites an existing file
+before="$(cat "$DIR/.env")"; ensure_env; assert_equal "$before" "$(cat "$DIR/.env")" "existing .env untouched"
+
+# one key short: only that one is named
+printf 'SELFBOT_TOKEN=a\nZIPLINE_URL=https://zip.example.test\nZIPLINE_TOKEN=\n' >"$DIR/.env"
+missing="$(env_missing || true)"; assert_equal "ZIPLINE_TOKEN" "$missing" "only the unset key is named"
+
+# start/restart refuse while required keys are missing, and say how to fix it
+: >"$FAKE_STATE/calls"
+if out="$(main restart 2>&1)"; then fail "restart must refuse without the required keys"; fi
+assert_contains "$out" "ZIPLINE_TOKEN" "restart names the missing key"
+assert_contains "$out" "scp .env" "restart explains how to import the .env"
+assert_not_contains "$(cat "$FAKE_STATE/calls")" "restart" "systemctl restart was not called"
+printf 'SELFBOT_TOKEN=a\nZIPLINE_URL=https://zip.example.test\nZIPLINE_TOKEN=b\n' >"$DIR/.env"
+main restart >/dev/null 2>&1 || fail "restart should work with a complete .env"
+assert_contains "$(cat "$FAKE_STATE/calls")" "restart bombagif-selfbot.service" "systemctl restart was called"
+: >"$FAKE_STATE/calls"; main stop >/dev/null 2>&1
+assert_contains "$(cat "$FAKE_STATE/calls")" "stop bombagif-selfbot.service" "stop never needs the .env"
 
 # --- units -------------------------------------------------------------------------------------------------
 DIR="/srv/bombagif"; VENV="$DIR/.venv-selfbot"
