@@ -55,9 +55,22 @@ ALLOWED_TYPES: Final[dict[str, set[str]]] = {
     ".jpeg": {"image/jpeg", "image/jpg"},
     ".avif": {"image/avif"},
     ".svg": {"image/svg+xml", "text/xml", "application/xml"},
+    ".bmp": {"image/bmp", "image/x-ms-bmp"},
+    ".tif": {"image/tiff"},
+    ".tiff": {"image/tiff"},
     ".mp4": {"video/mp4"},
     ".webm": {"video/webm"},
+    ".mov": {"video/quicktime"},
+    ".m4v": {"video/x-m4v", "video/mp4"},
+    ".mkv": {"video/x-matroska"},
+    ".avi": {"video/x-msvideo", "video/avi"},
+    ".3gp": {"video/3gpp"},
+    ".ogv": {"video/ogg"},
+    ".wmv": {"video/x-ms-wmv"},
 }
+# FFmpeg probes the real container, so the extension only has to be one of these.
+VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".3gp", ".ogv", ".wmv"})
+SUPPORTED_TEXT: Final[str] = "a WEBP, PNG, JPG, JPEG, AVIF, BMP, TIFF, SVG, MP4, MOV, WebM, MKV, AVI, or similar video file"
 GIF_TARGET_BYTES: Final[int] = 1_000_000
 MAX_GIF_BATCH: Final[int] = 5
 
@@ -82,7 +95,7 @@ def validate_attachment_metadata(filename: str, content_type: str | None, size: 
     """Validate a supported image or video extension and known declared size."""
     suffix = os.path.splitext(os.path.basename(filename).lower())[1]
     if suffix not in ALLOWED_TYPES:
-        raise InvalidImage("Use a WEBP, PNG, JPG, JPEG, AVIF, SVG, MP4, or WebM file.")
+        raise InvalidImage(f"Use {SUPPORTED_TEXT}.")
     # Discord can omit or misreport attachment MIME metadata. Validate the
     # extension here and verify the actual decoded format in the converter.
     if size is not None and size > MAX_INPUT_BYTES:
@@ -274,9 +287,9 @@ def _convert_video_once(
     max_frames: int = MAX_VIDEO_FRAMES,
     timeout: float = VIDEO_CONVERSION_TIMEOUT,
 ) -> bytes:
-    """Convert one MP4/WebM candidate into a bounded GIF."""
-    if suffix not in {".mp4", ".webm"}:
-        raise InvalidImage("Use an MP4 or WebM video.")
+    """Convert one video candidate (MP4, MOV, WebM, ...) into a bounded GIF."""
+    if suffix not in VIDEO_SUFFIXES:
+        raise InvalidImage("Use a video file such as MP4, MOV, or WebM.")
     if len(data) > MAX_INPUT_BYTES:
         raise InvalidImage("That video is too large. The maximum upload size is 15 MB.")
     ffmpeg = shutil.which("ffmpeg")
@@ -368,7 +381,7 @@ def _convert_video_once(
                     extra={"trace_id": trace_id} if trace_id else {},
                 )
                 raise InvalidImage(
-                    "That MP4/WebM could not be converted. Please try another video. "
+                    "That video could not be converted. Please try another video. "
                     "The bot host can inspect the service journal for the FFmpeg error."
                 )
             if output_size == 0:
@@ -509,6 +522,7 @@ def _convert_image_once(
             expected_format = {
                 ".png": "PNG", ".webp": "WEBP", ".svg": "PNG",
                 ".jpg": "JPEG", ".jpeg": "JPEG", ".avif": "AVIF",
+                ".bmp": "BMP", ".tif": "TIFF", ".tiff": "TIFF",
             }[suffix]
             if image.format != expected_format:
                 raise InvalidImage("The image contents do not match the file extension.")
@@ -945,11 +959,11 @@ async def convert_and_upload(
         data = await download_url(session, source.url)
         sniffed = sniff_suffix(data)
         if sniffed is None:
-            raise InvalidImage("Use a WEBP, PNG, JPG, JPEG, AVIF, SVG, MP4, or WebM file.")
+            raise InvalidImage(f"Use {SUPPORTED_TEXT}.")
         suffix = sniffed
     try:
         loop = asyncio.get_running_loop()
-        if suffix in {".mp4", ".webm"}:
+        if suffix in VIDEO_SUFFIXES:
             gif_data = await loop.run_in_executor(executor, convert_video, data, suffix, trace_id)
         else:
             gif_data = await loop.run_in_executor(

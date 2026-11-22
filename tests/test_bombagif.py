@@ -342,8 +342,8 @@ class ImageTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidImage, "requires FFmpeg"):
                 convert_video(b"video bytes", ".mp4")
 
-        with self.assertRaisesRegex(InvalidImage, "MP4 or WebM"):
-            convert_video(b"video bytes", ".mov")
+        with self.assertRaisesRegex(InvalidImage, "video file"):
+            convert_video(b"video bytes", ".txt")
         with self.assertRaisesRegex(InvalidImage, "maximum upload size is 15 MB"):
             convert_video(b"v" * (MAX_INPUT_BYTES + 1), ".mp4")
 

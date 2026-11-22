@@ -34,6 +34,9 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `bash tests/test_installer.sh`.
 - `install.sh`, `Dockerfile`, `compose.yaml` — deployment for the app only (the self-bot is run manually).
 
+Formats: `ALLOWED_TYPES` / `VIDEO_SUFFIXES` in `bombagif_core.py` (images: PNG, JPG, WEBP, AVIF, BMP, TIFF, SVG; video: MP4, MOV, WebM, MKV, AVI, M4V, 3GP, OGV, WMV via FFmpeg). Not supported: HEIC, GIF input.
+A "nothing to convert" reply names the file types it couldn't read (`no_media_reply`).
+
 ## Roadmap
 
 - **v1 (shipped):** `/gif` user-installed app.

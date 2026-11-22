@@ -384,6 +384,21 @@ START_CONFIRMATION = (
 )
 CLIP_OPT_OUT_CONFIRMATION = "Got it, I won't clip you any more. (Send `start` in a DM to turn it back on.)"
 NO_MEDIA_TEXT = "I couldn't find a supported image or video to convert."
+_SUFFIX_SAFE = re.compile(r"^\.[a-z0-9]{1,8}$")
+
+
+def no_media_reply(message: Any) -> str:
+    """The "nothing to convert" reply; when files were attached, it says which types it could not read."""
+    unsupported: list[str] = []
+    for attachment in getattr(message, "attachments", None) or ():
+        suffix = os.path.splitext(attachment.filename.lower())[1]
+        if suffix in ALLOWED_TYPES or suffix in unsupported:
+            continue
+        unsupported.append(suffix if _SUFFIX_SAFE.match(suffix) else "(no known type)")
+    if not unsupported:
+        return NO_MEDIA_TEXT
+    shown = ", ".join(f"`{s}`" if s.startswith(".") else s for s in unsupported[:3])
+    return f"{NO_MEDIA_TEXT} (I can't read {shown} files.)"
 
 _MARKDOWN_CHARS = re.compile(r"([\\*_~|>`])")
 

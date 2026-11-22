@@ -70,7 +70,6 @@ from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_mess
 from scout_trigger import Trigger, parse_trigger
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
-    NO_MEDIA_TEXT,
     START_CONFIRMATION,
     STOP_CONFIRMATION,
     AllowlistStore,
@@ -87,6 +86,7 @@ from selfbot_logic import (
     format_results,
     has_media,
     help_text,
+    no_media_reply,
     resolve_ui_mode,
     welcome_text,
 )
@@ -963,7 +963,7 @@ class SelfBot(discord.Client):
                 # Only complain when the person clearly asked: they pinged us or attached something.
                 # A plain DM reply (e.g. "thanks!" to one of our messages) is just conversation.
                 if message.attachments or self._incoming(message).mentions_me:
-                    await self._reply(message, NO_MEDIA_TEXT)
+                    await self._reply(message, no_media_reply(message))
                 return
             who = self._who(message.author)
             results = []

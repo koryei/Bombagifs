@@ -245,7 +245,7 @@ class SelfBotConvertTests(_SelfBotCase):
     async def test_no_supported_media_gets_no_media_text(self) -> None:
         message = make_message(channel_cls=discord.TextChannel, mentions=[self.me], attachments=[attachment("n.txt")])
         await self.bot.on_message(message)
-        self.assertEqual(message.reply.await_args.args[0], NO_MEDIA_TEXT)
+        self.assertEqual(message.reply.await_args.args[0], NO_MEDIA_TEXT + " (I can't read `.txt` files.)")
         self.convert.assert_not_awaited()
 
     async def test_dm_text_reply_without_media_is_silent(self) -> None:
