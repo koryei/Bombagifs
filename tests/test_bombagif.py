@@ -289,7 +289,9 @@ class ImageTests(unittest.TestCase):
             self.assertIn("palettegen", command[command.index("-filter_complex") + 1])
             self.assertIn("scale=", command[command.index("-filter_complex") + 1])
             self.assertIn("-an", command)
-            self.assertIn("-autorotate", command)
+            # Autorotate is FFmpeg's default; a bare flag swallows the next option on some builds.
+            self.assertNotIn("-autorotate", command)
+            self.assertNotIn("-noautorotate", command)
             self.assertIn("-frames:v", command)
             self.assertEqual(command[command.index("-loop") + 1], "0")
             self.assertEqual(command[command.index("-fs") + 1], str(MAX_OUTPUT_BYTES))

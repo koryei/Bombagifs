@@ -308,6 +308,8 @@ def _convert_video_once(
             output_path = Path(work_dir) / "output.gif"
             input_path.write_bytes(data)
             stderr_path = Path(work_dir) / "ffmpeg.stderr"
+            # Rotation metadata (iPhone MOV) is applied by FFmpeg by default. Do not pass a bare
+            # "-autorotate": on some builds it takes a value and swallows the next option.
             command = [
                 ffmpeg,
                 "-nostdin",
@@ -319,7 +321,6 @@ def _convert_video_once(
                 "1",
                 "-filter_complex_threads",
                 "1",
-                "-autorotate",
                 "-max_pixels",
                 str(MAX_PIXELS),
                 "-protocol_whitelist",
