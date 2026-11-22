@@ -32,7 +32,10 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
   `.venv-selfbot/bin/python -m unittest tests.test_selfbot_adapter -v` for the self-bot adapter (skipped elsewhere);
   `bash tests/test_installer.sh`.
-- `install.sh`, `Dockerfile`, `compose.yaml` — deployment for the app only (the self-bot is run manually).
+- `install.sh`, `Dockerfile`, `compose.yaml` — deployment for the app only.
+- `selfbot-ctl.sh` — VM deployment for the self-bot (Ubuntu/Debian + systemd): `install`, `update` (ff-only, deps only when
+  requirements changed, smoke import, health check, auto rollback), `auto on|off`, `status`, `logs`, `doctor`. Test: `bash tests/test_selfbot_ctl.sh`
+  (fake systemctl + throwaway git repos; the real `install` step needs a real VM and is not covered).
 
 Formats: `ALLOWED_TYPES` / `VIDEO_SUFFIXES` in `bombagif_core.py` (images: PNG, JPG, WEBP, AVIF, BMP, TIFF, SVG; video: MP4, MOV, WebM, MKV, AVI, M4V, 3GP, OGV, WMV via FFmpeg). Not supported: HEIC, GIF input.
 A "nothing to convert" reply names the file types it couldn't read (`no_media_reply`).

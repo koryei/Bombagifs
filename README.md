@@ -126,6 +126,22 @@ python3 -m venv .venv-selfbot
 .venv-selfbot/bin/python selfbot.py
 ```
 
+**Running it on a VM (beta).** On an Ubuntu/Debian VM with systemd, one script installs and updates the self-bot:
+
+```bash
+git clone https://github.com/koryei/Bombagifs.git && cd Bombagifs
+./selfbot-ctl.sh install        # venv, FFmpeg, Cairo, .env (asks for your tokens, hidden), systemd service
+./selfbot-ctl.sh update         # fast-forward to the latest main, restart, check it stays up
+./selfbot-ctl.sh auto on 15     # optional: look for updates every 15 minutes
+./selfbot-ctl.sh status | logs -f | doctor | restart | stop | start | version
+```
+
+`update` refuses to run over local edits or diverged history, installs dependencies only when `requirements-selfbot.txt`
+changed, imports the new code before restarting, and **rolls back** to the previous commit if the service does not stay
+up for 20 seconds. `data/` and `.env` are never touched. `auto on` adds a systemd timer and a one-line sudoers entry that
+lets your user restart only this service without a password. `doctor` reports what is missing without printing secrets.
+Tests: `bash tests/test_selfbot_ctl.sh`.
+
 **Terminal UI.** Run in a terminal, the self-bot prints a boot banner (account, Zipline host, allowlist size,
 guard state, limits), keeps a live status panel (state, uptime, counters, and a feed of recent conversions, sign-ups,
 and warnings), writes readable coloured log lines above it, and signs off with a session summary. Redirected output,
