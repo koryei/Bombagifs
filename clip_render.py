@@ -184,9 +184,29 @@ MAX_NAME_CHARS = 28
 _DEFAULT_AVATARS = [(88, 101, 242), (116, 127, 141), (59, 165, 93), (250, 166, 26), (237, 66, 69), (235, 69, 158)]
 
 
+def host_zone(localtime_path: str = "/etc/localtime") -> datetime.tzinfo | None:
+    """The zone to print card times in: ``TZ`` if set, else the machine's zone read fresh from ``/etc/localtime``.
+
+    The C library caches the zone when a process first asks for local time, so a bot that keeps running after the VM's
+    timezone is changed would go on printing the old one. Reading the file again keeps cards on the machine's real clock.
+    ``None`` means "let the C library decide" (no zoneinfo data, or an unreadable file).
+    """
+    import os
+    import zoneinfo
+
+    name = (os.environ.get("TZ") or "").strip()
+    try:
+        if name:
+            return zoneinfo.ZoneInfo(name)
+        with open(localtime_path, "rb") as handle:
+            return zoneinfo.ZoneInfo.from_file(handle)
+    except (OSError, ValueError, zoneinfo.ZoneInfoNotFoundError):
+        return None
+
+
 def format_time(epoch: float, tz: datetime.tzinfo | None = None) -> str:
-    """Discord-style clock time such as ``7:09 PM`` (host-local time unless ``tz`` is given)."""
-    moment = datetime.datetime.fromtimestamp(epoch, tz)
+    """Discord-style clock time such as ``7:09 PM`` in ``tz`` (the machine's own zone when ``tz`` is None)."""
+    moment = datetime.datetime.fromtimestamp(epoch, tz or host_zone())
     hour = moment.hour % 12 or 12
     return f"{hour}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
 

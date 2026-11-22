@@ -133,6 +133,7 @@ git clone https://github.com/koryei/Bombagifs.git && cd Bombagifs
 ./selfbot-ctl.sh install        # venv, FFmpeg, Cairo, systemd service (you bring your own .env)
 ./selfbot-ctl.sh update         # fast-forward to the latest main, restart, check it stays up
 ./selfbot-ctl.sh auto on 15     # optional: look for updates every 15 minutes
+./selfbot-ctl.sh timezone America/New_York   # clip cards print clock times in the VM's timezone (default UTC)
 ./selfbot-ctl.sh status | logs -f | doctor | restart | stop | start | version
 ```
 

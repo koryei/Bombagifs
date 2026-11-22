@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import datetime
 import logging
 import os
 import platform
@@ -43,7 +44,7 @@ from bombagif_core import (
     read_settings,
 )
 from clip_assets import asset_url_allowed, build_card, custom_emoji_url, mentioned_ids, twemoji_url
-from clip_render import collect_asset_keys, render_clip
+from clip_render import collect_asset_keys, host_zone, render_clip
 from scout_buffer import ScoutMessage
 from scout import (
     ANNOUNCE_OFF,
@@ -69,6 +70,7 @@ from scout_taste import NOTES_MAX_CHARS, TasteBook, tune_report
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from scout_trigger import Trigger, parse_trigger
 from selfbot_logic import (
+    apply_timezone,
     CLIP_OPT_OUT_CONFIRMATION,
     START_CONFIRMATION,
     STOP_CONFIRMATION,
@@ -1105,6 +1107,7 @@ def create_bot(settings: Settings, data_dir: Path, environ: Mapping[str, str]) -
 def main() -> None:
     """Load configuration and run the self-bot until interrupted."""
     load_dotenv()
+    apply_timezone(os.environ)
     settings = read_settings("SELFBOT_TOKEN")
     mode = resolve_ui_mode(os.getenv("SELFBOT_UI"), is_tty=sys.stdout.isatty())
     bot = create_bot(settings, Path(os.getenv("SELFBOT_DATA_DIR", "data")), os.environ)
@@ -1117,6 +1120,9 @@ def main() -> None:
         bot.ui = console_ui.TerminalUi(console, dashboard)
     else:
         configure_logging(settings.log_level)
+    zone = host_zone()
+    now = datetime.datetime.now(zone)
+    logging.getLogger("bombagif").info("Clip cards use timezone %s (now %s)", now.tzname(), now.strftime("%H:%M UTC%z"))
     bot.run(settings.discord_token, log_handler=None)
 
 

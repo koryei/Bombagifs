@@ -286,6 +286,25 @@ cmd_status() {
   return 0
 }
 
+td() { if [[ -n "${SELFBOT_CTL_TIMEDATECTL:-}" ]]; then "$SELFBOT_CTL_TIMEDATECTL" "$@"; else timedatectl "$@"; fi; }
+
+cmd_timezone() {  # timezone [Area/City]: show, or set, the VM's timezone (clip cards print clock times in it)
+  local zone="${1:-}"
+  if [[ -z "$zone" ]]; then
+    say "Timezone: $(td show -p Timezone --value 2>/dev/null || echo unknown)   (now: $(date '+%Y-%m-%d %H:%M %Z'))"
+    say "${C_DIM}Change it with: ./selfbot-ctl.sh timezone America/New_York   (list: timedatectl list-timezones)${C_RESET}"
+    return 0
+  fi
+  [[ "$zone" =~ ^[A-Za-z0-9_+/-]+$ ]] || die "That is not a timezone name. Example: America/New_York"
+  td list-timezones 2>/dev/null | grep -qx -- "$zone" || die "Unknown timezone '$zone'. List them with: timedatectl list-timezones"
+  if [[ -n "${SELFBOT_CTL_TIMEDATECTL:-}" ]]; then td set-timezone "$zone"; else as_root timedatectl set-timezone "$zone"; fi
+  ok "Timezone is now $zone."
+  if [[ "$(sc_read is-active "$SERVICE.service" 2>/dev/null || true)" == active ]]; then
+    sc_write restart "$SERVICE.service"
+    ok "Restarted the bot so clip cards use it."
+  fi
+}
+
 cmd_logs() {
   local follow=()
   [[ "${1:-}" == "-f" ]] && follow=(-f)
@@ -301,6 +320,7 @@ cmd_doctor() {
   check "ffmpeg installed" command -v ffmpeg
   check ".env exists" test -f "$DIR/.env"
   for key in $REQUIRED_KEYS; do check "$key is set" env_has "$key"; done
+  say "${C_DIM}timezone: $(td show -p Timezone --value 2>/dev/null || echo unknown) (the bot also honours TZ in .env)${C_RESET}"
   env_has SELFBOT_OWNER_ID || warn "SELFBOT_OWNER_ID is not set: nobody can use !on / !help (conversions still work)."
   env_has INCEPTION_API_KEY || env_has SCOUT_LLM_API_KEY || warn "No clip-judge key (INCEPTION_API_KEY or SCOUT_LLM_*): clip scouting can't post."
   [[ "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env" 2>/dev/null)" == 600 ]] || warn ".env should be mode 600: chmod 600 $DIR/.env"
@@ -316,6 +336,7 @@ Usage: ./selfbot-ctl.sh <command>
   auto on [min]|off  check for updates on a timer (default every 15 min)
   status             service state and version
   logs [-f]          recent logs (follow with -f)
+  timezone [zone]    show or set the VM's timezone (clip cards print clock times in it)
   doctor             check the install without printing secrets
   start|stop|restart control the service
   version            the checked-out version
@@ -331,6 +352,7 @@ main() {
     update) cmd_update ;;
     auto) cmd_auto "$@" ;;
     status) cmd_status ;;
+    timezone) cmd_timezone "$@" ;;
     logs) cmd_logs "$@" ;;
     doctor) cmd_doctor ;;
     stop) sc_write stop "$SERVICE.service" && ok "stop: done." ;;

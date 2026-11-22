@@ -15,6 +15,7 @@ from selfbot_logic import (
     STOP_CONFIRMATION,
     WELCOME_TEXT,
     AllowlistStore,
+    apply_timezone,
     BotStats,
     CaptchaGuard,
     ChannelKind,
@@ -525,6 +526,52 @@ class HelpTextTests(unittest.TestCase):
         self.assertNotIn("clip", help_text(False).lower())
         self.assertIn("clip", help_text(True).lower())
         self.assertIn("`stop`", help_text(True))
+
+
+class TimezoneTests(unittest.TestCase):
+    EPOCH = 1_800_000_000  # 2027-01-15 08:00:00 UTC
+
+    def setUp(self) -> None:
+        import os
+        import time
+
+        self._old = os.environ.get("TZ")
+        self.addCleanup(self._restore)
+        self.time, self.os = time, os
+
+    def _restore(self) -> None:
+        if self._old is None:
+            self.os.environ.pop("TZ", None)
+        else:
+            self.os.environ["TZ"] = self._old
+        self.time.tzset()
+
+    def _hour(self) -> int:
+        return self.time.localtime(self.EPOCH).tm_hour
+
+    def test_tz_changes_the_local_clock(self) -> None:
+        self.assertEqual(apply_timezone({"TZ": "UTC"}), "UTC")
+        self.assertEqual(self._hour(), 8)
+        self.assertEqual(apply_timezone({"TZ": "America/New_York"}), "America/New_York")
+        self.assertEqual(self._hour(), 3)  # EST, UTC-5, in January
+        apply_timezone({"TZ": "Asia/Kolkata"})
+        self.assertEqual(self.time.localtime(self.EPOCH).tm_min, 30)
+
+    def test_clip_card_times_follow_the_timezone(self) -> None:
+        from clip_render import format_time
+
+        apply_timezone({"TZ": "America/Los_Angeles"})
+        self.assertEqual(format_time(self.EPOCH), "12:00 AM")
+
+    def test_unset_or_blank_leaves_the_host_zone_alone(self) -> None:
+        self.assertIsNone(apply_timezone({}))
+        self.assertIsNone(apply_timezone({"TZ": "  "}))
+
+    def test_an_unknown_zone_is_a_clear_error(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "TZ"):
+            apply_timezone({"TZ": "Mars/Olympus"})
+        with self.assertRaisesRegex(RuntimeError, "TZ"):
+            apply_timezone({"TZ": "../etc/passwd"})
 
 
 if __name__ == "__main__":

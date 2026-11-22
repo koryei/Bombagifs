@@ -173,6 +173,29 @@ make_repos; push_change app.txt v2 "remote"
 echo local >"$DIR/local.txt"; git -C "$DIR" add -A; git -C "$DIR" "${git_ident[@]}" commit -q -m "local only"
 if (cmd_update >/dev/null 2>&1); then fail "diverged history must refuse"; fi
 
+# --- timezone -------------------------------------------------------------------------------------------------
+cat >"$FAKE_BIN/timedatectl" <<'FAKE'
+#!/usr/bin/env bash
+echo "td $*" >>"$FAKE_STATE/calls"
+case "$1" in
+  show) cat "$FAKE_STATE/tz" 2>/dev/null || echo Etc/UTC ;;
+  list-timezones) printf 'America/New_York\nAsia/Kolkata\nEtc/UTC\n' ;;
+  set-timezone) echo "$2" >"$FAKE_STATE/tz" ;;
+esac
+FAKE
+chmod +x "$FAKE_BIN/timedatectl"
+export SELFBOT_CTL_TIMEDATECTL="$FAKE_BIN/timedatectl"
+rm -f "$FAKE_STATE/tz"; : >"$FAKE_STATE/calls"
+assert_contains "$(main timezone 2>&1)" "Etc/UTC" "shows the current zone"
+main timezone America/New_York >/dev/null 2>&1 || fail "a known zone should be accepted"
+assert_equal "America/New_York" "$(cat "$FAKE_STATE/tz")" "zone was set"
+assert_contains "$(cat "$FAKE_STATE/calls")" "restart bombagif-selfbot.service" "the running bot is restarted to pick it up"
+for bad in "Mars/Olympus" "../etc/passwd" 'x; rm -rf /' ""; do
+  [[ -z "$bad" ]] && continue
+  if (main timezone "$bad" >/dev/null 2>&1); then fail "timezone '$bad' must be rejected"; fi
+done
+assert_equal "America/New_York" "$(cat "$FAKE_STATE/tz")" "a rejected zone changes nothing"
+
 # the script itself
 bash -n "$ROOT/selfbot-ctl.sh"
 out="$("$ROOT/selfbot-ctl.sh" help)"; assert_contains "$out" "update" "usage mentions update"

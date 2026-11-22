@@ -383,6 +383,27 @@ START_CONFIRMATION = (
     "Send `stop` any time to turn it all off."
 )
 CLIP_OPT_OUT_CONFIRMATION = "Got it, I won't clip you any more. (Send `start` in a DM to turn it back on.)"
+def apply_timezone(environ: Any) -> str | None:
+    """Make the process use the IANA zone named by ``TZ`` (clip-card clock times, terminal clock), if one is set.
+
+    A VM is usually on UTC. Python reads ``TZ`` lazily, so after the ``.env`` is loaded ``time.tzset()`` makes it apply.
+    Returns the zone name, or ``None`` when ``TZ`` is unset or blank. An unknown name is an error, not a silent UTC.
+    """
+    name = (environ.get("TZ") or "").strip()
+    if not name:
+        return None
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+        raise RuntimeError(f"TZ={name!r} is not a known timezone (use a name like America/New_York)") from exc
+    os.environ["TZ"] = name
+    if hasattr(time, "tzset"):
+        time.tzset()
+    return name
+
+
 NO_MEDIA_TEXT = "I couldn't find a supported image or video to convert."
 _SUFFIX_SAFE = re.compile(r"^\.[a-z0-9]{1,8}$")
 

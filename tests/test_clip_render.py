@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import io
 import unittest
+from pathlib import Path
 
 from PIL import Image
 
@@ -21,6 +22,7 @@ from clip_render import (
     collect_asset_keys,
     demo_card,
     format_time,
+    host_zone,
     group_messages,
     load_fonts,
     render_clip,
@@ -116,6 +118,45 @@ def count_close(image: Image.Image, color: tuple[int, int, int], tolerance: int 
 
 
 class FormatTimeTests(unittest.TestCase):
+    def test_host_zone_reads_the_machine_zone_fresh_each_time(self) -> None:
+        import os
+        import shutil
+        import tempfile
+        import zoneinfo
+
+        source = next((Path(root) / "America/New_York" for root in zoneinfo.TZPATH if (Path(root) / "America/New_York").is_file()), None)
+        if source is None:
+            self.skipTest("no system zoneinfo database")
+        epoch = 1_800_000_000  # 08:00 UTC
+        with tempfile.TemporaryDirectory() as work:
+            localtime = Path(work) / "localtime"
+            shutil.copy(source, localtime)
+            old = os.environ.pop("TZ", None)
+            try:
+                self.assertEqual(format_time(epoch, host_zone(str(localtime))), "3:00 AM")
+            finally:
+                if old is not None:
+                    os.environ["TZ"] = old
+
+    def test_host_zone_prefers_tz_and_survives_a_missing_file(self) -> None:
+        import os
+
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Tokyo"
+        try:
+            self.assertEqual(format_time(1_800_000_000, host_zone("/nonexistent/localtime")), "5:00 PM")
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+        os.environ.pop("TZ", None)
+        try:
+            self.assertIsNone(host_zone("/nonexistent/localtime"))  # falls back to the C library's local time
+        finally:
+            if old is not None:
+                os.environ["TZ"] = old
+
     def test_format_time(self) -> None:
         utc = datetime.timezone.utc
 

@@ -34,7 +34,8 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `bash tests/test_installer.sh`.
 - `install.sh`, `Dockerfile`, `compose.yaml` — deployment for the app only.
 - `selfbot-ctl.sh` — VM deployment for the self-bot (Ubuntu/Debian + systemd): `install`, `update` (ff-only, deps only when
-  requirements changed, smoke import, health check, auto rollback), `auto on|off`, `status`, `logs`, `doctor`. Test: `bash tests/test_selfbot_ctl.sh`
+  requirements changed, smoke import, health check, auto rollback), `auto on|off`, `timezone`, `status`, `logs`, `doctor`.
+  The bot honours `TZ` from `.env` (`apply_timezone`, `time.tzset()`); a VM defaults to UTC, which would put UTC times on clip cards. Test: `bash tests/test_selfbot_ctl.sh`
   (fake systemctl + throwaway git repos; the real `install` step needs a real VM and is not covered).
 
 Formats: `ALLOWED_TYPES` / `VIDEO_SUFFIXES` in `bombagif_core.py` (images: PNG, JPG, WEBP, AVIF, BMP, TIFF, SVG; video: MP4, MOV, WebM, MKV, AVI, M4V, 3GP, OGV, WMV via FFmpeg). Not supported: HEIC, GIF input.
