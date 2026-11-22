@@ -64,6 +64,29 @@ env_has SELFBOT_TOKEN || fail "env_has should see a set key"
 printf 'EMPTY=\n' >"$DIR/.env"
 ! env_has EMPTY || fail "an empty value is not set"
 
+# --- the prompts (scripted answers through a fake terminal) ----------------------------------------------------
+DIR="$TEST_ROOT/promptdir"; mkdir -p "$DIR"
+cp "$ROOT/.env.example" "$DIR/.env.example"
+export SELFBOT_CTL_TTY="$TEST_ROOT/tty"; TTY="$SELFBOT_CTL_TTY"
+# an empty answer to a required prompt asks again; the optional key may be skipped
+printf '\nacct-token\nhttps://zip.example.test\nzip-token\n12345\n\n' >"$TTY"
+collect_env 2>/dev/null
+python3 - "$DIR/.env" <<'PY'
+import stat, sys, os
+from dotenv import dotenv_values
+v = dotenv_values(sys.argv[1])
+assert v["SELFBOT_TOKEN"] == "acct-token", v
+assert v["ZIPLINE_URL"] == "https://zip.example.test"
+assert v["ZIPLINE_TOKEN"] == "zip-token"
+assert v["SELFBOT_OWNER_ID"] == "12345"
+assert not v.get("INCEPTION_API_KEY")
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600
+PY
+# a second run keeps what is set (it only asks again for the skipped optional key)
+printf '\n' >"$TTY"
+collect_env 2>/dev/null
+assert_equal acct-token "$(python3 -c 'import sys; from dotenv import dotenv_values; print(dotenv_values(sys.argv[1])["SELFBOT_TOKEN"])' "$DIR/.env")" "existing values kept"
+
 # --- units -------------------------------------------------------------------------------------------------
 DIR="/srv/bombagif"; VENV="$DIR/.venv-selfbot"
 unit="$(render_unit alice alice)"

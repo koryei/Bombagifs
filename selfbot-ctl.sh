@@ -75,16 +75,34 @@ env_has() {  # env_has KEY: non-empty value in .env, without printing it
   KEY="$1" ENVFILE="$DIR/.env" python3 - <<'PY'
 import os
 from dotenv import dotenv_values
-raise SystemExit(0 if dotenv_values(os.environ["ENVFILE"]).get(os.environ["KEY"]) else 1)
+value = dotenv_values(os.environ["ENVFILE"]).get(os.environ["KEY"])
+# the placeholder URL that .env.example ships with does not count as configured
+raise SystemExit(0 if value and "your-zipline.example.com" not in value else 1)
 PY
 }
 
-ask() {  # ask VAR "prompt" [hidden]
-  local var="$1" prompt="$2" hidden="${3:-}" value=''
-  [[ -r /dev/tty ]] || die "Needs a terminal. Edit $DIR/.env by hand, then run: ./selfbot-ctl.sh install"
-  if [[ -n "$hidden" ]]; then read -r -s -p "$prompt" value </dev/tty; printf '\n' >/dev/tty
-  else read -r -p "$prompt" value </dev/tty; fi
-  printf -v "$var" '%s' "$value"
+TTY="${SELFBOT_CTL_TTY:-/dev/tty}"
+
+# ask <var> <prompt> [hidden]: read one line into the caller's variable. (Locals here are underscore-prefixed so they
+# can never shadow the variable being filled.)
+ask() {
+  local _var="$1" _prompt="$2" _hidden="${3:-}" _reply=''
+  # Answers come from fd 3 (opened once by collect_env), so a scripted file is consumed line by line like a terminal.
+  if [[ -n "$_hidden" ]]; then read -r -s -p "$_prompt" _reply <&3 || die "No more input; edit $DIR/.env by hand, then re-run install."; printf '\n' >&2
+  else read -r -p "$_prompt" _reply <&3 || die "No more input; edit $DIR/.env by hand, then re-run install."; fi
+  printf -v "$_var" '%s' "$_reply"
+}
+
+# prompt_env <KEY> <prompt> <hidden|plain> <required|optional>: ask only when the key is not set yet.
+prompt_env() {
+  local key="$1" prompt="$2" mode="$3" need="$4" answer=''
+  env_has "$key" && return 0
+  while :; do
+    ask answer "$prompt" "$([[ "$mode" == hidden ]] && echo hidden)"
+    if [[ -n "$answer" ]]; then set_env "$key" answer; return 0; fi
+    [[ "$need" == optional ]] && return 0
+    warn "$key is required."
+  done
 }
 
 collect_env() {
@@ -93,14 +111,14 @@ collect_env() {
     cp "$DIR/.env.example" "$DIR/.env"
   fi
   chmod 600 "$DIR/.env"
-  local value
-  # Needs-to-run values first; optional ones may be left empty.
-  if ! env_has SELFBOT_TOKEN;      then ask value "Self-bot account token (hidden; use an alt account): " hidden; [[ -n "$value" ]] && set_env SELFBOT_TOKEN value; fi
-  if ! env_has ZIPLINE_URL;        then ask value "Your Zipline URL (https://...): "; [[ -n "$value" ]] && set_env ZIPLINE_URL value; fi
-  if ! env_has ZIPLINE_TOKEN;      then ask value "Zipline API token (hidden): " hidden; [[ -n "$value" ]] && set_env ZIPLINE_TOKEN value; fi
-  if ! env_has SELFBOT_OWNER_ID;   then ask value "Your Discord user ID (the only person who can use !on etc.): "; [[ -n "$value" ]] && set_env SELFBOT_OWNER_ID value; fi
-  if ! env_has INCEPTION_API_KEY;  then ask value "Inception API key for the clip judge (hidden, Enter to skip): " hidden; [[ -n "$value" ]] && set_env INCEPTION_API_KEY value; fi
-  unset value
+  [[ -r "$TTY" ]] || die "Needs a terminal. Edit $DIR/.env by hand (see .env.example), then run: ./selfbot-ctl.sh install"
+  exec 3<"$TTY"
+  prompt_env SELFBOT_TOKEN "Self-bot account token (hidden; use an alt account): " hidden required
+  prompt_env ZIPLINE_URL "Your Zipline URL (https://...): " plain required
+  prompt_env ZIPLINE_TOKEN "Zipline API token (hidden): " hidden required
+  prompt_env SELFBOT_OWNER_ID "Your Discord user ID (the only person who can use !on etc.): " plain required
+  prompt_env INCEPTION_API_KEY "Inception API key for the clip judge (hidden, Enter to skip): " hidden optional
+  exec 3<&-
   return 0
 }
 
