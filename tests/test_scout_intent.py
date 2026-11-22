@@ -23,7 +23,7 @@ from scout_intent import (
 from scout_judge import CallBudget, ProviderError, ProviderUnavailable
 from scout_trigger import Trigger
 
-UNSURE = Trigger("clip", 1, sure=False)
+UNSURE = Trigger("clip", sure=False)
 
 
 def utc(y: int, m: int, d: int) -> float:
@@ -35,7 +35,7 @@ _DEFAULT = object()
 
 class FakeChat:
     def __init__(self, raw: object = _DEFAULT, *, error: Exception | None = None) -> None:
-        self.raw = {"request": "clip", "count": 1} if raw is _DEFAULT else raw
+        self.raw = {"request": "clip"} if raw is _DEFAULT else raw
         self.error = error
         self.calls: list[dict[str, object]] = []
 
@@ -72,23 +72,15 @@ def classifier(*backends: tuple[str, object], per_day: int = 50, now: float | No
 class ClassifyTests(unittest.IsolatedAsyncioTestCase):
     async def test_clip_gif_and_none(self) -> None:
         for raw, expected in (
-            ({"request": "clip", "count": 1}, Intent("clip", 1)),
-            ({"request": "gif", "count": 1}, Intent("gif", 1)),
-            ({"request": "none", "count": 1}, Intent("none", 1)),
-            ({"request": "clip", "count": 3}, Intent("clip", 3)),
+            ({"request": "clip"}, Intent("clip")),
+            ({"request": "gif"}, Intent("gif")),
+            ({"request": "none"}, Intent("none")),
         ):
             with self.subTest(raw=raw):
                 self.assertEqual(await classifier(("a", FakeChat(raw))).classify("clkip that LMFAII", is_reply=False, guess=UNSURE), expected)
 
-    async def test_counts_are_clamped(self) -> None:
-        for count, expected in ((0, 1), (-4, 1), (99, 5), (2, 2)):
-            with self.subTest(count=count):
-                result = await classifier(("a", FakeChat({"request": "clip", "count": count}))).classify("x", is_reply=False, guess=UNSURE)
-                self.assertEqual(result, Intent("clip", expected))
-
     async def test_malformed_answers_mean_no_request(self) -> None:
-        for raw in (None, "clip", [], {"request": "dance", "count": 1}, {"count": 1}, {"request": "clip", "count": "2"},
-                    {"request": "clip", "count": True}, {"request": 7, "count": 1}, {"request": "clip", "count": 1.5}):
+        for raw in (None, "clip", [], {"request": "dance"}, {"count": 1}, {}, {"request": 7}, {"request": None}):
             with self.subTest(raw=raw), self.assertLogs("bombagif.scout", "WARNING"):
                 self.assertIsNone(await classifier(("a", FakeChat(raw))).classify("x", is_reply=False, guess=UNSURE))
 
@@ -110,7 +102,7 @@ class ClassifyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_schema_is_strict_and_closed(self) -> None:
         self.assertFalse(INTENT_SCHEMA["additionalProperties"])
-        self.assertEqual(set(INTENT_SCHEMA["required"]), {"request", "count"})  # type: ignore[arg-type]
+        self.assertEqual(set(INTENT_SCHEMA["required"]), {"request"})  # type: ignore[arg-type]
         json.dumps(INTENT_SCHEMA)
 
     async def test_system_prompt_teaches_typos_and_refuses_talk_about_clips(self) -> None:
@@ -125,18 +117,14 @@ class DecideTests(unittest.IsolatedAsyncioTestCase):
         return await classifier(("inception", decide)).classify(text, is_reply=is_reply, guess=guess)
 
     async def test_a_confident_yes_is_a_clip_or_a_gif(self) -> None:
-        self.assertEqual(await self.ask(FakeDecide(clip=0.96)), Intent("clip", 1))
-        self.assertEqual(await self.ask(FakeDecide(clip=0.1, gif=0.9)), Intent("gif", 1))
-        self.assertEqual(await self.ask(FakeDecide(clip=0.8, gif=0.9)), Intent("gif", 1))  # the likelier one wins
+        self.assertEqual(await self.ask(FakeDecide(clip=0.96)), Intent("clip"))
+        self.assertEqual(await self.ask(FakeDecide(clip=0.1, gif=0.9)), Intent("gif"))
+        self.assertEqual(await self.ask(FakeDecide(clip=0.8, gif=0.9)), Intent("gif"))  # the likelier one wins
 
     async def test_the_bar_is_inclusive_and_anything_below_is_chat(self) -> None:
-        self.assertEqual(await self.ask(FakeDecide(clip=INTENT_MIN_PROBABILITY)), Intent("clip", 1))
-        self.assertEqual(await self.ask(FakeDecide(clip=INTENT_MIN_PROBABILITY - 0.01, gif=0.2)), Intent("none", 1))
-        self.assertEqual(await self.ask(FakeDecide()), Intent("none", 1))
-
-    async def test_the_count_comes_from_the_phrase_not_the_model(self) -> None:
-        self.assertEqual(await self.ask(FakeDecide(clip=0.95), guess=Trigger("clip", 3, sure=False)), Intent("clip", 3))
-        self.assertEqual(await self.ask(FakeDecide(gif=0.95), guess=Trigger("clip", 3, sure=False)), Intent("gif", 1))
+        self.assertEqual(await self.ask(FakeDecide(clip=INTENT_MIN_PROBABILITY)), Intent("clip"))
+        self.assertEqual(await self.ask(FakeDecide(clip=INTENT_MIN_PROBABILITY - 0.01, gif=0.2)), Intent("none"))
+        self.assertEqual(await self.ask(FakeDecide()), Intent("none"))
 
     async def test_one_call_with_both_questions_and_the_line_only_as_state(self) -> None:
         decide = FakeDecide(clip=0.9)
@@ -157,24 +145,24 @@ class DecideTests(unittest.IsolatedAsyncioTestCase):
         for answers in ({}, {"clip": {"noul": 0.9}}, {"clip": {"noul": "high"}, "gif": {"noul": 0.1}}, {"clip": {"noul": 1.5}, "gif": {"noul": 0.1}},
                         {"clip": {"noul": True}, "gif": {"noul": 0.1}}, "nope"):
             with self.subTest(answers=answers):
-                chat = FakeChat({"request": "clip", "count": 2})
+                chat = FakeChat({"request": "clip"})
                 c = classifier(("inception", FakeDecide(answers=answers)), ("b", chat))
                 with self.assertLogs("bombagif.scout", "WARNING"):
-                    self.assertEqual(await c.classify("x", is_reply=False, guess=UNSURE), Intent("clip", 2))
+                    self.assertEqual(await c.classify("x", is_reply=False, guess=UNSURE), Intent("clip"))
                 self.assertEqual(len(chat.calls), 1)
 
     async def test_decide_is_asked_first_and_the_chat_model_is_not_needed(self) -> None:
         chat = FakeChat()
         result = await classifier(("inception", FakeDecide(clip=0.99)), ("b", chat)).classify("x", is_reply=False, guess=UNSURE)
-        self.assertEqual(result, Intent("clip", 1))
+        self.assertEqual(result, Intent("clip"))
         self.assertEqual(chat.calls, [])
 
 
 class FallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_failing_provider_falls_through_to_the_next(self) -> None:
-        first, second = FakeChat(error=ProviderError("boom")), FakeChat({"request": "clip", "count": 2})
+        first, second = FakeChat(error=ProviderError("boom")), FakeChat({"request": "clip"})
         result = await classifier(("a", first), ("b", second)).classify("x", is_reply=False, guess=UNSURE)
-        self.assertEqual(result, Intent("clip", 2))
+        self.assertEqual(result, Intent("clip"))
         self.assertEqual((len(first.calls), len(second.calls)), (1, 1))
 
     async def test_a_gone_provider_is_not_asked_again(self) -> None:
@@ -192,7 +180,7 @@ class FallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_decide_is_skipped_after_the_inception_shutdown(self) -> None:
         decide, chat = FakeDecide(clip=0.99), FakeChat()
         c = classifier(("inception", decide), ("b", chat), now=utc(2026, 12, 29))
-        self.assertEqual(await c.classify("x", is_reply=False, guess=UNSURE), Intent("clip", 1))
+        self.assertEqual(await c.classify("x", is_reply=False, guess=UNSURE), Intent("clip"))
         self.assertEqual(decide.calls, [])
 
     async def test_no_providers_means_no_request(self) -> None:

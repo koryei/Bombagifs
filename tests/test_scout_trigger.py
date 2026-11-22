@@ -1,7 +1,6 @@
 import unittest
 
-from scout_buffer import ScoutMessage, Version
-from scout_trigger import Trigger, edit_distance, parse_trigger, pick_targets
+from scout_trigger import Trigger, edit_distance, parse_trigger
 
 CLIP = Trigger("clip")
 GIF = Trigger("gif")
@@ -34,23 +33,24 @@ class ParseSureTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_trigger(text), CLIP)
 
-    def test_a_whole_convo(self) -> None:
-        for text in ("clip that convo", "clip this conversation", "bro clip this whole convo lmao", "clip that exchange"):
+    def test_convo_requests_are_not_phrases(self) -> None:
+        for text in ("clip that convo", "clip this conversation", "clip that exchange"):
             with self.subTest(text=text):
-                self.assertEqual(parse_trigger(text), Trigger("clip", 4))
+                result = parse_trigger(text)
+                self.assertTrue(result is None or not result.sure, result)
 
     def test_clip_last_n_is_not_a_phrase_anymore(self) -> None:
         for text in ("clip last 3", "clip the last 3 messages", "clip last three", "clip last few", "clip last 99"):
             with self.subTest(text=text):
                 result = parse_trigger(text)
-                self.assertTrue(result is None or (not result.sure and result.count == 1), result)
+                self.assertTrue(result is None or not result.sure, result)
 
     def test_a_bare_verb_needs_a_reply(self) -> None:
         self.assertEqual(parse_trigger("clip", is_reply=True), CLIP)
         self.assertEqual(parse_trigger("clip lmao", is_reply=True), CLIP)
         self.assertEqual(parse_trigger("clipped", is_reply=True), CLIP)
         bare = parse_trigger("clip")
-        self.assertEqual(bare, Trigger("clip", 1, sure=False))  # unsure without a reply: the AI decides
+        self.assertEqual(bare, Trigger("clip", sure=False))  # unsure without a reply: the AI decides
 
     def test_gif_phrases(self) -> None:
         for text in ("gif that", "gif this", "gif it", "GIF THAT lmao", "make that a gif", "make this a gif pls", "turn it into a gif",
@@ -88,11 +88,7 @@ class ParseTyposTests(unittest.TestCase):
     def test_typos_are_unsure_so_the_ai_decides(self) -> None:
         for text in ("clkip that LMFAII", "cilp that", "clpi that", "clip taht", "clp that", "clipp that", "clkip thattt", "clip thta lmao"):
             with self.subTest(text=text):
-                self.assertEqual(parse_trigger(text), Trigger("clip", 1, sure=False))
-
-    def test_unsure_requests_keep_a_count_the_ai_does_not_have_to_guess(self) -> None:
-        self.assertEqual(parse_trigger("clkip that convo"), Trigger("clip", 4, sure=False))
-        self.assertEqual(parse_trigger("cilp this whole conversation"), Trigger("clip", 4, sure=False))
+                self.assertEqual(parse_trigger(text), Trigger("clip", sure=False))
 
     def test_look_alike_words_may_be_sent_to_the_ai_but_never_post_alone(self) -> None:
         for text in ("flip that", "chip it", "slip that", "clap that"):
@@ -113,26 +109,6 @@ class EditDistanceTests(unittest.TestCase):
         self.assertEqual(edit_distance("flip", "clip"), 1)
         self.assertEqual(edit_distance("clap", "clip"), 1)
         self.assertEqual(edit_distance("clock", "clip"), 3)
-
-
-def msg(i: int, author: int = 1, at: float = 1000.0, eligible: bool = True, text: str = "hi") -> ScoutMessage:
-    return ScoutMessage(i, 50, author, f"u{author}", "", None, None, at, [Version(text, at)], eligible=eligible)
-
-
-class PickTargetsTests(unittest.TestCase):
-    def test_picks_the_last_n(self) -> None:
-        chat = [msg(1), msg(2, 2), msg(3, 1), msg(4, 2)]
-        self.assertEqual([m.id for m in pick_targets(chat, 1)], [4])
-        self.assertEqual([m.id for m in pick_targets(chat, 3)], [2, 3, 4])
-        self.assertEqual([m.id for m in pick_targets(chat, 99)], [1, 2, 3, 4])
-
-    def test_no_more_than_three_authors(self) -> None:
-        chat = [msg(1, 1), msg(2, 2), msg(3, 3), msg(4, 4), msg(5, 5)]
-        self.assertEqual([m.id for m in pick_targets(chat, 5)], [3, 4, 5])
-
-    def test_empty(self) -> None:
-        self.assertEqual(pick_targets([], 3), [])
-        self.assertEqual(pick_targets([msg(1)], 0), [])
 
 
 if __name__ == "__main__":

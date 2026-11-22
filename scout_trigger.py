@@ -1,4 +1,4 @@
-"""Spoken-style triggers for clips (discord-free): "clip that", "clip that convo", "gif that", and their typos.
+"""Spoken-style triggers for clips (discord-free): "clip that", "gif that", and their typos.
 
 ``parse_trigger`` reads one chat message. It returns a ``Trigger`` that is **sure** (the whole message is a known phrase,
 filler and laughter aside) or **unsure** (it looks like a request but is typo'd or oddly worded, so an AI check must
@@ -9,17 +9,12 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from scout_buffer import ScoutMessage
-from scout_judge import MAX_CLIP_AUTHORS
 
 MAX_TRIGGER_CHARS = 80
 MAX_TRIGGER_TOKENS = 8
-MAX_COUNT = 5
-CONVO_COUNT = 4
 
 _MENTION_RE = re.compile(r"<[@#][!&]?\d+>|@everyone|@here", re.IGNORECASE)
 _CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
@@ -39,10 +34,8 @@ _FILLER = frozenset(
     "highkey actually whole entire full um uh uhh hm hmm so like wait bombaclip bombagif bombaclat bot is are was it's thats".split()
 )
 _OBJECT = frozenset(
-    "that this it dat dis tht those these them dem one message msg text moment shi shit convo conversation exchange thread "
-    "line lines quote".split()
+    "that this it dat dis tht those these them dem one message msg text moment shi shit line lines quote".split()
 )
-_CONVO_WORDS = frozenset({"convo", "conversation", "exchange", "thread"})
 _CLIP_VERBS = frozenset({"clip", "clips", "clipping"})
 _CLIPPED = frozenset({"clipped"})
 _GIF_WORDS = frozenset({"gif", "gifs", "jif"})
@@ -54,7 +47,6 @@ class Trigger:
     """A request found in a message. ``sure`` is False when only the AI check may confirm it."""
 
     kind: Literal["clip", "gif"]
-    count: int = 1
     sure: bool = True
 
 
@@ -109,7 +101,7 @@ def _sure_clip(core: list[str], is_reply: bool) -> Trigger | None:
     if not before and not after:
         return Trigger("clip") if is_reply else None  # a bare "clip" needs a message to point at
     if not before and after and all(word in _OBJECT for word in after):
-        return Trigger("clip", CONVO_COUNT if any(word in _CONVO_WORDS for word in after) else 1)
+        return Trigger("clip")
     return None
 
 
@@ -120,11 +112,6 @@ def _sure_gif(core: list[str], is_reply: bool) -> Trigger | None:
         return None
     has_object = any(word in _OBJECT for word in core)
     return Trigger("gif") if has_object or is_reply else None
-
-
-def _convo_count(tokens: list[str]) -> int:
-    """4 messages for "that convo" / "this whole conversation", else 1 (what an unsure request asks for)."""
-    return CONVO_COUNT if any(word in _CONVO_WORDS for word in tokens) else 1
 
 
 def _looks_like_clip(tokens: list[str]) -> bool:
@@ -148,15 +135,6 @@ def parse_trigger(text: str, *, is_reply: bool = False) -> Trigger | None:
     if sure is not None:
         return sure
     if _looks_like_clip(tokens):
-        return Trigger("clip", _convo_count(tokens), sure=False)
+        return Trigger("clip", sure=False)
     return None
 
-
-def pick_targets(recent: Sequence[ScoutMessage], count: int, *, max_authors: int = MAX_CLIP_AUTHORS) -> list[ScoutMessage]:
-    """The last ``count`` messages (oldest first), trimmed from the oldest end until at most ``max_authors`` people are in it."""
-    if count <= 0 or not recent:
-        return []
-    chosen = list(recent[-count:])
-    while len({message.author_id for message in chosen}) > max_authors:
-        chosen.pop(0)
-    return chosen

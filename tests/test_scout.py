@@ -887,7 +887,7 @@ class NoticeAndCommandTests(unittest.TestCase):
 
     def test_help_texts_cover_every_command_and_fit_in_one_message(self) -> None:
         for needle in ("!on", "!off", "!status", "!list", "!taste", "!taste add", "!taste clear",
-                       "!examples", "!examples clear", "!tune", "`good`", "`bad`", "`skip`", "clip that", "clip that convo", "gif that", "`stop`", "`start`", "!help"):
+                       "!examples", "!examples clear", "!tune", "`good`", "`bad`", "`skip`", "clip that", "gif that", "`stop`", "`start`", "!help"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, HELP_OWNER)
         self.assertIn("Reply", HELP_OWNER)

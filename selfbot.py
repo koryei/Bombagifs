@@ -62,12 +62,12 @@ from scout import (
 )
 from scout_config import read_scout_config
 from scout_intent import IntentClassifier, build_intent_classifier
-from scout_judge import MAX_CLIP_MESSAGES, Verdict, build_judge_chain
+from scout_judge import Verdict, build_judge_chain
 from scout_manual import ManualGate
 from scout_stores import ClipRecord
 from scout_taste import NOTES_MAX_CHARS, TasteBook, tune_report
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
-from scout_trigger import Trigger, parse_trigger, pick_targets
+from scout_trigger import Trigger, parse_trigger
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
     NO_MEDIA_TEXT,
@@ -784,7 +784,7 @@ class SelfBot(discord.Client):
             intent = await self.intent.classify(text, is_reply=is_reply, guess=trigger)
             if intent is None or intent.kind == "none" or (intent.kind == "gif" and not member):
                 return False
-            trigger = Trigger(intent.kind, intent.count)
+            trigger = Trigger(intent.kind)
         if self.captcha_guard.blocked:
             return True
         if not self.rate_limiter.allow(author.id):
@@ -808,18 +808,15 @@ class SelfBot(discord.Client):
                 message, self._manual_chosen(referenced, runtime), target_is_bot=bool(referenced.author.bot), silent=True
             )
             return
-        recent = runtime.buffer.recent(channel.id, message.id, MAX_CLIP_MESSAGES)
+        recent = runtime.buffer.recent(channel.id, message.id, 1)
         if not recent:
             return
         age = message.created_at.timestamp() - recent[-1].created_at
         if age > runtime.cfg.trigger_max_age_s:
             self.stats.note("info", f"{self._who(message.author)}: clip request ignored (nothing recent to clip)")
             return
-        if trigger.count > 1:
-            chosen = pick_targets(recent, trigger.count)
-        else:
-            newest = recent[-1]
-            chosen = next((run for run in runtime.buffer.runs(channel.id) if any(m.id == newest.id for m in run)), [newest])
+        newest = recent[-1]
+        chosen = next((run for run in runtime.buffer.runs(channel.id) if any(m.id == newest.id for m in run)), [newest])
         await self._manual_clip(message, list(chosen), target_is_bot=False, silent=True)
 
     async def on_message(self, message: discord.Message) -> None:

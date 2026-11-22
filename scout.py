@@ -523,7 +523,7 @@ HELP_OWNER = (
     "`skip`. You can also reply `good`/`bad` to any clip I posted. Your ratings become examples the judge sees.\n"
     "**Clip that**\n"
     "In chats where scouting is on, say or reply `clip that` (no ping needed; typos and \"lmfao\" are fine) and I clip "
-    "that message, or the latest one if you don't reply. `clip that convo` clips the last few, replying `gif that` to an image or "
+    "that message, or the latest one if you don't reply. Replying `gif that` to an image or "
     "video makes a GIF. Members can do this in scouting chats; you can also reply and @ me anywhere. Opted-out people "
     "and sensitive text are always refused, silently when nobody pinged me.\n"
     "**Everyone**\n"
