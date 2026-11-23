@@ -77,6 +77,7 @@ from selfbot_logic import (
     STOP_CONFIRMATION,
     AllowlistStore,
     BotStats,
+    BusyTracker,
     CaptchaGuard,
     ChannelKind,
     Cooldown,
@@ -124,6 +125,7 @@ class SelfBot(discord.Client):
         self.config = settings
         self.allowlist = allowlist
         self.captcha_guard = captcha_guard or CaptchaGuard(allowlist.path.with_name("captcha-blocked.json"))
+        self.busy = BusyTracker(allowlist.path.with_name("busy.json"))  # an update waits for this to reach zero
         self.rate_limiter = rate_limiter or RateLimiter()
         self.stats = BotStats()
         self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
@@ -634,6 +636,10 @@ class SelfBot(discord.Client):
 
     async def _post_clip(self, plan: ClipPlan) -> int | None:
         """Render a planned clip and post it (or DM it to the owner). Returns the sent message id, or ``None``."""
+        with self.busy.job():
+            return await self._render_and_post_clip(plan)
+
+    async def _render_and_post_clip(self, plan: ClipPlan) -> int | None:
         runtime = self._scouting()
         if runtime is None or self.http_session is None:
             return None
@@ -886,6 +892,10 @@ class SelfBot(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         """Apply the consent and trigger rules to every message the account can see."""
+        with self.busy.job():
+            await self._on_message(message)
+
+    async def _on_message(self, message: discord.Message) -> None:
         try:
             if (
                 await self._handle_rating_reply(message)

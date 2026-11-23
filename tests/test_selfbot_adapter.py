@@ -598,6 +598,32 @@ class SelfBotUpdateNoticeTests(_SelfBotCase):
 
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotBusyTests(_SelfBotCase):
+    """In-flight work is mirrored to data/busy.json so an update can wait for it."""
+
+    def marker(self) -> dict:
+        return json.loads(self.allowlist.path.with_name("busy.json").read_text(encoding="utf-8"))
+
+    async def test_a_conversion_marks_the_bot_busy(self) -> None:
+        self.allowlist.add(99)
+        seen: list[int] = []
+
+        async def convert(*args: object, **kwargs: object) -> str:
+            seen.append(self.marker()["jobs"])
+            return LINK
+
+        with patch("selfbot.convert_and_upload", side_effect=convert):
+            await self.bot.on_message(make_message(attachments=[attachment("cat.png")]))
+        self.assertEqual(seen, [1], "the conversion runs while the marker says one job")
+        self.assertEqual(self.marker()["jobs"], 0, "the marker is cleared afterwards")
+
+    async def test_a_message_with_nothing_to_do_leaves_the_marker_clear(self) -> None:
+        self.allowlist.add(99)
+        await self.bot.on_message(make_message(content="hello"))
+        self.assertEqual(self.marker()["jobs"], 0)
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
 class SelfBotStatsTests(_SelfBotCase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
