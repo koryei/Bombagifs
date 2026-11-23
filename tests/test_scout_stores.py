@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
+from scout_stores import ClipLedger, ClipRecord, OptOutStore, ReviewItem, ReviewStore, ScoutChatStore
 
 
 class TempDirCase(unittest.TestCase):
@@ -155,6 +155,48 @@ class ClipLedgerTests(TempDirCase):
 
     def test_recent_posted_ids_of_a_missing_file_is_empty(self) -> None:
         self.assertEqual(ClipLedger(self.dir / "none.jsonl").recent_posted_ids(), set())
+
+
+def review(id: int = 1, would_clip: bool = True) -> ReviewItem:
+    return ReviewItem(id, 7, ("Pranit",), (("A", "the better one was me"),), 8.7, {"funny": 0.93}, "deadpan", would_clip)
+
+
+class ReviewStoreTests(TempDirCase):
+    def test_round_trip_keeps_order_and_fields_mode_600(self) -> None:
+        path = self.dir / "reviews.json"
+        store = ReviewStore(path)
+        store.save({6001: review(1), 6002: review(2, would_clip=False)})
+        loaded = ReviewStore(path).load()
+        self.assertEqual(list(loaded), [6001, 6002])
+        self.assertEqual(loaded[6001], review(1))
+        self.assertEqual(loaded[6002].would_clip, False)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_missing_file_means_no_pending_reviews(self) -> None:
+        self.assertEqual(ReviewStore(self.dir / "none.json").load(), {})
+
+    def test_corrupt_file_is_moved_aside(self) -> None:
+        path = self.dir / "reviews.json"
+        path.write_text("{nope", encoding="utf-8")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            loaded = ReviewStore(path).load()
+        self.assertEqual(loaded, {})
+        self.assertTrue(path.with_name("reviews.json.corrupt").exists())
+
+    def test_a_malformed_row_moves_the_whole_file_aside(self) -> None:
+        path = self.dir / "reviews.json"
+        path.write_text('{"6001": {"id": 1}}', encoding="utf-8")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            loaded = ReviewStore(path).load()
+        self.assertEqual(loaded, {})
+        self.assertTrue(path.with_name("reviews.json.corrupt").exists())
+
+    def test_saving_an_empty_mapping_clears_the_file(self) -> None:
+        path = self.dir / "reviews.json"
+        store = ReviewStore(path)
+        store.save({6001: review()})
+        store.save({})
+        self.assertEqual(ReviewStore(path).load(), {})
 
 
 if __name__ == "__main__":

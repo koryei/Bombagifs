@@ -322,6 +322,7 @@ class SelfBot(discord.Client):
             blocklist=runtime.blocklist,
             on_review=self._send_review,
             taste=runtime.taste_store,
+            review_store=runtime.review_store,
         )
         self._clip_message_ids |= runtime.ledger.recent_posted_ids()
         self._scout_task = asyncio.create_task(runtime.scout.run(), name="clip-scout")

@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +105,20 @@ class ClipRecord:
     speakers: tuple[str, ...] | None = None  # anonymous speaker label per text line (A, B, C), for teaching examples
 
 
+@dataclass(frozen=True)
+class ReviewItem:
+    """A candidate the owner may rate. ``lines`` are anonymous (speaker label, original text); ``names`` are for the DM."""
+
+    id: int
+    chat_id: int
+    names: tuple[str, ...]
+    lines: tuple[tuple[str, str], ...]
+    funny: float
+    decide: Mapping[str, float]
+    reason: str
+    would_clip: bool
+
+
 class ClipLedger:
     """Append-only JSON-lines record of clips (mode 600). Text is stored only for posted/owner clips."""
 
@@ -167,3 +181,53 @@ class ClipLedger:
             except (KeyError, TypeError, ValueError):
                 continue
         return None
+
+
+def _review_item(row: object) -> ReviewItem:
+    """Parse one stored candidate, raising ValueError/TypeError/KeyError when it is malformed."""
+    if not isinstance(row, dict):
+        raise ValueError("a pending review must be an object")
+    return ReviewItem(
+        id=int(row["id"]),
+        chat_id=int(row["chat_id"]),
+        names=tuple(str(name) for name in row["names"]),
+        lines=tuple((str(speaker), str(text)) for speaker, text in row["lines"]),
+        funny=float(row["funny"]),
+        decide={str(key): float(value) for key, value in dict(row["decide"]).items()},
+        reason=str(row.get("reason", "")),
+        would_clip=bool(row["would_clip"]),
+    )
+
+
+class ReviewStore:
+    """``data/reviews.json``: candidates still waiting for the owner's rating, so a restart does not lose them."""
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path)
+
+    def load(self) -> OrderedDict[int, ReviewItem]:
+        """Pending candidates by DM message id, oldest first. A missing file means none; a corrupt one is moved aside."""
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return OrderedDict()
+        except OSError as exc:
+            logger.warning("Could not read pending reviews %s (%s); starting empty", self.path, exc)
+            return OrderedDict()
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("pending reviews must be a JSON object")
+            return OrderedDict((int(key), _review_item(row)) for key, row in data.items())
+        except (ValueError, TypeError, KeyError) as exc:
+            aside = self.path.with_name(self.path.name + ".corrupt")
+            logger.warning("Pending reviews %s are corrupt (%s); moved to %s and starting empty", self.path, exc, aside)
+            try:
+                os.replace(self.path, aside)
+            except OSError:
+                logger.warning("Could not move the corrupt pending reviews aside", exc_info=True)
+            return OrderedDict()
+
+    def save(self, reviews: Mapping[int, ReviewItem]) -> None:
+        """Replace the file with ``reviews`` (atomic, mode 600)."""
+        write_private_json(self.path, {str(key): dataclasses.asdict(item) for key, item in reviews.items()})

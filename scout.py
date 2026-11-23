@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -20,7 +20,7 @@ from scout_buffer import ScoutBuffer, ScoutMessage
 from scout_config import ScoutConfig
 from scout_judge import JudgeChain, JudgeWindow, Verdict, build_judge_window
 from scout_safety import check_window, load_blocklist
-from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
+from scout_stores import ClipLedger, ClipRecord, OptOutStore, ReviewItem, ReviewStore, ScoutChatStore
 from scout_taste import TasteNotes, TasteStore
 from selfbot_logic import BotStats
 
@@ -47,20 +47,6 @@ NEAR_MISS_FINAL_FUNNY = 6.0
 REMEMBERED_REVIEWS = 200
 
 
-@dataclass(frozen=True)
-class ReviewItem:
-    """A candidate the owner may rate. ``lines`` are anonymous (speaker label, original text); ``names`` are for the DM."""
-
-    id: int
-    chat_id: int
-    names: tuple[str, ...]
-    lines: tuple[tuple[str, str], ...]
-    funny: float
-    decide: Mapping[str, float]
-    reason: str
-    would_clip: bool
-
-
 @dataclass
 class ScoutRuntime:
     """Everything the Discord adapter needs to feed and drive the scout. ``judge``/``scout`` are built once the
@@ -75,6 +61,7 @@ class ScoutRuntime:
     emoji_cache: Path | None = None
     taste_notes: TasteNotes | None = None
     taste_store: TasteStore | None = None
+    review_store: ReviewStore | None = None
     judge: JudgeChain | None = None
     scout: "Scout | None" = field(default=None, repr=False)
 
@@ -100,6 +87,7 @@ class Scout:
         blocklist: frozenset[str] = frozenset(),
         on_review: Callable[[ReviewItem], Awaitable[int | None]] | None = None,
         taste: TasteStore | None = None,
+        review_store: ReviewStore | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.cfg = cfg
@@ -118,9 +106,11 @@ class Scout:
         self._posts: deque[float] = deque()
         self.on_review = on_review
         self.taste = taste
-        self.reviews: OrderedDict[int, ReviewItem] = OrderedDict()  # DM message id -> item awaiting a rating
+        self._review_store = review_store
+        # Candidates the owner can still rate, by DM message id. Loaded from disk so a restart does not lose them.
+        self.reviews: OrderedDict[int, ReviewItem] = review_store.load() if review_store is not None else OrderedDict()
         self._review_times: deque[float] = deque()
-        self._review_seq = 0
+        self._review_seq = max((item.id for item in self.reviews.values()), default=0)
 
     # scheduling -----------------------------------------------------------------------------------------------
 
@@ -233,12 +223,23 @@ class Scout:
         self.reviews[dm_id] = item
         while len(self.reviews) > REMEMBERED_REVIEWS:
             self.reviews.popitem(last=False)
+        self._save_reviews()
+
+    def _save_reviews(self) -> None:
+        """Write the pending candidates to disk; a full disk must not stop the scout from clipping."""
+        if self._review_store is None:
+            return
+        try:
+            self._review_store.save(self.reviews)
+        except OSError:
+            logger.warning("Could not save the pending reviews", exc_info=True)
 
     async def rate(self, message_id: int, label: str, *, source: str = "review") -> bool:
         """Apply the owner's rating (``good``/``bad``/``skip``) to a reviewed candidate. True if it was saved or skipped."""
         item = self.reviews.pop(message_id, None)
         if item is None:
             return False
+        self._save_reviews()
         if label == "skip":
             return True
         if self.taste is None:
@@ -409,6 +410,7 @@ def build_scout_runtime(cfg: ScoutConfig, data_dir: Path) -> ScoutRuntime | None
         emoji_cache=data_dir / "emoji-cache",
         taste_notes=TasteNotes(data_dir / "scout-taste.txt"),
         taste_store=TasteStore(data_dir / "taste.jsonl", per_label=cfg.examples_per_label),
+        review_store=ReviewStore(data_dir / "reviews.json"),
     )
 
 

@@ -28,7 +28,7 @@ from scout import (
 from scout_buffer import ScoutBuffer, ScoutMessage, Version
 from scout_config import read_scout_config
 from scout_judge import HeuristicJudge, JudgeChain, JudgeWindow, Verdict
-from scout_stores import ClipLedger, OptOutStore
+from scout_stores import ClipLedger, OptOutStore, ReviewStore
 from scout_taste import TasteStore
 from selfbot_logic import BotStats
 
@@ -120,7 +120,7 @@ class ScoutCase(unittest.IsolatedAsyncioTestCase):
         self.posted.append(plan)
         return self.post_result
 
-    def scout(self, judge, *, cfg=None, blocklist=frozenset(), on_review=None, taste=None) -> Scout:
+    def scout(self, judge, *, cfg=None, blocklist=frozenset(), on_review=None, taste=None, review_store=None) -> Scout:
         chain = judge if isinstance(judge, JudgeChain) else JudgeChain([judge, HeuristicJudge()])
         return Scout(
             cfg or self.cfg,
@@ -134,6 +134,7 @@ class ScoutCase(unittest.IsolatedAsyncioTestCase):
             blocklist=blocklist,
             on_review=on_review,
             taste=taste,
+            review_store=review_store,
             clock=self.clock,
         )
 
@@ -752,6 +753,22 @@ class ReviewTests(ScoutCase):
         self.assertEqual([(e.label, e.source, e.funny) for e in examples], [("good", "review", 8.7), ("bad", "clip", 8.7)])
         self.assertEqual(examples[0].decide["funny"], 0.95)
         self.assertEqual(scout.reviews, {})
+
+    async def test_pending_reviews_survive_a_restart(self) -> None:
+        store = ReviewStore(self.dir / "reviews.json")
+        scout = self.scout(FakeJudge(approve(funny=8.7)), cfg=replace(self.cfg, mode="dry-run"), on_review=self.on_review, taste=self.taste, review_store=store)
+        self.add(1, "the better one was me", author=10)
+        await self.settle(scout)
+        (dm_id,) = scout.reviews
+        # A new process (same data dir) can still rate the candidate the old one DM'd.
+        restarted = self.scout(
+            FakeJudge(approve()), cfg=replace(self.cfg, mode="dry-run"), on_review=self.on_review, taste=self.taste,
+            review_store=ReviewStore(self.dir / "reviews.json"),
+        )
+        self.assertEqual(list(restarted.reviews), [dm_id])
+        self.assertTrue(await restarted.rate(dm_id, "good"))
+        self.assertEqual(self.taste.counts(), {"good": 1, "bad": 0})
+        self.assertEqual(ReviewStore(self.dir / "reviews.json").load(), {})
 
     async def test_rate_unknown_or_repeated_ids_do_nothing(self) -> None:
         scout = self.scout_with(FakeJudge(approve()), mode="dry-run")
