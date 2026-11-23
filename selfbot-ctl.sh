@@ -266,6 +266,34 @@ smoke_ok() {
   else (cd "$DIR" && py -c 'import selfbot' >/dev/null 2>&1); fi
 }
 
+write_notice() {  # write_notice <from> <to> <outcome> <commits: "sha<TAB>subject" lines>
+  # The bot reads this on its next boot and DMs it to everyone on the allowlist, then deletes it.
+  local from="$1" to="$2" outcome="$3" commits="${4:-}"
+  NOTICE="$DIR/data/update-notice.json" FROM="$from" TO="$to" OUTCOME="$outcome" COMMITS="$commits" python3 - <<'PY'
+import json, os, time
+from pathlib import Path
+
+path = Path(os.environ["NOTICE"])
+commits = []
+for line in os.environ.get("COMMITS", "").splitlines():
+    sha, _, subject = line.partition("\t")
+    if sha.strip():
+        commits.append({"sha": sha.strip(), "subject": subject.strip()})
+data = {
+    "from": os.environ["FROM"],
+    "to": os.environ["TO"],
+    "outcome": os.environ["OUTCOME"],
+    "at": int(time.time()),
+    "commits": commits,
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text(json.dumps(data), encoding="utf-8")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+}
+
 cmd_update() {
   git_ diff --quiet && git_ diff --cached --quiet || die "This checkout has local changes; refusing to update. Run: git -C $DIR status"
   local branch old new
@@ -278,12 +306,14 @@ cmd_update() {
   git_ merge-base --is-ancestor "$old" "$new" || die "Local and remote history diverged; not updating. Fix it with git, then retry."
   info "Updating $(git_ rev-parse --short "$old") -> $(git_ rev-parse --short "$new"):"
   say "$(git_ log --format='    %h %s' "$old..$new")"
-  local before_restarts
+  local before_restarts commits
+  commits="$(git_ log --format='%h%x09%s' "$old..$new")"
   before_restarts="$(sc_read show -p NRestarts --value "$SERVICE.service" 2>/dev/null || echo 0)"
   git_ merge --quiet --ff-only "$new"
   local deps=false
   if deps_changed "$old" "$new"; then deps=true; info "Dependencies changed; installing..."; fi
   if { ! $deps || install_deps; } && smoke_ok; then
+    write_notice "$(git_ rev-parse --short "$old")" "$(git_ rev-parse --short "$new")" updated "$commits"
     sc_write restart "$SERVICE.service"
     before_restarts="$(sc_read show -p NRestarts --value "$SERVICE.service" 2>/dev/null || echo 0)"
     if wait_healthy "$before_restarts"; then ok "Updated to $(version) and healthy."; return 0; fi
@@ -294,6 +324,7 @@ cmd_update() {
   warn "Rolling back to $(git_ rev-parse --short "$old")."
   git_ reset --quiet --hard "$old"
   if $deps; then install_deps || warn "Could not reinstall the old dependencies; check them by hand."; fi
+  write_notice "$(git_ rev-parse --short "$old")" "$(git_ rev-parse --short "$new")" rolled-back "$commits"
   sc_write restart "$SERVICE.service"
   die "Update failed and was rolled back to $(version). Look at: ./selfbot-ctl.sh logs"
 }

@@ -13,7 +13,7 @@ import os
 import re
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -38,6 +38,10 @@ class AllowlistStore:
 
     def __len__(self) -> int:
         return len(self._users)
+
+    def ids(self) -> list[int]:
+        """Every allowed user id, in the order they were first seen."""
+        return list(self._users)
 
     def add(self, user_id: int, *, now: float | None = None) -> bool:
         """Allow a user; returns True only if they were newly added."""
@@ -84,6 +88,11 @@ class AllowlistStore:
 def env_flag(value: str | None) -> bool:
     """Parse an opt-in environment flag: 1/true/yes/on (any case) enable it; anything else does not."""
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_flag_off(value: str | None) -> bool:
+    """Parse an opt-out environment flag: 0/false/no/off (any case) disable it; unset or anything else does not."""
+    return value is not None and value.strip().lower() in {"0", "false", "no", "off"}
 
 
 def resolve_ui_mode(setting: str | None, *, is_tty: bool) -> Literal["pretty", "json"]:
@@ -443,6 +452,54 @@ def format_results(results: list[tuple[str, str, bool]], skipped: int = 0) -> st
     while len("\n".join(lines)) > MAX_REPLY_CHARS and len(lines) > 1:
         lines.pop()
     return "\n".join(lines)[:MAX_REPLY_CHARS]
+
+
+UPDATE_NOTICE_MAX_CHARS = 1900
+UPDATE_NOTICE_MAX_COMMITS = 12
+
+
+def _notice_bullet(subject: str) -> str:
+    """One change, with its leading verb bolded so the list scans quickly."""
+    verb, _, rest = _escape(subject.strip()).partition(" ")
+    return f"- **{verb}** {rest}".rstrip()
+
+
+def update_notice_text(notice: Mapping[str, Any]) -> str:
+    """The DM that tells the allowlist what an unattended update changed (Discord markdown)."""
+    outcome = str(notice.get("outcome") or "updated")
+    old = str(notice.get("from") or "?")
+    new = str(notice.get("to") or "?")
+    at = notice.get("at")
+    commits: list[str] = []
+    for item in notice.get("commits") or []:
+        if not isinstance(item, Mapping):
+            continue
+        subject = str(item.get("subject") or "").strip()
+        if subject:
+            commits.append(subject)
+    shown = commits[:UPDATE_NOTICE_MAX_COMMITS]
+    bullets = [_notice_bullet(subject) for subject in shown]
+    if len(commits) > len(shown):
+        bullets.append(f"-# and {len(commits) - len(shown)} more")
+    if outcome == "rolled-back":
+        lines = [
+            "# Update rolled back",
+            "",
+            f"I tried **`{new}`** and it would not stay up, so I'm back on **`{old}`**.",
+            "",
+        ]
+        if bullets:
+            lines += ["## What it was going to bring", *bullets, ""]
+        lines.append("-# Nothing changed for you. The host log has the details.")
+        return "\n".join(lines)[:UPDATE_NOTICE_MAX_CHARS]
+    stamp = f"<t:{int(at)}:R>" if isinstance(at, (int, float)) else ""
+    count = f"{len(commits)} change{'s' if len(commits) != 1 else ''}" if commits else ""
+    header = " · ".join(part for part in (f"**`{new}`**", stamp, count) if part)
+    lines = ["# Bombagif updated itself", "", header, ""]
+    if bullets:
+        lines += ["## What's new", *bullets, ""]
+    lines.append("-# You're on the allowlist, so you get these. No action needed. Reply `!help` for everything I can do.")
+    return "\n".join(lines)[:UPDATE_NOTICE_MAX_CHARS]
 
 
 ActivityLevel = Literal["ok", "fail", "info", "warn"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import tempfile
 import unittest
 from importlib import metadata
@@ -471,6 +472,129 @@ class SelfBotFriendRequestTests(_SelfBotCase):
         accepted = [r for r in pending if r.accept.await_count == 1]
         self.assertEqual(len(accepted), self.bot.friend_sweep_limit)
         friend.accept.assert_not_awaited()
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotUpdateNoticeTests(_SelfBotCase):
+    """An unattended update leaves a notice on disk; the bot DMs it to everyone on the allowlist."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.bot.update_notice_delay = 0  # no pacing between DMs in tests
+
+    def write_notice(self, **overrides: object) -> Path:
+        notice = {
+            "from": "f9ee931",
+            "to": "6160b39",
+            "outcome": "updated",
+            "at": 1_763_866_490,
+            "commits": [{"sha": "6160b39", "subject": "Let a training phase review every judged run"}],
+        }
+        notice.update(overrides)
+        path = self.allowlist.path.with_name("update-notice.json")
+        path.write_text(json.dumps(notice), encoding="utf-8")
+        return path
+
+    def fake_user(self, user_id: int) -> SimpleNamespace:
+        return SimpleNamespace(id=user_id, send=AsyncMock())
+
+    def patch_users(self, users: dict[int, SimpleNamespace]) -> None:
+        from selfbot import SelfBot
+
+        patcher = patch.object(SelfBot, "get_user", side_effect=lambda user_id: users.get(user_id))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_every_allowlisted_user_gets_the_update(self) -> None:
+        self.allowlist.add(11)
+        self.allowlist.add(22)
+        path = self.write_notice()
+        users = {11: self.fake_user(11), 22: self.fake_user(22)}
+        self.patch_users(users)
+        await self.bot.on_ready()
+        for user in users.values():
+            user.send.assert_awaited_once()
+            self.assertIn("Bombagif updated itself", user.send.await_args.args[0])
+        self.assertFalse(path.exists(), "the notice is consumed once it has been delivered")
+
+    async def test_no_notice_means_no_dms(self) -> None:
+        self.allowlist.add(11)
+        user = self.fake_user(11)
+        self.patch_users({11: user})
+        await self.bot.on_ready()
+        user.send.assert_not_awaited()
+
+    async def test_one_failed_dm_does_not_stop_the_others(self) -> None:
+        self.allowlist.add(11)
+        self.allowlist.add(22)
+        path = self.write_notice()
+        broken = self.fake_user(11)
+        broken.send.side_effect = discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        working = self.fake_user(22)
+        self.patch_users({11: broken, 22: working})
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            await self.bot.on_ready()
+        working.send.assert_awaited_once()
+        self.assertFalse(path.exists(), "one delivery is enough to consume the notice")
+
+    async def test_a_notice_nobody_received_is_kept_for_the_next_boot(self) -> None:
+        self.allowlist.add(11)
+        path = self.write_notice()
+        broken = self.fake_user(11)
+        broken.send.side_effect = discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        self.patch_users({11: broken})
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            await self.bot.on_ready()
+        self.assertTrue(path.exists(), "an undelivered notice is retried on the next boot")
+
+    async def test_a_malformed_notice_is_dropped_without_a_dm(self) -> None:
+        self.allowlist.add(11)
+        path = self.allowlist.path.with_name("update-notice.json")
+        path.write_text("{not json", encoding="utf-8")
+        user = self.fake_user(11)
+        self.patch_users({11: user})
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            await self.bot.on_ready()
+        user.send.assert_not_awaited()
+        self.assertFalse(path.exists(), "a notice that can never be read is removed")
+
+    async def test_the_update_is_announced_once_per_process(self) -> None:
+        self.allowlist.add(11)
+        self.write_notice()
+        user = self.fake_user(11)
+        self.patch_users({11: user})
+        await self.bot.on_ready()
+        await self.bot.on_ready()  # a reconnect fires on_ready again
+        user.send.assert_awaited_once()
+
+    async def test_a_captcha_while_announcing_pauses_the_account(self) -> None:
+        self.allowlist.add(11)
+        self.write_notice()
+        user = self.fake_user(11)
+        user.send.side_effect = make_captcha()
+        self.patch_users({11: user})
+        await self.bot.on_ready()
+        self.assertTrue(self.bot.captcha_guard.blocked)
+
+    async def test_announcements_can_be_turned_off(self) -> None:
+        self.allowlist.add(11)
+        path = self.write_notice()
+        self.bot.announce_updates = False
+        user = self.fake_user(11)
+        self.patch_users({11: user})
+        await self.bot.on_ready()
+        user.send.assert_not_awaited()
+        self.assertFalse(path.exists(), "an opted-out notice is dropped, not retried forever")
+
+    async def test_create_bot_reads_the_opt_out_from_the_environment(self) -> None:
+        from selfbot import create_bot
+
+        quiet = create_bot(SETTINGS, Path(self._tmp.name), {"SELFBOT_UPDATE_NOTICES": "false"})
+        self.addCleanup(quiet.executor.shutdown, False)
+        self.assertFalse(quiet.announce_updates)
+        loud = create_bot(SETTINGS, Path(self._tmp.name), {})
+        self.addCleanup(loud.executor.shutdown, False)
+        self.assertTrue(loud.announce_updates)
 
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")

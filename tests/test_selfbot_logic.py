@@ -27,9 +27,11 @@ from selfbot_logic import (
     collect_media,
     decide,
     env_flag,
+    env_flag_off,
     format_results,
     help_text,
     resolve_ui_mode,
+    update_notice_text,
     welcome_text,
 )
 
@@ -526,6 +528,70 @@ class HelpTextTests(unittest.TestCase):
         self.assertNotIn("clip", help_text(False).lower())
         self.assertIn("clip", help_text(True).lower())
         self.assertIn("`stop`", help_text(True))
+
+
+class UpdateNoticeTests(unittest.TestCase):
+    """The DM that tells the allowlist what an unattended update changed."""
+
+    def notice(self, **overrides: object) -> dict:
+        base = {
+            "from": "f9ee931",
+            "to": "6160b39",
+            "outcome": "updated",
+            "at": 1_763_866_490,
+            "commits": [
+                {"sha": "6160b39", "subject": "Let a training phase review every judged run"},
+                {"sha": "1410a30", "subject": "Fix video conversion: drop bare -autorotate"},
+            ],
+        }
+        base.update(overrides)
+        return base
+
+    def test_names_the_new_version_and_every_change(self) -> None:
+        text = update_notice_text(self.notice())
+        self.assertTrue(text.startswith("# Bombagif updated itself"))
+        self.assertIn("`6160b39`", text)
+        self.assertIn("<t:1763866490:R>", text)
+        self.assertIn("2 changes", text)
+        self.assertIn("- **Let** a training phase review every judged run", text)
+        self.assertIn("- **Fix** video conversion: drop bare -autorotate", text)
+
+    def test_one_change_is_singular(self) -> None:
+        text = update_notice_text(self.notice(commits=[{"sha": "a", "subject": "Add a thing"}]))
+        self.assertIn("1 change", text)
+        self.assertNotIn("1 changes", text)
+
+    def test_rolled_back_says_so_and_names_both_versions(self) -> None:
+        text = update_notice_text(self.notice(outcome="rolled-back"))
+        self.assertTrue(text.startswith("# Update rolled back"))
+        self.assertIn("`6160b39`", text)
+        self.assertIn("`f9ee931`", text)
+        self.assertIn("## What it was going to bring", text)
+        self.assertNotIn("What's new", text)
+
+    def test_subject_markdown_is_escaped(self) -> None:
+        text = update_notice_text(self.notice(commits=[{"sha": "a", "subject": "Fix *bold* and `code`"}]))
+        self.assertIn(r"\*bold\*", text)
+        self.assertIn(r"\`code\`", text)
+
+    def test_a_long_update_is_capped(self) -> None:
+        commits = [{"sha": f"{index:07x}", "subject": f"Change number {index}"} for index in range(30)]
+        text = update_notice_text(self.notice(commits=commits))
+        self.assertIn("and 18 more", text)
+        self.assertLessEqual(len(text), 1900)
+
+    def test_a_notice_without_commits_still_renders(self) -> None:
+        text = update_notice_text(self.notice(commits=[]))
+        self.assertIn("`6160b39`", text)
+        self.assertNotIn("## What's new", text)
+
+    def test_the_opt_out_flag_is_parsed(self) -> None:
+        for value in ("0", "false", "NO", " off "):
+            with self.subTest(value=value):
+                self.assertTrue(env_flag_off(value))
+        for value in (None, "", "1", "true", "yes", "on"):
+            with self.subTest(value=value):
+                self.assertFalse(env_flag_off(value))
 
 
 class TimezoneTests(unittest.TestCase):

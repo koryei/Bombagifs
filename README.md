@@ -153,6 +153,11 @@ the scout settings in `.env` — `SELFBOT_SCOUT_MODE=dry-run`, `SCOUT_REVIEW=alw
 `SCOUT_NEAR_MISS_*_FUNNY=0`, `SCOUT_EXAMPLES=12` — then restarts. Your tokens and every other line stay as they are,
 and nothing is printed. `training off` puts the review defaults back; `training status` shows the current values.
 
+**Update announcements.** Every update leaves `data/update-notice.json` behind, and the bot DMs it to everyone on the
+allowlist on its next boot: the new version, when it landed, and one line per commit it brought. A rollback is announced
+too, so nobody wonders why nothing changed. The notice is deleted once delivered; if no DM got through it stays for the
+next boot. Set `SELFBOT_UPDATE_NOTICES=false` to keep the bot quiet about updates.
+
 **Terminal UI.** Run in a terminal, the self-bot prints a boot banner (account, Zipline host, allowlist size,
 guard state, limits), keeps a live status panel (state, uptime, counters, and a feed of recent conversions, sign-ups,
 and warnings), writes readable coloured log lines above it, and signs off with a session summary. Redirected output,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import datetime
 import logging
 import os
@@ -85,16 +86,19 @@ from selfbot_logic import (
     collect_media,
     decide,
     env_flag,
+    env_flag_off,
     format_results,
     has_media,
     help_text,
     no_media_reply,
     resolve_ui_mode,
+    update_notice_text,
     welcome_text,
 )
 
 
 _MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
+UPDATE_NOTICE_NAME = "update-notice.json"  # written by selfbot-ctl.sh update, read once on boot
 
 
 def _escape_markdown(text: str) -> str:
@@ -114,6 +118,7 @@ class SelfBot(discord.Client):
         auto_accept_friends: bool = False,
         ui: Any | None = None,
         scout: ScoutRuntime | None = None,
+        announce_updates: bool = True,
     ) -> None:
         super().__init__()
         self.config = settings
@@ -132,6 +137,9 @@ class SelfBot(discord.Client):
         self._help_chat_cooldown = Cooldown(600.0)  # ...and a chat at most once every 10 minutes
         self._clip_message_ids: set[int] = set()  # clips we posted, so a reply of `stop` to one can be recognised
         self._booted = False
+        self._update_announced = False  # the update notice is delivered once per process, not per reconnect
+        self.announce_updates = announce_updates  # SELFBOT_UPDATE_NOTICES=false keeps the bot quiet about updates
+        self.update_notice_delay = 1.0  # seconds between update DMs, so a burst never looks automated
         self.auto_accept_friends = auto_accept_friends
         self.friend_accept_delay = 3.0  # seconds between accepts, so a burst never looks automated
         self.friend_sweep_limit = 10  # pending requests accepted per (re)connect
@@ -213,12 +221,59 @@ class SelfBot(discord.Client):
         if self.ui is not None and not self._booted:
             self._booted = True  # reconnects fire on_ready again; the banner is printed once
             self.ui.show_boot(self._boot_info())
+        await self._announce_update()
         if self.auto_accept_friends:
             pending = [r for r in self.relationships if r.type is discord.RelationshipType.incoming_request]
             for relationship in pending[: self.friend_sweep_limit]:
                 if self.captcha_guard.blocked:
                     break
                 await self._accept_friend(relationship)
+
+    async def _announce_update(self) -> None:
+        """DM everyone on the allowlist what an unattended update changed, then consume the notice."""
+        if self._update_announced:
+            return
+        self._update_announced = True
+        path = self.allowlist.path.with_name(UPDATE_NOTICE_NAME)
+        if not self.announce_updates:
+            path.unlink(missing_ok=True)  # opted out: drop the notice instead of retrying it forever
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError:
+            self.logger.warning("Could not read the update notice at %s", path, exc_info=True)
+            return
+        try:
+            notice = json.loads(raw)
+            if not isinstance(notice, dict):
+                raise ValueError("the update notice must be a JSON object")
+            text = update_notice_text(notice)
+        except (ValueError, TypeError):
+            self.logger.warning("Ignoring a malformed update notice at %s", path)
+            path.unlink(missing_ok=True)
+            return
+        recipients = self.allowlist.ids()
+        delivered = 0
+        for user_id in recipients:
+            if self.captcha_guard.blocked:
+                break
+            try:
+                user = self.get_user(user_id) or await self.fetch_user(user_id)
+                await user.send(text, allowed_mentions=discord.AllowedMentions.none())
+                delivered += 1
+            except discord.CaptchaRequired:
+                self._trip_captcha("announcing an update")
+                break
+            except discord.HTTPException:
+                self.logger.warning("Could not DM the update notice", extra={"user_id": user_id}, exc_info=True)
+            await asyncio.sleep(self.update_notice_delay)
+        if delivered or not recipients:
+            path.unlink(missing_ok=True)  # an undelivered notice stays for the next boot
+        self.logger.info(
+            "Announced update %s to %d of %d people", notice.get("to"), delivered, len(recipients)
+        )
 
     async def on_relationship_add(self, relationship: discord.Relationship) -> None:
         """Accept a new incoming friend request when the operator opted in."""
@@ -1111,6 +1166,7 @@ def create_bot(settings: Settings, data_dir: Path, environ: Mapping[str, str]) -
         captcha_guard=CaptchaGuard(data_dir / "captcha-blocked.json"),
         auto_accept_friends=env_flag(environ.get("SELFBOT_AUTO_ACCEPT_FRIENDS")),
         scout=build_scout_runtime(read_scout_config(environ), data_dir),
+        announce_updates=not env_flag_off(environ.get("SELFBOT_UPDATE_NOTICES")),
     )
 
 

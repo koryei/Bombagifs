@@ -173,6 +173,32 @@ make_repos; push_change app.txt v2 "remote"
 echo local >"$DIR/local.txt"; git -C "$DIR" add -A; git -C "$DIR" "${git_ident[@]}" commit -q -m "local only"
 if (cmd_update >/dev/null 2>&1); then fail "diverged history must refuse"; fi
 
+# --- update notice: what the bot DMs the allowlist after an unattended update ---------------------------------
+notice_of() { printf '%s' "$DIR/data/update-notice.json"; }
+
+# an up-to-date check writes nothing
+make_repos
+cmd_update >/dev/null 2>&1
+[[ ! -f "$(notice_of)" ]] || fail "an up-to-date check must not write a notice"
+
+# a successful update records the old and new version plus every commit it brought
+make_repos; push_change app.txt v2 "second change"
+cmd_update >/dev/null 2>&1
+notice="$(notice_of)"
+[[ -f "$notice" ]] || fail "a successful update should leave a notice for the bot"
+assert_equal 600 "$(stat -c %a "$notice" 2>/dev/null || stat -f %Lp "$notice")" "the notice is mode 600"
+assert_contains "$(cat "$notice")" '"outcome": "updated"' "the notice says the update went through"
+assert_contains "$(cat "$notice")" 'second change' "the notice lists the new commit"
+assert_contains "$(cat "$notice")" "\"to\": \"$(git -C "$DIR" rev-parse --short HEAD)\"" "the notice names the new version"
+
+# a rollback is recorded too, so the allowlist hears that nothing changed
+make_repos; push_change app.txt v2 "breaks things"
+touch "$FAKE_STATE/crash-on-restart"
+(cmd_update >/dev/null 2>&1) || true
+assert_contains "$(cat "$(notice_of)")" '"outcome": "rolled-back"' "a rollback is recorded"
+assert_contains "$(cat "$(notice_of)")" 'breaks things' "the rollback notice names what was tried"
+rm -f "$FAKE_STATE/crash-on-restart"; echo active >"$FAKE_STATE/active"  # leave the fake service healthy for what follows
+
 # --- timezone -------------------------------------------------------------------------------------------------
 cat >"$FAKE_BIN/timedatectl" <<'FAKE'
 #!/usr/bin/env bash
