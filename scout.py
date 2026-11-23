@@ -42,8 +42,6 @@ class ClipPlan:
     requested_by: str | None = None  # set for manual ("clip that") clips
 
 
-NEAR_MISS_DECIDE_FUNNY = 0.6
-NEAR_MISS_FINAL_FUNNY = 6.0
 REMEMBERED_REVIEWS = 200
 
 
@@ -198,7 +196,10 @@ class Scout:
         """Send the owner a candidate to rate: would-be clips and near-misses, a few per hour, never raising."""
         if not self._review_enabled():
             return
-        near_miss = verdict.decide.get("funny", 0.0) >= NEAR_MISS_DECIDE_FUNNY or verdict.funny >= NEAR_MISS_FINAL_FUNNY
+        near_miss = (
+            verdict.decide.get("funny", 0.0) >= self.cfg.near_miss_decide_funny
+            or verdict.funny >= self.cfg.near_miss_final_funny
+        )
         if not (would_clip or near_miss):
             return
         now = self.clock()

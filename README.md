@@ -277,6 +277,12 @@ come by DM):
 3. **Tune the bar.** `!tune` compares your good/bad ratings with the scores and suggests `SCOUT_JUDGE_FUNNY_MIN` (needs
    5 scored of each).
 
+**Training phase.** To teach it fast, run `SELFBOT_SCOUT_MODE=dry-run` with `SCOUT_REVIEW=always`,
+`SCOUT_REVIEW_PER_HOUR=30`, `SCOUT_SCREEN=all`, `SCOUT_NEAR_MISS_DECIDE_FUNNY=0`, `SCOUT_NEAR_MISS_FINAL_FUNNY=0`
+and `SCOUT_EXAMPLES=12`: every judged run is DM'd to you (still capped per hour), including the ones the judge
+rejected, so you can catch misses as well as false positives. Rate them, run `!tune`, then put the near-miss bars
+back to `0.6` / `6` and switch to `SELFBOT_SCOUT_MODE=on` when the scores separate your taste.
+
 Privacy: the examples are real chat lines sent (anonymised) to the model on every judging call, and review DMs show you
 real names and text. Only lines you chose to rate are kept. Say so in the chat.
 

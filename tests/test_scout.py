@@ -656,6 +656,15 @@ class ReviewTests(ScoutCase):
                 if expected:
                     self.assertFalse(self.reviews[0].would_clip)
 
+    async def test_a_training_phase_can_review_every_judged_run(self) -> None:
+        scout = self.scout_with(
+            FakeJudge(self.near_miss(0.0, 0.0)), mode="dry-run", near_miss_decide_funny=0.0, near_miss_final_funny=0.0
+        )
+        self.add(1, "ordinary chatter")
+        await self.settle(scout)
+        self.assertEqual(len(self.reviews), 1)
+        self.assertFalse(self.reviews[0].would_clip)
+
     async def test_near_miss_lines_are_the_candidate_run_only(self) -> None:
         scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run")
         self.add(1, "context before", author=20)

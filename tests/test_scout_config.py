@@ -24,6 +24,7 @@ class ScoutConfigTests(unittest.TestCase):
         self.assertEqual((cfg.reaction_window_s, cfg.tick_s, cfg.max_calls_per_day), (45, 5, 2000))
         self.assertEqual(cfg.theme, "onyx")
         self.assertEqual((cfg.manual, cfg.review, cfg.review_per_hour, cfg.examples_per_label), (True, "dry-run", 6, 8))
+        self.assertEqual((cfg.near_miss_decide_funny, cfg.near_miss_final_funny), (0.6, 6.0))
         self.assertEqual((cfg.manual_limit_per_10_min, cfg.manual_author_cooldown_s), (3, 120))
 
     def test_trigger_defaults(self) -> None:
@@ -67,6 +68,15 @@ class ScoutConfigTests(unittest.TestCase):
     def test_review_rejects_unknown_choice(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "SCOUT_REVIEW"):
             read_scout_config({"SCOUT_REVIEW": "sometimes"})
+
+    def test_near_miss_bars_can_be_lowered_for_a_training_phase(self) -> None:
+        cfg = read_scout_config({"SCOUT_NEAR_MISS_DECIDE_FUNNY": "0", "SCOUT_NEAR_MISS_FINAL_FUNNY": "0"})
+        self.assertEqual((cfg.near_miss_decide_funny, cfg.near_miss_final_funny), (0.0, 0.0))
+        for name, value in (("SCOUT_NEAR_MISS_DECIDE_FUNNY", "1.5"), ("SCOUT_NEAR_MISS_DECIDE_FUNNY", "-0.1"),
+                            ("SCOUT_NEAR_MISS_FINAL_FUNNY", "11"), ("SCOUT_NEAR_MISS_FINAL_FUNNY", "x")):
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(RuntimeError, name):
+                    read_scout_config({name: value})
 
     def test_new_integers_must_be_positive(self) -> None:
         for name in ("SCOUT_REVIEW_PER_HOUR", "SCOUT_EXAMPLES", "SCOUT_MANUAL_LIMIT_PER_10_MIN", "SCOUT_MANUAL_AUTHOR_COOLDOWN_SECONDS"):
