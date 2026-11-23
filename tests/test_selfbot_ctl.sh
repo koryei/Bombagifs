@@ -196,9 +196,41 @@ for bad in "Mars/Olympus" "../etc/passwd" 'x; rm -rf /' ""; do
 done
 assert_equal "America/New_York" "$(cat "$FAKE_STATE/tz")" "a rejected zone changes nothing"
 
+# --- training form ---------------------------------------------------------------------------------------------
+DIR="$TEST_ROOT/training"; mkdir -p "$DIR"
+printf '# keep me\nSELFBOT_TOKEN=secret-token\nSELFBOT_SCOUT_MODE=off\n' >"$DIR/.env"
+chmod 644 "$DIR/.env"
+echo active >"$FAKE_STATE/active"; : >"$FAKE_STATE/calls"
+main training on >/dev/null 2>&1 || fail "training on should work"
+assert_equal 600 "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env")" "training keeps .env mode 600"
+assert_equal "dry-run" "$(env_get SELFBOT_SCOUT_MODE)" "training sets dry-run"
+assert_equal "always" "$(env_get SCOUT_REVIEW)" "training reviews always"
+assert_equal "30" "$(env_get SCOUT_REVIEW_PER_HOUR)" "training raises the review rate"
+assert_equal "0" "$(env_get SCOUT_NEAR_MISS_DECIDE_FUNNY)" "training reviews every judged run"
+assert_equal "0" "$(env_get SCOUT_NEAR_MISS_FINAL_FUNNY)" "training reviews every judged run"
+assert_equal "12" "$(env_get SCOUT_EXAMPLES)" "training shows more examples"
+assert_equal "on" "$(env_get SCOUT_MANUAL)" "training keeps manual clips on by default"
+assert_equal "secret-token" "$(env_get SELFBOT_TOKEN)" "the token is untouched"
+assert_contains "$(cat "$DIR/.env")" "# keep me" "comments are kept"
+assert_contains "$(cat "$FAKE_STATE/calls")" "restart bombagif-selfbot.service" "training restarts the bot"
+main training on >/dev/null 2>&1
+assert_equal 1 "$(grep -c '^SCOUT_REVIEW=' "$DIR/.env")" "a key is replaced, not duplicated"
+main training off >/dev/null 2>&1 || fail "training off should work"
+assert_equal "dry-run" "$(env_get SCOUT_REVIEW)" "off restores the review default"
+assert_equal "6" "$(env_get SCOUT_REVIEW_PER_HOUR)" "off restores the review rate"
+assert_equal "0.6" "$(env_get SCOUT_NEAR_MISS_DECIDE_FUNNY)" "off restores the near-miss bar"
+assert_equal "6" "$(env_get SCOUT_NEAR_MISS_FINAL_FUNNY)" "off restores the near-miss bar"
+assert_equal "8" "$(env_get SCOUT_EXAMPLES)" "off restores the example count"
+assert_equal "dry-run" "$(env_get SELFBOT_SCOUT_MODE)" "off leaves the mode alone"
+status="$(main training status 2>&1)"
+assert_contains "$status" "SCOUT_REVIEW=dry-run" "status shows the settings"
+assert_not_contains "$status" "secret-token" "status never prints secrets"
+if (main training sideways >/dev/null 2>&1); then fail "an unknown training action must fail"; fi
+
 # the script itself
 bash -n "$ROOT/selfbot-ctl.sh"
 out="$("$ROOT/selfbot-ctl.sh" help)"; assert_contains "$out" "update" "usage mentions update"
+assert_contains "$out" "training" "usage mentions training"
 if "$ROOT/selfbot-ctl.sh" nonsense >/dev/null 2>&1; then fail "unknown command must fail"; fi
 
 echo "selfbot-ctl checks passed."

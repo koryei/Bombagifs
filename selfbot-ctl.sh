@@ -46,8 +46,10 @@ version() {
 }
 
 # --- .env -----------------------------------------------------------------------------------------------------
-# You bring your own .env (e.g. scp it to $DIR/.env); this script never prompts for or rewrites its values.
+# You bring your own .env (e.g. scp it to $DIR/.env); this script never prompts for secrets. `training` rewrites only
+# the scout settings it manages, and never prints a value.
 REQUIRED_KEYS="SELFBOT_TOKEN ZIPLINE_URL ZIPLINE_TOKEN"
+TRAINING_KEYS="SELFBOT_SCOUT_MODE SCOUT_REVIEW SCOUT_REVIEW_PER_HOUR SCOUT_SCREEN SCOUT_NEAR_MISS_DECIDE_FUNNY SCOUT_NEAR_MISS_FINAL_FUNNY SCOUT_EXAMPLES SCOUT_MANUAL"
 
 env_has() {  # env_has KEY: non-empty value in .env, without printing it
   KEY="$1" ENVFILE="$DIR/.env" python3 - <<'PY'
@@ -72,6 +74,50 @@ ensure_env() {  # a blank template when there is no .env yet; always mode 600
     (umask 077; cp "$DIR/.env.example" "$DIR/.env")
   fi
   chmod 600 "$DIR/.env"
+}
+
+env_get() {  # env_get KEY: the value in .env (empty when unset); only used for non-secret settings
+  KEY="$1" ENVFILE="$DIR/.env" python3 - <<'PY'
+import os
+from pathlib import Path
+from dotenv import dotenv_values
+path = Path(os.environ["ENVFILE"])
+value = dotenv_values(path).get(os.environ["KEY"]) if path.exists() else None
+print(value or "")
+PY
+}
+
+env_set() {  # env_set KEY VALUE: set one key in .env (atomic, mode 600, comments kept, value never printed)
+  KEY="$1" VALUE="$2" ENVFILE="$DIR/.env" python3 - <<'PY'
+import os
+import tempfile
+from pathlib import Path
+
+path = Path(os.environ["ENVFILE"])
+key, value = os.environ["KEY"], os.environ["VALUE"]
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+out, replaced = [], False
+for line in lines:
+    if line.split("=", 1)[0].strip() == key and not line.lstrip().startswith("#"):
+        out.append(f"{key}={value}")
+        replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append(f"{key}={value}")
+fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".env-", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write("\n".join(out) + "\n")
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
 }
 
 env_help() {  # what to do when the keys are missing
@@ -305,6 +351,62 @@ cmd_timezone() {  # timezone [Area/City]: show, or set, the VM's timezone (clip 
   fi
 }
 
+training_write() {  # training_write MODE REVIEW PER_HOUR NEAR_DECIDE NEAR_FINAL EXAMPLES MANUAL
+  env_set SELFBOT_SCOUT_MODE "$1"
+  env_set SCOUT_REVIEW "$2"
+  env_set SCOUT_REVIEW_PER_HOUR "$3"
+  env_set SCOUT_SCREEN all
+  env_set SCOUT_NEAR_MISS_DECIDE_FUNNY "$4"
+  env_set SCOUT_NEAR_MISS_FINAL_FUNNY "$5"
+  env_set SCOUT_EXAMPLES "$6"
+  env_set SCOUT_MANUAL "$7"
+}
+
+cmd_training() {  # training [on|off|status]: the training-phase form (dry-run, review every judged run)
+  local action="${1:-form}" mode="" per_hour="" examples="" near_decide="" near_final="" manual="" answer=""
+  ensure_env
+  case "$action" in
+    status)
+      say "${C_BOLD}Training settings${C_RESET} ($DIR/.env)"
+      for key in $TRAINING_KEYS; do say "  $key=$(env_get "$key")"; done
+      return 0 ;;
+    off)
+      mode="$(env_get SELFBOT_SCOUT_MODE)"; mode="${mode:-off}"
+      manual="$(env_get SCOUT_MANUAL)"; manual="${manual:-on}"
+      training_write "$mode" dry-run 6 0.6 6 8 "$manual"
+      ok "Review settings are back to the defaults."
+      say "  SELFBOT_SCOUT_MODE is still $mode; set it to on when you are ready to post."
+      ;;
+    on)
+      manual="$(env_get SCOUT_MANUAL)"; manual="${manual:-on}"
+      training_write dry-run always 30 0 0 12 "$manual"
+      ok "Training phase: dry-run, every judged run reviewed, up to 30 DMs an hour."
+      ;;
+    form)
+      say "${C_BOLD}Training phase${C_RESET}: judge everything, post nothing, DM you every judged run."
+      read -r -p "  Scout mode (off, dry-run, on) [dry-run]: " mode || true; mode="${mode:-dry-run}"
+      read -r -p "  Review DMs per hour [30]: " per_hour || true; per_hour="${per_hour:-30}"
+      read -r -p "  Review every judged run, including rejects? [Y/n]: " answer || true
+      if [[ "$answer" =~ ^[Nn] ]]; then near_decide=0.6; near_final=6; else near_decide=0; near_final=0; fi
+      read -r -p "  Examples per label [12]: " examples || true; examples="${examples:-12}"
+      read -r -p "  Keep manual \"clip that\" clips on? [Y/n]: " answer || true
+      if [[ "$answer" =~ ^[Nn] ]]; then manual=off; else manual=on; fi
+      [[ "$mode" =~ ^(off|dry-run|on)$ ]] || die "mode must be off, dry-run or on"
+      [[ "$per_hour" =~ ^[1-9][0-9]*$ ]] || die "review DMs per hour must be a positive whole number"
+      [[ "$examples" =~ ^[1-9][0-9]*$ ]] || die "examples per label must be a positive whole number"
+      training_write "$mode" always "$per_hour" "$near_decide" "$near_final" "$examples" "$manual"
+      ok "Saved to $DIR/.env."
+      ;;
+    *) die "training takes: on, off, status (or nothing for the form)" ;;
+  esac
+  if [[ "$(sc_read is-active "$SERVICE.service" 2>/dev/null || true)" == active ]]; then
+    sc_write restart "$SERVICE.service"
+    ok "Restarted the bot."
+  else
+    say "  Start it with: ./selfbot-ctl.sh start"
+  fi
+}
+
 cmd_logs() {
   local follow=()
   [[ "${1:-}" == "-f" ]] && follow=(-f)
@@ -337,6 +439,7 @@ Usage: ./selfbot-ctl.sh <command>
   status             service state and version
   logs [-f]          recent logs (follow with -f)
   timezone [zone]    show or set the VM's timezone (clip cards print clock times in it)
+  training [on|off|status]  dry-run training form: review every judged run, then rate the DMs
   doctor             check the install without printing secrets
   start|stop|restart control the service
   version            the checked-out version
@@ -353,6 +456,7 @@ main() {
     auto) cmd_auto "$@" ;;
     status) cmd_status ;;
     timezone) cmd_timezone "$@" ;;
+    training) cmd_training "$@" ;;
     logs) cmd_logs "$@" ;;
     doctor) cmd_doctor ;;
     stop) sc_write stop "$SERVICE.service" && ok "stop: done." ;;

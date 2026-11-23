@@ -134,6 +134,7 @@ git clone https://github.com/koryei/Bombagifs.git && cd Bombagifs
 ./selfbot-ctl.sh update         # fast-forward to the latest main, restart, check it stays up
 ./selfbot-ctl.sh auto on 15     # optional: look for updates every 15 minutes
 ./selfbot-ctl.sh timezone America/New_York   # clip cards print clock times in the VM's timezone (default UTC)
+./selfbot-ctl.sh training       # dry-run training form: review every judged run, then rate the DMs
 ./selfbot-ctl.sh status | logs -f | doctor | restart | stop | start | version
 ```
 
@@ -146,6 +147,11 @@ changed, imports the new code before restarting, and **rolls back** to the previ
 up for 20 seconds. `data/` and `.env` are never touched. `auto on` adds a systemd timer and a one-line sudoers entry that
 lets your user restart only this service without a password. `doctor` reports what is missing without printing secrets.
 Tests: `bash tests/test_selfbot_ctl.sh`.
+
+`training` is the form for a teaching phase: it asks a few questions (or takes `on` / `off` / `status`) and writes only
+the scout settings in `.env` — `SELFBOT_SCOUT_MODE=dry-run`, `SCOUT_REVIEW=always`, `SCOUT_REVIEW_PER_HOUR=30`,
+`SCOUT_NEAR_MISS_*_FUNNY=0`, `SCOUT_EXAMPLES=12` — then restarts. Your tokens and every other line stay as they are,
+and nothing is printed. `training off` puts the review defaults back; `training status` shows the current values.
 
 **Terminal UI.** Run in a terminal, the self-bot prints a boot banner (account, Zipline host, allowlist size,
 guard state, limits), keeps a live status panel (state, uptime, counters, and a feed of recent conversions, sign-ups,
