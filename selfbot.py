@@ -463,7 +463,14 @@ class SelfBot(discord.Client):
         label = parse_rating(message.content or "")
         if target is None or label is None:
             return False
-        return await self._apply_rating(runtime, int(target), label)
+        if await self._apply_rating(runtime, int(target), label):
+            return True
+        if isinstance(message.channel, discord.DMChannel):
+            # In a 1:1 DM the only messages the owner can reply to are ours, so a rating word is a rating even
+            # when the candidate is gone (evicted, or sent before a restart). Never let it reach the converter.
+            self.stats.note("info", f"you rated a candidate {label} (no longer pending)")
+            return True
+        return False
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         self._count_reaction(payload, False)

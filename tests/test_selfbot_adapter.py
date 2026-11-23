@@ -17,7 +17,7 @@ from scout_judge import Verdict
 from scout_buffer import ScoutBuffer
 from scout_config import read_scout_config
 from scout_manual import REFUSAL_CANT, REFUSAL_NOT_ENABLED, REFUSAL_NOT_TEXT, REFUSAL_OPTED_OUT, REFUSAL_SLOW
-from scout_stores import ClipLedger, ClipRecord, OptOutStore, ScoutChatStore
+from scout_stores import ClipLedger, ClipRecord, OptOutStore, ReviewStore, ScoutChatStore
 from selfbot_logic import (
     CLIP_OPT_OUT_CONFIRMATION,
     NO_MEDIA_TEXT,
@@ -578,6 +578,7 @@ def make_runtime(root: Path, *, mode: str = "dry-run", enabled: tuple[int, ...] 
     return ScoutRuntime(
         cfg=cfg, buffer=buffer, chats=chats, optout=optout, ledger=ClipLedger(root / "clips.jsonl"),
         taste_notes=TasteNotes(root / "scout-taste.txt"), taste_store=TasteStore(root / "taste.jsonl", cfg.examples_per_label),
+        review_store=ReviewStore(root / "reviews.json"),
     )
 
 
@@ -1968,11 +1969,35 @@ class SelfBotReviewTests(_SelfBotCase):
         self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
         self.assertIn(6001, self.scout.reviews)  # still waiting for the owner
 
-    async def test_replying_to_an_unknown_message_does_nothing(self) -> None:
+    async def test_a_rating_reply_to_a_forgotten_review_is_consumed_silently(self) -> None:
+        # A restart (or the 200-candidate cap) can forget a review DM. The owner's "good" is still a rating,
+        # not a conversion request, so it must never be answered with "no media".
+        from selfbot import SelfBot
+
         self.scout.reviews[6001] = review_item()
-        await self.bot.on_message(self.owner_reply("good", to=424242))
+        with patch.object(SelfBot, "_convert_and_reply", new_callable=AsyncMock) as convert:
+            message = self.owner_reply("good", to=424242, mentions=[self.me])
+            await self.bot.on_message(message)
+        convert.assert_not_awaited()
+        message.reply.assert_not_awaited()
         self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
-        self.assertIn(6001, self.scout.reviews)
+        self.assertIn(6001, self.scout.reviews)  # the pending candidate is untouched
+
+    async def test_a_rating_still_lands_after_a_restart(self) -> None:
+        import aiohttp
+        from selfbot import SelfBot
+
+        self.scout.reviews[6001] = review_item()
+        self.scout._save_reviews()
+        restarted_runtime = make_runtime(self.root, mode="dry-run", SELFBOT_OWNER_ID=str(OWNER))
+        restarted = SelfBot(SETTINGS, self.allowlist, scout=restarted_runtime)
+        restarted.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(restarted.close)
+        restarted._start_scout()
+        message = self.owner_reply("good")
+        await restarted.on_message(message)
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 0})
+        message.reply.assert_not_awaited()
 
     async def test_a_second_reply_to_the_same_review_does_nothing(self) -> None:
         await self.rate_by_reply("good")
