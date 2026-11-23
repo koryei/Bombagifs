@@ -249,12 +249,20 @@ class SelfBotConvertTests(_SelfBotCase):
         self.convert.assert_not_awaited()
 
     async def test_dm_text_reply_without_media_is_silent(self) -> None:
-        # e.g. a member replying "thanks!" to one of the bot's own messages.
+        # e.g. a member replying "thanks!" to one of the bot's own messages. Discord counts the reply as a
+        # mention of the replied-to author, which is not an ask.
         reference = SimpleNamespace(message_id=42, resolved=SimpleNamespace(attachments=[], embeds=[]), cached_message=None)
-        message = make_message(content="thanks!", reference=reference)
+        message = make_message(content="thanks!", reference=reference, mentions=[self.me])
         await self.bot.on_message(message)
         message.reply.assert_not_awaited()
         self.convert.assert_not_awaited()
+
+    async def test_dm_reply_to_a_media_message_still_converts(self) -> None:
+        reference = SimpleNamespace(message_id=42, resolved=SimpleNamespace(attachments=[attachment("b.png")], embeds=[]), cached_message=None)
+        message = make_message(content="please", reference=reference, mentions=[self.me])
+        await self.bot.on_message(message)
+        self.assertEqual(message.reply.await_args.args[0], LINK)
+        self.convert.assert_awaited_once()
 
     async def test_batch_is_capped_and_noted(self) -> None:
         message = make_message(attachments=[attachment(f"{i}.png") for i in range(7)])

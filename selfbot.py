@@ -970,9 +970,11 @@ class SelfBot(discord.Client):
                     return
                 if referenced is not None and await self._try_manual_clip(message, referenced):
                     return
-                # Only complain when the person clearly asked: they pinged us or attached something.
-                # A plain DM reply (e.g. "thanks!" to one of our messages) is just conversation.
-                if message.attachments or self._incoming(message).mentions_me:
+                # Only complain when the person clearly asked: they attached something, or pinged us outside a
+                # 1:1 DM. A DM reply carries an implicit mention of the message it answers, so it is conversation.
+                if message.attachments or (
+                    self._incoming(message).mentions_me and not isinstance(message.channel, discord.DMChannel)
+                ):
                     await self._reply(message, no_media_reply(message))
                 return
             who = self._who(message.author)
