@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,7 @@ from selfbot_logic import (
     AllowlistStore,
     apply_timezone,
     BotStats,
+    BusyTracker,
     CaptchaGuard,
     ChannelKind,
     Cooldown,
@@ -432,6 +435,53 @@ class EnvFlagTests(unittest.TestCase):
         for value in (None, "", "0", "false", "no", "off", "maybe"):
             with self.subTest(value=value):
                 self.assertFalse(env_flag(value))
+
+
+class BusyTrackerTests(unittest.TestCase):
+    """The marker the updater reads before it restarts the bot."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "busy.json"
+
+    def marker(self) -> dict:
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def test_a_job_is_visible_while_it_runs_and_gone_after(self) -> None:
+        busy = BusyTracker(self.path)
+        with busy.job():
+            self.assertEqual(self.marker()["jobs"], 1)
+        self.assertEqual(self.marker()["jobs"], 0)
+
+    def test_nested_jobs_are_counted(self) -> None:
+        busy = BusyTracker(self.path)
+        with busy.job():
+            with busy.job():
+                self.assertEqual(self.marker()["jobs"], 2)
+            self.assertEqual(self.marker()["jobs"], 1)
+        self.assertEqual(self.marker()["jobs"], 0)
+
+    def test_a_failing_job_still_clears_the_marker(self) -> None:
+        busy = BusyTracker(self.path)
+        with self.assertRaises(RuntimeError):
+            with busy.job():
+                raise RuntimeError("boom")
+        self.assertEqual(self.marker()["jobs"], 0)
+
+    def test_the_marker_carries_a_timestamp(self) -> None:
+        busy = BusyTracker(self.path)
+        with busy.job():
+            self.assertAlmostEqual(self.marker()["at"], time.time(), delta=5)
+
+    def test_an_unwritable_marker_does_not_break_the_job(self) -> None:
+        blocker = Path(self._tmp.name) / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        busy = BusyTracker(blocker / "busy.json")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            with busy.job():
+                pass
+        self.assertEqual(busy.jobs, 0)
 
 
 class BotStatsTests(unittest.TestCase):

@@ -13,7 +13,8 @@ import os
 import re
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -83,6 +84,35 @@ class AllowlistStore:
 
     def _save(self) -> None:
         write_private_json(self.path, {str(user_id): ts for user_id, ts in sorted(self._users.items())})
+
+
+class BusyTracker:
+    """Counts in-flight work and mirrors the count to a file the updater reads before it restarts."""
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path)
+        self._jobs = 0
+
+    @property
+    def jobs(self) -> int:
+        return self._jobs
+
+    @contextmanager
+    def job(self) -> Iterator[None]:
+        """Count one job as running for as long as the block runs."""
+        self._jobs += 1
+        self._save()
+        try:
+            yield
+        finally:
+            self._jobs -= 1
+            self._save()
+
+    def _save(self) -> None:
+        try:
+            write_private_json(self.path, {"jobs": self._jobs, "at": time.time()})
+        except OSError:
+            logger.warning("Could not write the busy marker %s", self.path, exc_info=True)
 
 
 def env_flag(value: str | None) -> bool:
