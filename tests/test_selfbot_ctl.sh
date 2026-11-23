@@ -132,9 +132,9 @@ sudoers_file="$TEST_ROOT/etc/sudoers.d/bombagif-selfbot"
 assert_contains "$(cat "$sudoers_file")" "NOPASSWD: /usr/bin/systemctl restart bombagif-selfbot.service" "the sudoers entry is installed"
 assert_equal 440 "$(stat -c %a "$sudoers_file" 2>/dev/null || stat -f %Lp "$sudoers_file")" "sudoers is mode 440"
 
-# an interval under five minutes is refused before anything is installed
+# an interval under a minute is refused before anything is installed
 : >"$FAKE_STATE/calls"
-if (cmd_auto on 2 >/dev/null 2>&1); then fail "auto on 2 must be refused"; fi
+if (cmd_auto on 0 >/dev/null 2>&1); then fail "auto on 0 must be refused"; fi
 assert_not_contains "$(cat "$FAKE_STATE/calls")" "enable" "a refused interval enables nothing"
 
 # auto off takes the timer, the unit and the sudoers entry away again
@@ -143,6 +143,33 @@ assert_contains "$(cat "$FAKE_STATE/calls")" "disable --now bombagif-selfbot-upd
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "auto off removes the timer"
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "auto off removes the update service"
 [[ ! -f "$sudoers_file" ]] || fail "auto off removes the sudoers entry"
+
+# --- waiting for idle before a restart ---------------------------------------------------------------------
+DIR="$TEST_ROOT/idle"; mkdir -p "$DIR/data"
+busy_file="$DIR/data/busy.json"
+export SELFBOT_IDLE_STEP_SECONDS=0 SELFBOT_IDLE_WAIT_SECONDS=0
+
+# no marker at all: nothing to wait for
+rm -f "$busy_file"
+out="$(wait_for_idle 2>&1)"; assert_equal "" "$out" "no marker means idle"
+
+# a fresh marker with jobs: reported, then the wait is capped so an update never hangs
+printf '{"jobs": 2, "at": %s}' "$(date +%s)" >"$busy_file"
+out="$(wait_for_idle 2>&1)"
+assert_contains "$out" "Still busy with 2 job" "a busy bot is reported"
+assert_contains "$out" "updating anyway" "the wait is capped"
+
+# a stale marker (the bot died mid-job) is ignored
+printf '{"jobs": 2, "at": %s}' "$(( $(date +%s) - 600 ))" >"$busy_file"
+out="$(wait_for_idle 2>&1)"; assert_not_contains "$out" "Busy" "a stale marker is ignored"
+
+# it re-checks after the step and returns as soon as the work is done
+printf '{"jobs": 1, "at": %s}' "$(date +%s)" >"$busy_file"
+( sleep 0.5; printf '{"jobs": 0, "at": %s}' "$(date +%s)" >"$busy_file" ) &
+out="$(SELFBOT_IDLE_STEP_SECONDS=1 SELFBOT_IDLE_WAIT_SECONDS=10 wait_for_idle 2>&1)" || fail "it should return once idle"
+wait
+assert_contains "$out" "Busy with 1 job" "the wait is announced"
+assert_not_contains "$out" "updating anyway" "it never hit the cap"
 
 # --- update flow -------------------------------------------------------------------------------------------
 git_ident=(-c user.name=t -c user.email=t@example.test)
@@ -247,6 +274,13 @@ touch "$FAKE_STATE/crash-on-restart"
 assert_contains "$(cat "$(notice_of)")" '"outcome": "rolled-back"' "a rollback is recorded"
 assert_contains "$(cat "$(notice_of)")" 'breaks things' "the rollback notice names what was tried"
 rm -f "$FAKE_STATE/crash-on-restart"; echo active >"$FAKE_STATE/active"  # leave the fake service healthy for what follows
+
+# a busy bot is given a moment before the restart, then updated anyway
+make_repos; push_change app.txt v2 "second change"
+mkdir -p "$DIR/data"; printf '{"jobs": 1, "at": %s}' "$(date +%s)" >"$DIR/data/busy.json"
+out="$(cmd_update 2>&1)"
+assert_contains "$out" "Still busy with 1 job" "the update waits for in-flight work"
+assert_contains "$out" "healthy" "it still updates once the wait is capped"
 
 # --- timezone -------------------------------------------------------------------------------------------------
 cat >"$FAKE_BIN/timedatectl" <<'FAKE'

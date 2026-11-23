@@ -294,6 +294,38 @@ os.replace(tmp, path)
 PY
 }
 
+busy_jobs() {  # prints the in-flight job count; 0 when the marker is missing, stale or unreadable
+  BUSY="$DIR/data/busy.json" STALE="${SELFBOT_BUSY_STALE_SECONDS:-120}" python3 - <<'PY'
+import json, os, time
+from pathlib import Path
+
+try:
+    data = json.loads(Path(os.environ["BUSY"]).read_text(encoding="utf-8"))
+    jobs = int(data.get("jobs") or 0)
+    at = float(data.get("at") or 0)
+except (OSError, ValueError, TypeError, AttributeError):
+    print(0)
+else:
+    fresh = time.time() - at <= float(os.environ["STALE"])
+    print(jobs if jobs > 0 and fresh else 0)
+PY
+}
+
+wait_for_idle() {  # wait_for_idle: let in-flight work finish before the restart kills it
+  local waited=0 limit="${SELFBOT_IDLE_WAIT_SECONDS:-300}" step="${SELFBOT_IDLE_STEP_SECONDS:-10}" jobs
+  while :; do
+    jobs="$(busy_jobs)"
+    [[ "$jobs" == 0 ]] && return 0
+    if (( waited >= limit )); then
+      warn "Still busy with $jobs job(s) after ${waited}s; updating anyway."
+      return 0
+    fi
+    info "Busy with $jobs job(s); checking again in ${step}s."
+    sleep "$step"
+    waited=$((waited + step))
+  done
+}
+
 cmd_update() {
   git_ diff --quiet && git_ diff --cached --quiet || die "This checkout has local changes; refusing to update. Run: git -C $DIR status"
   local branch old new
@@ -313,6 +345,7 @@ cmd_update() {
   local deps=false
   if deps_changed "$old" "$new"; then deps=true; info "Dependencies changed; installing..."; fi
   if { ! $deps || install_deps; } && smoke_ok; then
+    wait_for_idle
     write_notice "$(git_ rev-parse --short "$old")" "$(git_ rev-parse --short "$new")" updated "$commits"
     sc_write restart "$SERVICE.service"
     before_restarts="$(sc_read show -p NRestarts --value "$SERVICE.service" 2>/dev/null || echo 0)"
@@ -334,7 +367,7 @@ cmd_auto() {
   user="$(id -un)"; group="$(id -gn)"
   case "$action" in
     on)
-      [[ "$minutes" =~ ^[0-9]+$ && "$minutes" -ge 5 ]] || die "Use at least 5 minutes: ./selfbot-ctl.sh auto on 15"
+      [[ "$minutes" =~ ^[0-9]+$ && "$minutes" -ge 1 ]] || die "Use at least 1 minute: ./selfbot-ctl.sh auto on 1"
       install_file render_sudoers "$user" -- "/etc/sudoers.d/$SERVICE" 0440
       if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "/etc/sudoers.d/$SERVICE" >/dev/null; then
         as_root rm -f "/etc/sudoers.d/$SERVICE"; die "Could not validate the sudoers entry; auto-update not enabled."
