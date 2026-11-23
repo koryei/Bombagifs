@@ -95,6 +95,55 @@ assert_contains "$sudoers" "alice ALL=(root) NOPASSWD: /usr/bin/systemctl restar
 assert_not_contains "$sudoers" "ALL, " "sudoers stays narrow"
 assert_not_contains "$sudoers" "NOPASSWD: ALL" "sudoers stays narrow"
 
+# --- auto-update -------------------------------------------------------------------------------------------
+# A fake root: rewrite the absolute system paths into the test root and drop the root ownership flags, so the
+# real /etc is never touched.
+as_root() {
+  local args=() filtered=("install") arg skip=0
+  for arg in "$@"; do
+    case "$arg" in
+      /etc/*) args+=("$TEST_ROOT$arg") ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  if [[ "${args[0]}" == "install" ]]; then
+    for arg in "${args[@]:1}"; do
+      if (( skip > 0 )); then skip=$((skip - 1)); continue; fi
+      case "$arg" in
+        -o|-g) skip=1 ;;
+        *) filtered+=("$arg") ;;
+      esac
+    done
+    args=("${filtered[@]}")
+  fi
+  "${args[@]}"
+}
+mkdir -p "$TEST_ROOT/etc/sudoers.d" "$TEST_ROOT/etc/systemd/system"
+DIR="/srv/bombagif"
+
+: >"$FAKE_STATE/calls"
+cmd_auto on 15 >/dev/null 2>&1 || fail "auto on should succeed"
+assert_contains "$(cat "$FAKE_STATE/calls")" "enable --now bombagif-selfbot-update.timer" "the timer is enabled"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "auto on writes the update service"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "auto on writes the timer"
+assert_contains "$(cat "$UNIT_DIR/bombagif-selfbot-update.timer")" "OnUnitActiveSec=15min" "the timer uses the requested interval"
+assert_contains "$(cat "$UNIT_DIR/bombagif-selfbot-update.service")" "selfbot-ctl.sh update --quiet" "the timer runs a quiet update"
+sudoers_file="$TEST_ROOT/etc/sudoers.d/bombagif-selfbot"
+assert_contains "$(cat "$sudoers_file")" "NOPASSWD: /usr/bin/systemctl restart bombagif-selfbot.service" "the sudoers entry is installed"
+assert_equal 440 "$(stat -c %a "$sudoers_file" 2>/dev/null || stat -f %Lp "$sudoers_file")" "sudoers is mode 440"
+
+# an interval under five minutes is refused before anything is installed
+: >"$FAKE_STATE/calls"
+if (cmd_auto on 2 >/dev/null 2>&1); then fail "auto on 2 must be refused"; fi
+assert_not_contains "$(cat "$FAKE_STATE/calls")" "enable" "a refused interval enables nothing"
+
+# auto off takes the timer, the unit and the sudoers entry away again
+cmd_auto off >/dev/null 2>&1 || fail "auto off should succeed"
+assert_contains "$(cat "$FAKE_STATE/calls")" "disable --now bombagif-selfbot-update.timer" "the timer is disabled"
+[[ ! -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "auto off removes the timer"
+[[ ! -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "auto off removes the update service"
+[[ ! -f "$sudoers_file" ]] || fail "auto off removes the sudoers entry"
+
 # --- update flow -------------------------------------------------------------------------------------------
 git_ident=(-c user.name=t -c user.email=t@example.test)
 make_repos() {
