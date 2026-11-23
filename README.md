@@ -148,6 +148,11 @@ up for 20 seconds. `data/` and `.env` are never touched. `auto on` adds a system
 lets your user restart only this service without a password. `doctor` reports what is missing without printing secrets.
 Tests: `bash tests/test_selfbot_ctl.sh`.
 
+Before it restarts, `update` reads `data/busy.json` and waits for in-flight conversions and clip renders to finish,
+re-checking every 10 seconds for up to 5 minutes, so a restart never kills a job mid-flight. A marker older than two
+minutes is ignored, so a crashed bot cannot block updates. `auto on 1` checks every minute; the timer's first check is
+five minutes after boot.
+
 `training` is the form for a teaching phase: it asks a few questions (or takes `on` / `off` / `status`) and writes only
 the scout settings in `.env` — `SELFBOT_SCOUT_MODE=dry-run`, `SCOUT_REVIEW=always`, `SCOUT_REVIEW_PER_HOUR=30`,
 `SCOUT_NEAR_MISS_*_FUNNY=0`, `SCOUT_EXAMPLES=12` — then restarts. Your tokens and every other line stay as they are,
