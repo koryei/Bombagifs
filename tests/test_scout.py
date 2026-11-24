@@ -23,6 +23,7 @@ from scout import (
     format_clip_notice,
     parse_help_command,
     parse_rating,
+    parse_ratings,
     parse_scout_command,
 )
 from scout_buffer import ScoutBuffer, ScoutMessage, Version
@@ -107,7 +108,8 @@ class ScoutCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
         self.clock = FakeClock()
-        self.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "on", **self.env})
+        # One candidate per DM by default, so a test that only cares about a single review does not wait for a batch.
+        self.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "on", "SCOUT_REVIEW_BATCH": "1", **self.env})
         self.optout = OptOutStore(self.dir / "optout.json")
         self.buffer = ScoutBuffer(max_age_s=3600, max_per_chat=200, is_opted_out=lambda uid: uid in self.optout, clock=self.clock)
         self.ledger = ClipLedger(self.dir / "clips.jsonl")
@@ -615,10 +617,10 @@ class ReviewTests(ScoutCase):
         self.dm_result: int | None = None  # None = "use the counter"
         self.taste = TasteStore(self.dir / "taste.jsonl")
 
-    async def on_review(self, item: ReviewItem) -> int | None:
-        self.reviews.append(item)
+    async def on_review(self, items: Sequence[ReviewItem]) -> list[tuple[int, tuple[ReviewItem, ...]]]:
+        self.reviews.extend(items)
         self.next_dm += 1
-        return self.next_dm
+        return [(self.next_dm, tuple(items))]
 
     def scout_with(self, judge, **env_overrides):
         cfg = replace(self.cfg, **env_overrides)
@@ -719,7 +721,7 @@ class ReviewTests(ScoutCase):
         await self.settle(silent)
         self.assertEqual(self.stats.scout_screened, 1)
 
-        async def boom(item: ReviewItem) -> int | None:
+        async def boom(items: Sequence[ReviewItem]) -> list[tuple[int, tuple[ReviewItem, ...]]]:
             raise RuntimeError("dm failed")
 
         self.setUp()
@@ -730,8 +732,8 @@ class ReviewTests(ScoutCase):
         self.assertEqual((self.stats.scout_screened, self.stats.dry_run_hits), (1, 1))  # the dry-run hit was still recorded
 
     async def test_a_callback_returning_none_is_not_remembered(self) -> None:
-        async def refuses(item: ReviewItem) -> int | None:
-            return None
+        async def refuses(items: Sequence[ReviewItem]) -> list[tuple[int, tuple[ReviewItem, ...]]]:
+            return []
 
         scout = self.scout(FakeJudge(self.near_miss()), cfg=replace(self.cfg, mode="dry-run"), on_review=refuses)
         self.add(1)
@@ -812,6 +814,78 @@ class ReviewTests(ScoutCase):
         self.buffer.edit(1, 2, "edited words")
         await self.settle(scout)
         self.assertEqual([r.lines for r in self.reviews], [(("A", "the original words"),)])
+
+    async def test_candidates_are_batched_into_one_dm(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run", review_batch=3, review_per_hour=10)
+        for i in range(1, 4):
+            self.add(i, f"candidate {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        self.assertEqual(len(self.reviews), 3)  # all three were queued...
+        self.assertEqual(len(scout.reviews), 1)  # ...and went out as one DM
+        (batch,) = scout.reviews.values()
+        self.assertEqual([item.id for item in batch], [1, 2, 3])
+
+    async def test_a_partial_batch_waits_for_the_timer(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run", review_batch=5, review_batch_minutes=10)
+        self.add(1, "only candidate", author=10)
+        await self.settle(scout)
+        self.assertEqual(scout.reviews, {})  # one of five, and not long enough yet
+        self.clock.now += 9 * 60
+        await scout.tick()
+        self.assertEqual(scout.reviews, {})
+        self.clock.now += 61
+        await scout.tick()
+        self.assertEqual(len(scout.reviews), 1)
+        self.assertEqual(len(self.reviews), 1)
+
+    async def test_a_full_batch_does_not_wait_for_the_timer(self) -> None:
+        scout = self.scout_with(FakeJudge(self.near_miss()), mode="dry-run", review_batch=2, review_batch_minutes=60)
+        for i in range(1, 3):
+            self.add(i, f"candidate {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        self.assertEqual(len(scout.reviews), 1)
+        self.assertEqual(len(self.reviews), 2)
+
+    async def test_rate_many_rates_the_numbered_candidates_and_keeps_the_rest(self) -> None:
+        scout = self.scout_with(FakeJudge(approve(funny=8.7)), mode="dry-run", review_batch=3, review_per_hour=10)
+        for i in range(1, 4):
+            self.add(i, f"line number {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        (dm_id,) = scout.reviews
+        self.assertTrue(await scout.rate_many(dm_id, {0: "good", 2: "skip"}))
+        self.assertEqual([(e.label, e.lines) for e in self.taste.all()], [("good", (("A", "line number 1"),))])
+        self.assertEqual([item.id for item in scout.reviews[dm_id]], [2])  # the unrated one is still pending
+        self.assertTrue(await scout.rate_many(dm_id, {0: "bad"}))
+        self.assertEqual(self.taste.counts(), {"good": 1, "bad": 1})
+        self.assertEqual(scout.reviews, {})
+
+    async def test_rate_many_ignores_out_of_range_and_unknown_ids(self) -> None:
+        scout = self.scout_with(FakeJudge(approve()), mode="dry-run", review_batch=2, review_per_hour=10)
+        for i in range(1, 3):
+            self.add(i, f"line number {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        (dm_id,) = scout.reviews
+        self.assertFalse(await scout.rate_many(dm_id, {5: "good"}))
+        self.assertFalse(await scout.rate_many(999, {0: "good"}))
+        self.assertEqual(len(scout.reviews[dm_id]), 2)
+
+    async def test_a_batch_survives_a_restart(self) -> None:
+        store = ReviewStore(self.dir / "reviews.json")
+        scout = self.scout(
+            FakeJudge(self.near_miss()), cfg=replace(self.cfg, mode="dry-run", review_batch=2, review_per_hour=10),
+            on_review=self.on_review, taste=self.taste, review_store=store,
+        )
+        for i in range(1, 3):
+            self.add(i, f"line number {i}", author=10 + i, chat=i)
+        await self.settle(scout)
+        (dm_id,) = scout.reviews
+        restarted = self.scout(
+            FakeJudge(approve()), cfg=replace(self.cfg, mode="dry-run"), on_review=self.on_review, taste=self.taste,
+            review_store=ReviewStore(self.dir / "reviews.json"),
+        )
+        self.assertEqual([item.id for item in restarted.reviews[dm_id]], [1, 2])
+        self.assertTrue(await restarted.rate_many(dm_id, {1: "good"}))
+        self.assertEqual(self.taste.counts(), {"good": 1, "bad": 0})
 
 
 class NoticeAndCommandTests(unittest.TestCase):
@@ -910,6 +984,21 @@ class NoticeAndCommandTests(unittest.TestCase):
         for text in ("", "   ", "thanks", "good one", "not bad", "good bad", "goodbye", "!good!", "👍👍", "great", "stop", "lol 👍", "!!good"):
             with self.subTest(text=text):
                 self.assertIsNone(parse_rating(text))
+
+    def test_parse_ratings_reads_numbered_replies(self) -> None:
+        self.assertEqual(parse_ratings("1 good 2 bad 3 skip", 3), {0: "good", 1: "bad", 2: "skip"})
+        self.assertEqual(parse_ratings("1g 2b 3s", 3), {0: "good", 1: "bad", 2: "skip"})
+        self.assertEqual(parse_ratings("1: good\n2) no\n3- yes", 3), {0: "good", 1: "bad", 2: "good"})
+        self.assertEqual(parse_ratings("  2 BAD  ", 3), {1: "bad"})
+        self.assertEqual(parse_ratings("1 good", 10), {0: "good"})
+
+    def test_parse_ratings_drops_out_of_range_and_unrelated_text(self) -> None:
+        self.assertEqual(parse_ratings("4 good", 3), {})
+        self.assertEqual(parse_ratings("0 good", 3), {})
+        self.assertEqual(parse_ratings("good", 3), {})
+        self.assertEqual(parse_ratings("", 3), {})
+        self.assertEqual(parse_ratings("1 great", 3), {})
+        self.assertEqual(parse_ratings("1 goodbye", 3), {})  # the letter form must not eat a longer word
 
     def test_help_texts_cover_every_command_and_fit_in_one_message(self) -> None:
         for needle in ("!on", "!off", "!status", "!list", "!taste", "!taste add", "!taste clear",

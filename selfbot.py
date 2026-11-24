@@ -60,6 +60,7 @@ from scout import (
     format_clip_notice,
     parse_help_command,
     parse_rating,
+    parse_ratings,
     parse_scout_command,
 )
 from scout_config import read_scout_config
@@ -100,6 +101,7 @@ from selfbot_logic import (
 
 _MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
 UPDATE_NOTICE_NAME = "update-notice.json"  # written by selfbot-ctl.sh update, read once on boot
+REVIEW_DM_LIMIT = 1800  # a batch DM is split before Discord's 2000-character limit
 
 
 def _escape_markdown(text: str) -> str:
@@ -445,7 +447,9 @@ class SelfBot(discord.Client):
             lines.append((label, message.original))
         return lines
 
-    def _review_text(self, item: ReviewItem) -> str:
+    @staticmethod
+    def _review_block(item: ReviewItem, index: int | None) -> str:
+        """One candidate's lines and scores. ``index`` numbers it inside a batch DM; ``None`` is a lone candidate."""
         speakers = {speaker for speaker, _ in item.lines}
         shown = [
             f"> ({speaker}) {_escape_markdown(text)}" if len(speakers) > 1 else f"> {_escape_markdown(text)}"
@@ -456,33 +460,63 @@ class SelfBot(discord.Client):
         if parts:
             scores += " · decide " + " / ".join(parts)
         names = ", ".join(_escape_markdown(name) for name in item.names) or "someone"
-        text = "\n".join(
-            [
-                f"🔎 **Review candidate** ({'would clip' if item.would_clip else 'near miss'})",
-                f"From: {names}",
-                *shown,
-                scores,
-                f"Judge: {item.reason}" if item.reason else "",
-                "Reply to this message with `good` (clip-worthy) · `bad` (never) · `skip`",
-            ]
-        )
-        return "\n".join(line for line in text.split("\n") if line)[:1900]
+        kind = "would clip" if item.would_clip else "near miss"
+        head = f"🔎 **Review candidate** ({kind})\nFrom: {names}" if index is None else f"**{index}.** {kind} · From: {names}"
+        lines = [head, *shown, scores, f"Judge: {item.reason}" if item.reason else ""]
+        return "\n".join(line for line in lines if line)
 
-    async def _send_review(self, item: ReviewItem) -> int | None:
-        """DM a candidate to the owner for rating. Returns the DM's message id, or ``None`` if it could not be sent."""
+    @staticmethod
+    def _review_text(items: Sequence[ReviewItem]) -> str:
+        """Render one DM: the full single-candidate format, or a numbered batch the owner answers with ``1 good``."""
+        if len(items) == 1:
+            body = SelfBot._review_block(items[0], None)
+            return f"{body}\nReply to this message with `good` (clip-worthy) · `bad` (never) · `skip`"[:1900]
+        header = f"🔎 **Review candidates** ({len(items)})"
+        blocks = [SelfBot._review_block(item, index) for index, item in enumerate(items, start=1)]
+        labels = [label for _, label in zip(items, ("good", "bad", "skip"))]
+        examples = " · ".join(f"`{index} {label}`" for index, label in enumerate(labels, start=1))
+        short = " ".join(f"{index}{label[0]}" for index, label in enumerate(labels, start=1))
+        footer = f"Reply with {examples} (one per line, or `{short}`)"
+        return "\n".join([header, *blocks, footer])[:1900]
+
+    @staticmethod
+    def _review_chunks(items: Sequence[ReviewItem]) -> list[tuple[ReviewItem, ...]]:
+        """Split a batch into DMs that each fit Discord's limit, keeping the order."""
+        chunks: list[tuple[ReviewItem, ...]] = []
+        current: list[ReviewItem] = []
+        for item in items:
+            candidate = [*current, item]
+            if current and len(SelfBot._review_text(candidate)) > REVIEW_DM_LIMIT:
+                chunks.append(tuple(current))
+                current = [item]
+            else:
+                current = candidate
+        if current:
+            chunks.append(tuple(current))
+        return chunks
+
+    async def _send_review(self, items: Sequence[ReviewItem]) -> list[tuple[int, tuple[ReviewItem, ...]]]:
+        """DM the owner a batch of candidates to rate. Returns ``(message id, candidates in that DM)`` per DM sent."""
         runtime = self._scouting()
         if runtime is None or runtime.cfg.owner_id is None:
-            return None
+            return []
         try:
             owner = self.get_user(runtime.cfg.owner_id) or await self.fetch_user(runtime.cfg.owner_id)
-            sent = await owner.send(self._review_text(item), allowed_mentions=discord.AllowedMentions.none())
-        except discord.CaptchaRequired:
-            self._trip_captcha("sending a review")
-            return None
         except discord.HTTPException:
-            self.logger.warning("Could not DM a review candidate to the owner", exc_info=True)
-            return None
-        return int(sent.id)  # no reactions are added: they are rate limited, so you rate by replying
+            self.logger.warning("Could not look up the owner to send a review", exc_info=True)
+            return []
+        sent: list[tuple[int, tuple[ReviewItem, ...]]] = []
+        for chunk in self._review_chunks(items):
+            try:
+                message = await owner.send(self._review_text(chunk), allowed_mentions=discord.AllowedMentions.none())
+            except discord.CaptchaRequired:
+                self._trip_captcha("sending a review")
+                return sent
+            except discord.HTTPException:
+                self.logger.warning("Could not DM a review candidate to the owner", exc_info=True)
+                return sent
+            sent.append((int(message.id), chunk))
+        return sent  # no reactions are added: they are rate limited, so you rate by replying
 
     async def _handle_rating(self, payload: discord.RawReactionActionEvent) -> None:
         """The owner reacting 👍/👎/🙈 on a review DM or 👍/👎 on a clip we posted also teaches (reacting is free for them)."""
@@ -497,6 +531,10 @@ class SelfBot(discord.Client):
         """Rate a review DM or a posted clip by its message id. True when ``message_id`` was one of ours."""
         scout = runtime.scout
         if scout is not None and message_id in scout.reviews:
+            if len(scout.reviews[message_id]) > 1:
+                # A reaction cannot say which candidate it means, so a batch is rated by replying instead.
+                self.stats.note("info", "rate a batch by replying, e.g. `1 good 2 bad`")
+                return True
             saved = await scout.rate(message_id, label)
             self.stats.note("info", f"you rated a candidate {label}" + (" (saved)" if saved and label != "skip" else ""))
             return True
@@ -511,14 +549,33 @@ class SelfBot(discord.Client):
             return True
         return False
 
+    async def _apply_ratings(self, runtime: ScoutRuntime, message_id: int, labels: Mapping[int, str]) -> bool:
+        """Rate several candidates from one batch DM. True when anything was saved or skipped."""
+        scout = runtime.scout
+        if scout is None:
+            return False
+        saved = await scout.rate_many(message_id, labels)
+        rated = ", ".join(f"{index + 1} {label}" for index, label in sorted(labels.items()))
+        self.stats.note("info", f"you rated candidates {rated}" + (" (saved)" if saved else ""))
+        return True
+
     async def _handle_rating_reply(self, message: discord.Message) -> bool:
         """The owner replying ``good``/``bad``/``skip`` to a review DM or a posted clip. True when the reply was consumed."""
         runtime = self.scout
         if runtime is None or runtime.cfg.owner_id is None or message.author.id != runtime.cfg.owner_id:
             return False
         target = getattr(getattr(message, "reference", None), "message_id", None)
-        label = parse_rating(message.content or "")
-        if target is None or label is None:
+        if target is None:
+            return False
+        text = message.content or ""
+        scout = runtime.scout
+        batch = scout.reviews.get(int(target)) if scout is not None else None
+        if batch is not None and len(batch) > 1:
+            labels = parse_ratings(text, len(batch))
+            if labels:
+                return await self._apply_ratings(runtime, int(target), labels)
+        label = parse_rating(text)
+        if label is None:
             return False
         if await self._apply_rating(runtime, int(target), label):
             return True

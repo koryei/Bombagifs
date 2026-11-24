@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -83,7 +83,7 @@ class Scout:
         stats: BotStats | None = None,
         paused: Callable[[], bool] = lambda: False,
         blocklist: frozenset[str] = frozenset(),
-        on_review: Callable[[ReviewItem], Awaitable[int | None]] | None = None,
+        on_review: Callable[[Sequence[ReviewItem]], Awaitable[Sequence[tuple[int, Sequence[ReviewItem]]] | None]] | None = None,
         taste: TasteStore | None = None,
         review_store: ReviewStore | None = None,
         clock: Callable[[], float] = time.time,
@@ -105,10 +105,15 @@ class Scout:
         self.on_review = on_review
         self.taste = taste
         self._review_store = review_store
-        # Candidates the owner can still rate, by DM message id. Loaded from disk so a restart does not lose them.
-        self.reviews: OrderedDict[int, ReviewItem] = review_store.load() if review_store is not None else OrderedDict()
+        # Candidates the owner can still rate, by DM message id (one DM can hold a batch). Loaded from disk so a
+        # restart does not lose them.
+        self.reviews: OrderedDict[int, tuple[ReviewItem, ...]] = (
+            review_store.load() if review_store is not None else OrderedDict()
+        )
+        self._pending: list[ReviewItem] = []  # candidates waiting for the next batch DM
+        self._pending_since: float | None = None
         self._review_times: deque[float] = deque()
-        self._review_seq = max((item.id for item in self.reviews.values()), default=0)
+        self._review_seq = max((item.id for items in self.reviews.values() for item in items), default=0)
 
     # scheduling -----------------------------------------------------------------------------------------------
 
@@ -137,6 +142,7 @@ class Scout:
                     await self._screen(chat_id, run, key, now)
                     if self.paused():
                         return
+            await self._flush_reviews(now)
         finally:
             for event in self.judge.drain_events():
                 self.stats.note("warn", event)
@@ -193,7 +199,7 @@ class Scout:
         return self.cfg.review == "always" or (self.cfg.review == "dry-run" and self.cfg.mode == "dry-run")
 
     async def _maybe_review(self, window: JudgeWindow, verdict: Verdict, start: int, end: int, *, would_clip: bool) -> None:
-        """Send the owner a candidate to rate: would-be clips and near-misses, a few per hour, never raising."""
+        """Queue a candidate for the owner to rate: would-be clips and near-misses, a few per hour, never raising."""
         if not self._review_enabled():
             return
         near_miss = (
@@ -214,14 +220,34 @@ class Scout:
         self._review_seq += 1
         item = ReviewItem(self._review_seq, window.messages[start].chat_id, names, lines, verdict.funny, dict(verdict.decide), verdict.reason, would_clip)
         self._review_times.append(now)
+        self._pending.append(item)
+        if self._pending_since is None:
+            self._pending_since = now
+        await self._flush_reviews(now)
+
+    async def _flush_reviews(self, now: float) -> None:
+        """Send the queued candidates as one DM once the batch is full or has waited long enough.
+
+        Batching keeps a busy chat from turning into a stream of one-candidate DMs. A failed send drops the batch:
+        the candidates are still in the ledger, and retrying a stale DM is worse than losing one review.
+        """
+        if not self._pending or self.on_review is None:
+            return
+        waited = now - self._pending_since if self._pending_since is not None else 0.0
+        if len(self._pending) < self.cfg.review_batch and waited < self.cfg.review_batch_minutes * 60:
+            return
+        batch = tuple(self._pending)
+        self._pending.clear()
+        self._pending_since = None
         try:
-            dm_id = await self.on_review(item)  # type: ignore[misc]
+            sent = await self.on_review(batch)  # type: ignore[misc]
         except Exception:
-            logger.exception("could not send a review candidate")
+            logger.exception("could not send a review batch")
             return
-        if dm_id is None:
+        if not sent:
             return
-        self.reviews[dm_id] = item
+        for dm_id, items in sent:
+            self.reviews[int(dm_id)] = tuple(items)
         while len(self.reviews) > REMEMBERED_REVIEWS:
             self.reviews.popitem(last=False)
         self._save_reviews()
@@ -237,15 +263,36 @@ class Scout:
 
     async def rate(self, message_id: int, label: str, *, source: str = "review") -> bool:
         """Apply the owner's rating (``good``/``bad``/``skip``) to a reviewed candidate. True if it was saved or skipped."""
-        item = self.reviews.pop(message_id, None)
-        if item is None:
+        return await self.rate_many(message_id, {0: label}, source=source)
+
+    async def rate_many(self, message_id: int, labels: Mapping[int, str], *, source: str = "review") -> bool:
+        """Rate several candidates from one batch DM at once, by 0-based position within the batch.
+
+        Candidates left out of ``labels`` stay pending, so the owner can rate a batch in pieces. True if anything
+        was saved or skipped.
+        """
+        batch = self.reviews.get(message_id)
+        if batch is None:
             return False
+        rated = {index: label for index, label in labels.items() if 0 <= index < len(batch)}
+        if not rated:
+            return False
+        kept = tuple(item for index, item in enumerate(batch) if index not in rated)
+        if kept:
+            self.reviews[message_id] = kept
+        else:
+            del self.reviews[message_id]
         self._save_reviews()
-        if label == "skip":
-            return True
-        if self.taste is None:
-            return False
-        return self.taste.add(label, item.lines, funny=item.funny, decide=item.decide, source=source)
+        saved = False
+        for index, label in rated.items():
+            if label == "skip":
+                saved = True
+                continue
+            if self.taste is None:
+                continue
+            item = batch[index]
+            saved = self.taste.add(label, item.lines, funny=item.funny, decide=item.decide, source=source) or saved
+        return saved
 
     # decisions ------------------------------------------------------------------------------------------------
 
@@ -511,6 +558,25 @@ def parse_rating(text: str) -> Literal["good", "bad", "skip"] | None:
     return _RATING_WORDS.get(word)  # type: ignore[return-value]
 
 
+_BATCH_RATING_RE = re.compile(r"(\d+)\s*[:.)\-]?\s*(good|bad|skip|yes|no|[gbs])(?![a-z])")
+_BATCH_LETTERS = {"g": "good", "b": "bad", "s": "skip"}
+
+
+def parse_ratings(text: str, count: int) -> dict[int, str]:
+    """Read a reply to a batch DM as ``{0-based index: rating}``, e.g. ``1 good 2 bad`` or ``1g, 3s``.
+
+    Numbers are 1-based, as shown in the DM. Anything out of range for ``count`` is dropped, so a typo cannot rate
+    the wrong candidate. An empty result means the reply was not a batch rating.
+    """
+    ratings: dict[int, str] = {}
+    for match in _BATCH_RATING_RE.finditer(text.lower()):
+        index = int(match.group(1)) - 1
+        if 0 <= index < count:
+            word = match.group(2)
+            ratings[index] = _BATCH_LETTERS.get(word) or _RATING_WORDS[word]
+    return ratings
+
+
 HELP_OWNER = (
     "**Bombagif: owner guide** (I answer commands by DM)\n"
     "**Clip scout**\n"
@@ -522,8 +588,9 @@ HELP_OWNER = (
     "anything about exams\"), `!taste clear` wipes them\n"
     "`!examples` shows what you've rated, `!examples clear` forgets it\n"
     "`!tune` compares your ratings with my scores and suggests thresholds\n"
-    "In dry-run I DM you candidates and near-misses. Reply to that message with `good` (clip-worthy), `bad` (never) or "
-    "`skip`. You can also reply `good`/`bad` to any clip I posted. Your ratings become examples the judge sees.\n"
+    "In dry-run I DM you candidates and near-misses, a few to a message. Reply `good`, `bad` or `skip`, numbered when "
+    "there are several (`1 good 2 bad 3 skip`). You can also reply `good`/`bad` to any clip I posted. Your ratings "
+    "become examples the judge sees.\n"
     "**Clip that**\n"
     "In chats where scouting is on, say or reply `clip that` (no ping needed; typos and \"lmfao\" are fine) and I clip "
     "that message, or the latest one if you don't reply. Replying `gif that` to an image or "

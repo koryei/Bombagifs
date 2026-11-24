@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import stat
 import tempfile
@@ -165,12 +166,23 @@ class ReviewStoreTests(TempDirCase):
     def test_round_trip_keeps_order_and_fields_mode_600(self) -> None:
         path = self.dir / "reviews.json"
         store = ReviewStore(path)
-        store.save({6001: review(1), 6002: review(2, would_clip=False)})
+        store.save({6001: (review(1), review(3)), 6002: (review(2, would_clip=False),)})
         loaded = ReviewStore(path).load()
         self.assertEqual(list(loaded), [6001, 6002])
-        self.assertEqual(loaded[6001], review(1))
-        self.assertEqual(loaded[6002].would_clip, False)
+        self.assertEqual(loaded[6001], (review(1), review(3)))
+        self.assertEqual(loaded[6002][0].would_clip, False)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_a_file_written_before_batching_loads_as_batches_of_one(self) -> None:
+        path = self.dir / "reviews.json"
+        path.write_text(json.dumps({"6001": dataclasses.asdict(review(1))}), encoding="utf-8")
+        self.assertEqual(ReviewStore(path).load(), {6001: (review(1),)})
+
+    def test_an_empty_batch_is_treated_as_corrupt(self) -> None:
+        path = self.dir / "reviews.json"
+        path.write_text('{"6001": []}', encoding="utf-8")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            self.assertEqual(ReviewStore(path).load(), {})
 
     def test_missing_file_means_no_pending_reviews(self) -> None:
         self.assertEqual(ReviewStore(self.dir / "none.json").load(), {})
@@ -194,7 +206,7 @@ class ReviewStoreTests(TempDirCase):
     def test_saving_an_empty_mapping_clears_the_file(self) -> None:
         path = self.dir / "reviews.json"
         store = ReviewStore(path)
-        store.save({6001: review()})
+        store.save({6001: (review(),)})
         store.save({})
         self.assertEqual(ReviewStore(path).load(), {})
 

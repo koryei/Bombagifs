@@ -199,14 +199,27 @@ def _review_item(row: object) -> ReviewItem:
     )
 
 
+def _review_batch(row: object) -> tuple[ReviewItem, ...]:
+    """Parse one stored DM's candidates, accepting the pre-batching shape (a single object)."""
+    if isinstance(row, list):
+        if not row:
+            raise ValueError("a pending review batch must not be empty")
+        return tuple(_review_item(item) for item in row)
+    return (_review_item(row),)
+
+
 class ReviewStore:
     """``data/reviews.json``: candidates still waiting for the owner's rating, so a restart does not lose them."""
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
 
-    def load(self) -> OrderedDict[int, ReviewItem]:
-        """Pending candidates by DM message id, oldest first. A missing file means none; a corrupt one is moved aside."""
+    def load(self) -> OrderedDict[int, tuple[ReviewItem, ...]]:
+        """Pending candidates by DM message id, oldest first. A missing file means none; a corrupt one is moved aside.
+
+        Each DM holds a batch, so a value is a list of candidates. Files written before batching stored one object
+        per DM; those still load, as a batch of one.
+        """
         try:
             raw = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -218,7 +231,7 @@ class ReviewStore:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("pending reviews must be a JSON object")
-            return OrderedDict((int(key), _review_item(row)) for key, row in data.items())
+            return OrderedDict((int(key), _review_batch(row)) for key, row in data.items())
         except (ValueError, TypeError, KeyError) as exc:
             aside = self.path.with_name(self.path.name + ".corrupt")
             logger.warning("Pending reviews %s are corrupt (%s); moved to %s and starting empty", self.path, exc, aside)
@@ -228,6 +241,9 @@ class ReviewStore:
                 logger.warning("Could not move the corrupt pending reviews aside", exc_info=True)
             return OrderedDict()
 
-    def save(self, reviews: Mapping[int, ReviewItem]) -> None:
+    def save(self, reviews: Mapping[int, tuple[ReviewItem, ...]]) -> None:
         """Replace the file with ``reviews`` (atomic, mode 600)."""
-        write_private_json(self.path, {str(key): dataclasses.asdict(item) for key, item in reviews.items()})
+        write_private_json(
+            self.path,
+            {str(key): [dataclasses.asdict(item) for item in batch] for key, batch in reviews.items()},
+        )

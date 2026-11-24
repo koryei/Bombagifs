@@ -2053,7 +2053,7 @@ class SelfBotReviewTests(_SelfBotCase):
         self.assertIs(self.scout.taste, self.runtime.taste_store)
 
     async def test_review_dm_shows_the_candidate_to_the_owner_only(self) -> None:
-        self.assertEqual(await self.bot._send_review(review_item()), 6001)
+        self.assertEqual(await self.bot._send_review((review_item(),)), [(6001, (review_item(),))])
         self.bot.get_user.assert_called_once_with(OWNER)
         content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
         for needle in ("would clip", "Pranit", "the better one was me", "8.7", "deadpan and standalone", "Reply to this message", "`good`", "`bad`", "`skip`"):
@@ -2064,34 +2064,83 @@ class SelfBotReviewTests(_SelfBotCase):
         self.sent.add_reaction.assert_not_awaited()  # reactions are rate limited, so the account never adds any
 
     async def test_near_miss_dms_say_so(self) -> None:
-        await self.bot._send_review(review_item(would_clip=False))
+        await self.bot._send_review((review_item(would_clip=False),))
         content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
         self.assertIn("near miss", content)
         self.assertNotIn("would clip", content)
 
     async def test_multi_speaker_reviews_label_each_line(self) -> None:
-        await self.bot._send_review(review_item(names=("A name", "B name"), lines=(("A", "setup"), ("B", "punch"))))
+        await self.bot._send_review((review_item(names=("A name", "B name"), lines=(("A", "setup"), ("B", "punch"))),))
         content = self.owner.send.await_args.args[0] if self.owner.send.await_args.args else self.owner.send.await_args.kwargs["content"]
         self.assertIn("(A)", content)
         self.assertIn("(B)", content)
 
+    async def test_a_batch_dm_numbers_each_candidate(self) -> None:
+        items = (review_item(), review_item(id=2, would_clip=False, lines=(("A", "second line"),)))
+        self.assertEqual(await self.bot._send_review(items), [(6001, items)])
+        self.owner.send.assert_awaited_once()
+        content = self.owner.send.await_args.args[0]
+        for needle in ("**Review candidates** (2)", "**1.** would clip", "**2.** near miss", "the better one was me", "second line",
+                       "`1 good`", "`2 bad`", "`1g 2b`"):
+            self.assertIn(needle, content)
+        self.assertNotIn("Reply to this message", content)  # a batch is answered with numbers, not a bare word
+
+    async def test_a_long_batch_is_split_across_dms(self) -> None:
+        items = tuple(review_item(id=i, lines=(("A", "x" * 400),)) for i in range(1, 13))
+        sent = await self.bot._send_review(items)
+        self.assertGreater(len(sent), 1)
+        self.assertEqual([item for _, chunk in sent for item in chunk], list(items))  # every candidate, in order
+        for call in self.owner.send.await_args_list:
+            self.assertLessEqual(len(call.args[0]), 2000)
+
+    async def test_replying_numbers_rates_a_batch(self) -> None:
+        self.scout.reviews[6001] = (review_item(), review_item(id=2, lines=(("A", "second line"),)))
+        message = self.owner_reply("1 good 2 bad")
+        await self.bot.on_message(message)
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 1})
+        self.assertEqual([e.lines for e in self.runtime.taste_store.all()], [(("A", "the better one was me"),), (("A", "second line"),)])
+        self.assertNotIn(6001, self.scout.reviews)
+        message.reply.assert_not_awaited()
+
+    async def test_a_partly_rated_batch_keeps_the_rest_pending(self) -> None:
+        self.scout.reviews[6001] = (review_item(), review_item(id=2, lines=(("A", "second line"),)))
+        await self.bot.on_message(self.owner_reply("2 skip"))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertEqual([item.id for item in self.scout.reviews[6001]], [1])
+
+    async def test_a_bare_rating_on_a_batch_asks_for_numbers(self) -> None:
+        self.scout.reviews[6001] = (review_item(), review_item(id=2, lines=(("A", "second line"),)))
+        message = self.owner_reply("good")
+        await self.bot.on_message(message)
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertIn(6001, self.scout.reviews)  # nothing was rated: it is ambiguous which candidate was meant
+        self.assertTrue(any("1 good 2 bad" in e.text for e in self.bot.stats.activity))
+        message.reply.assert_not_awaited()
+
+    async def test_reacting_to_a_batch_asks_for_a_reply(self) -> None:
+        self.scout.reviews[6001] = (review_item(), review_item(id=2, lines=(("A", "second line"),)))
+        await self.bot.on_raw_reaction_add(self.reaction("👍"))
+        self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})
+        self.assertIn(6001, self.scout.reviews)
+        self.assertTrue(any("1 good 2 bad" in e.text for e in self.bot.stats.activity))
+
     async def test_no_owner_or_closed_dms_return_none(self) -> None:
         self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "dry-run"})
-        self.assertIsNone(await self.bot._send_review(review_item()))
+        self.assertEqual(await self.bot._send_review((review_item(),)), [])
         self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "dry-run", "SELFBOT_OWNER_ID": str(OWNER)})
         self.owner.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages to this user")
         with self.assertLogs("bombagif.selfbot", "WARNING"):
-            self.assertIsNone(await self.bot._send_review(review_item()))
+            self.assertEqual(await self.bot._send_review((review_item(),)), [])
 
     async def test_a_captcha_while_sending_a_review_trips_the_guard(self) -> None:
         self.owner.send.side_effect = make_captcha()
         with self.assertLogs("bombagif.selfbot", "ERROR"):
-            self.assertIsNone(await self.bot._send_review(review_item()))
+            self.assertEqual(await self.bot._send_review((review_item(),)), [])
         self.assertEqual(self.bot.captcha_guard.reason, "sending a review")
 
     async def test_the_account_never_adds_reactions_anywhere(self) -> None:
-        await self.bot._send_review(review_item())
-        await self.bot._send_review(review_item(would_clip=False))
+        await self.bot._send_review((review_item(),))
+        await self.bot._send_review((review_item(would_clip=False),))
         self.sent.add_reaction.assert_not_awaited()
 
     def owner_reply(self, text: str, *, to: int = 6001, author: int = OWNER, channel_cls=None, **kwargs):
@@ -2099,7 +2148,7 @@ class SelfBotReviewTests(_SelfBotCase):
         return make_message(author_id=author, channel_cls=channel_cls or discord.DMChannel, content=text, reference=reference, message_id=9100, **kwargs)
 
     async def rate_by_reply(self, text: str, **kwargs):
-        self.scout.reviews[6001] = review_item()
+        self.scout.reviews[6001] = (review_item(),)
         message = self.owner_reply(text, **kwargs)
         await self.bot.on_message(message)
         return message
@@ -2132,7 +2181,7 @@ class SelfBotReviewTests(_SelfBotCase):
         # not a conversion request, so it must never be answered with "no media".
         from selfbot import SelfBot
 
-        self.scout.reviews[6001] = review_item()
+        self.scout.reviews[6001] = (review_item(),)
         with patch.object(SelfBot, "_convert_and_reply", new_callable=AsyncMock) as convert:
             message = self.owner_reply("good", to=424242, mentions=[self.me])
             await self.bot.on_message(message)
@@ -2145,7 +2194,7 @@ class SelfBotReviewTests(_SelfBotCase):
         import aiohttp
         from selfbot import SelfBot
 
-        self.scout.reviews[6001] = review_item()
+        self.scout.reviews[6001] = (review_item(),)
         self.scout._save_reviews()
         restarted_runtime = make_runtime(self.root, mode="dry-run", SELFBOT_OWNER_ID=str(OWNER))
         restarted = SelfBot(SETTINGS, self.allowlist, scout=restarted_runtime)
@@ -2186,18 +2235,18 @@ class SelfBotReviewTests(_SelfBotCase):
         self.assertEqual(self.runtime.taste_store.all()[0].lines, (("A", "old row"),))  # a row without speakers uses one speaker
 
     async def test_rating_replies_work_without_a_scout_task_or_judge(self) -> None:
-        self.scout.reviews[6001] = review_item()
+        self.scout.reviews[6001] = (review_item(),)
         self.runtime.scout = None  # e.g. a bot that has not finished starting
         await self.bot.on_message(self.owner_reply("good"))
         self.assertEqual(self.runtime.taste_store.counts(), {"good": 0, "bad": 0})  # nothing to rate against; no crash
 
     async def test_owner_reactions_still_count_for_free(self) -> None:
-        self.scout.reviews[6001] = review_item()
+        self.scout.reviews[6001] = (review_item(),)
         await self.bot.on_raw_reaction_add(self.reaction("👍"))
         self.assertEqual(self.runtime.taste_store.counts(), {"good": 1, "bad": 0})
 
     async def rate(self, emoji: str, *, user: int = OWNER) -> None:
-        self.scout.reviews[6001] = review_item()
+        self.scout.reviews[6001] = (review_item(),)
         await self.bot.on_raw_reaction_add(self.reaction(emoji, user=user))
 
     async def test_owner_reactions_rate_the_candidate(self) -> None:
