@@ -2125,19 +2125,40 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.assertIsNone(self.bot._voice_client)
         self.assertIn("Join a voice channel", self.owner_dm.await_args.args[0])
 
-    async def test_join_refuses_a_dm_call(self) -> None:
-        # A private call is a voice state too, but its channel cannot be recorded and connect() takes no self_deaf.
-        self.owner_voice = SimpleNamespace(channel=Mock(spec=discord.DMChannel))
-        await self.bot.on_message(self.owner_message("!join"))
-        self.assertIsNone(self.bot._voice_client)
-        self.assertIn("server call", self.owner_dm.await_args.args[0])
+    def group_call(self) -> Mock:
+        """A group DM in a call: recipients instead of members, and a connect() that takes no self_mute."""
+        group = Mock(spec=discord.GroupChannel)
+        group.name = None
+        group.guild = None
+        group.me = SimpleNamespace(id=OWNER, display_name="Koryei")
+        group.recipients = [SimpleNamespace(id=7, display_name="Pranit")]
+        group.send = AsyncMock()
+        group.connect = AsyncMock(return_value=FakeVoiceClient(group))
+        return group
 
-    async def test_join_refuses_when_asked_in_a_dm(self) -> None:
+    async def test_join_works_in_a_group_dm(self) -> None:
+        group = self.group_call()
+        self.owner_voice = SimpleNamespace(channel=group)
         message = self.owner_message("!join")
-        message.channel = Mock(spec=discord.DMChannel)
+        message.channel = group
         await self.bot.on_message(message)
-        self.assertIsNone(self.bot._voice_client)
-        self.assertIn("server text channel", self.owner_dm.await_args.args[0])
+        self.assertIs(self.bot._voice_client.channel, group)
+        self.assertFalse(group.connect.await_args.kwargs.get("ring", True))  # never ring the whole group
+        self.assertIn("Listening", self.owner_dm.await_args.args[0])
+
+    async def test_clip_that_works_in_a_group_dm(self) -> None:
+        group = self.group_call()
+        self.owner_voice = SimpleNamespace(channel=group)
+        message = self.owner_message("!join")
+        message.channel = group
+        await self.bot.on_message(message)
+        self.feed(7)
+        clip = self.owner_message("clip that")
+        clip.channel = group
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake"):
+            await self.bot.on_message(clip)
+        group.send.assert_awaited_once()
+        self.assertEqual(group.send.await_args.args[0], "🎙️ **Pranit**, last 30s")
 
     async def test_join_explains_a_missing_libopus(self) -> None:
         self.voice_channel.connect = AsyncMock(side_effect=discord.opus.OpusNotLoaded)

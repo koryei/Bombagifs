@@ -138,6 +138,11 @@ def _escape_markdown(text: str) -> str:
     return _MARKDOWN_SPECIALS.sub(r"\\\1", text)
 
 
+def _voice_name(channel: Any) -> str:
+    """A call's name for a message: a group DM often has none, so fall back to its recipients."""
+    return getattr(channel, "name", None) or str(channel) or "the call"
+
+
 class _VoiceSink(AudioSink):
     """Feeds decoded call audio to the ring buffer, and to the wake word when one is configured."""
 
@@ -1155,11 +1160,17 @@ class SelfBot(discord.Client):
     def _voice_members(self) -> list[tuple[int, str]]:
         """Everyone in the call, as ``(user_id, display name)``, so a name in a request can be resolved."""
         channel = getattr(self._voice_client, "channel", None)
-        members = getattr(channel, "members", None) or ()
-        return [(member.id, getattr(member, "display_name", None) or member.name) for member in members]
+        members = getattr(channel, "members", None)
+        if members is None:  # a group DM has recipients and no members list
+            members = [*getattr(channel, "recipients", ()), getattr(channel, "me", None)]
+        return [
+            (member.id, getattr(member, "display_name", None) or member.name)
+            for member in members
+            if member is not None
+        ]
 
     async def _voice_join(self, message: discord.Message) -> str:
-        """Join the owner's voice channel and start buffering audio. Returns the answer to DM back."""
+        """Join the owner's call and start buffering audio. Returns the answer to DM back."""
         runtime = self.scout
         if runtime is None or not runtime.cfg.voice:
             return "Voice clips are off. Set `SCOUT_VOICE=on` in `.env` and restart me."
@@ -1169,17 +1180,17 @@ class SelfBot(discord.Client):
             return "The host is missing `davey`, which Discord now requires for voice. Run `./selfbot-ctl.sh voice on`."
         if self._voice_client is not None and self._voice_client.is_connected():
             return "I'm already in a call. Run `!leave` first."
-        if isinstance(message.channel, (discord.DMChannel, discord.GroupChannel)):
-            return "Run `!join` in the server text channel where you want the clips posted."
         target = getattr(getattr(message.author, "voice", None), "channel", None)
-        if isinstance(target, (discord.DMChannel, discord.GroupChannel)):
-            # A private call is a voice state too, but it cannot be recorded and its connect() takes no self_deaf.
-            return "I can only join a server call, not a DM call. Join a voice channel in the server, then run `!join`."
         if target is None:
-            return "Join a voice channel first, then run `!join`."
+            return "Join a voice channel or a group call first, then run `!join`."
         try:
-            # self_deaf must stay False: a deafened client is never sent audio, so there would be nothing to clip.
-            client = await target.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=True)
+            if isinstance(target, (discord.DMChannel, discord.GroupChannel)):
+                # A private call's connect() takes no self_deaf/self_mute, and ring=False keeps it from ringing
+                # everyone in the group. Nothing is transmitted anyway: the bot never plays an audio source.
+                client = await target.connect(cls=VoiceRecvClient, ring=False)
+            else:
+                # self_deaf must stay False: a deafened client is never sent audio, so there would be nothing to clip.
+                client = await target.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=True)
         except discord.opus.OpusNotLoaded:
             return "The host has no libopus, so I can't decode voice. Install it (`sudo apt install libopus0`) and restart me."
         except Exception:
@@ -1197,13 +1208,15 @@ class SelfBot(discord.Client):
         )
         client.listen(_VoiceSink(self._voice, self._on_wake_audio, self._wake))
         install_dave_decrypt(client)
-        self.stats.note("info", f"joined voice in {getattr(target, 'name', 'a call')}")
+        name = _voice_name(target)
+        self.stats.note("info", f"joined voice in {name}")
         wake = " Say the wake word or `clip that`." if self._wake is not None else " Say `clip that` here."
-        return f"Listening in **{getattr(target, 'name', 'the call')}**.{wake}"
+        return f"Listening in **{name}**.{wake}"
 
     async def _voice_abort(self, channel: Any) -> None:
         """Drop a half-open voice client, or the next `!join` is refused with "Already connected to a voice channel"."""
-        client = getattr(getattr(channel, "guild", None), "voice_client", None)
+        guild = getattr(channel, "guild", None)
+        client = guild.voice_client if guild is not None else self.voice_client
         if client is not None:
             with contextlib.suppress(Exception):
                 await client.disconnect(force=True)
@@ -1230,7 +1243,7 @@ class SelfBot(discord.Client):
         channel = getattr(self._voice_client, "channel", None)
         speakers = len(self._voice.speakers()) if self._voice is not None else 0
         wake = "on" if self._wake is not None else "off"
-        return f"In **{getattr(channel, 'name', 'a call')}**: {speakers} voice(s) buffered, wake word {wake}."
+        return f"In **{_voice_name(channel)}**: {speakers} voice(s) buffered, wake word {wake}."
 
     async def _voice_command(self, action: str, message: discord.Message) -> str:
         if action == "join":
@@ -1268,8 +1281,8 @@ class SelfBot(discord.Client):
             return False
         if runtime.cfg.owner_id is None or message.author.id != runtime.cfg.owner_id:
             return False
-        if message.author.bot or message.is_system() or isinstance(message.channel, discord.DMChannel):
-            return False  # a call clip belongs in the server, not in a DM
+        if message.author.bot or message.is_system():
+            return False
         request = parse_voice_request(message.content or "", self._voice_members())
         if request is None:
             return False

@@ -323,11 +323,16 @@ so instead of failing silently. `./selfbot-ctl.sh voice status` reports the exte
 with code 4017 and the bot never finishes joining. `discord.py-self` asks for `davey==0.1.0`, which is not on PyPI,
 so `voice on` pins `0.1.7` by hand.
 
-Then, from a text channel in the server:
+`discord-ext-voice-recv` predates DAVE, so it decrypts the transport layer and hands the payload straight to Opus.
+Once the call's DAVE group is ready that payload is ciphertext, and every packet fails with `OpusError: corrupted
+stream` until the router gives up. `scout_voice_recv.py` wraps the reader's RTP decryptor to decrypt it once more,
+and leaves packets alone while the group is still forming (Discord sends plaintext then).
+
+Then, from a text channel in the server, or from the group DM itself:
 
 | Command | What it does |
 |---|---|
-| `!join` | Joins the voice channel you are in and starts buffering the last `SCOUT_VOICE_KEEP_SECONDS` of each speaker |
+| `!join` | Joins the call you are in — a server voice channel or a group DM call — and buffers the last `SCOUT_VOICE_KEEP_SECONDS` of each speaker |
 | `clip that` | Posts the last `SCOUT_VOICE_SECONDS` of whoever spoke last, as an Ogg the chat plays inline |
 | `clip Pranit that` | Same, for one person by name (an exact name beats a longer one that starts the same) |
 | `clip what he just said` | Same as `clip that` |
@@ -335,8 +340,8 @@ Then, from a text channel in the server:
 | `!voice` | Whether it is listening, and how many voices are buffered |
 | `!leave` | Stops listening and disconnects |
 
-`!join` only works in a **server** text channel, and only when you are in a server voice channel. A DM call is a
-voice state too, but it cannot be recorded, so the bot refuses it and says why.
+In a group DM the bot joins without ringing anyone, and the clip lands in the group. Names come from the group's
+recipients, so `clip Pranit that` works there too.
 
 The bot joins **undeafened** (a deafened client is never sent audio) and muted, so everyone in the call sees it
 listening. Say so before you turn it on: recording people without telling them is illegal in two-party-consent
