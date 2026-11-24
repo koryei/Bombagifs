@@ -1,14 +1,17 @@
-"""The DAVE bridge for ``discord-ext-voice-recv``: decrypt the payload a second time before Opus sees it.
+"""The DAVE and private-call bridges for ``discord-ext-voice-recv``.
 
-Discord now encrypts call audio end to end with the DAVE protocol. ``discord.py-self`` speaks it (it needs the
-``davey`` package, or the voice socket closes with 4017), but ``discord-ext-voice-recv`` predates it: the reader
-decrypts the transport layer with nacl and hands the payload straight to Opus. Once the call's DAVE group is
-ready, that payload is MLS ciphertext, so every packet fails to decode with ``OpusError: corrupted stream`` and
-the router stops listening for good.
+Two things the extension predates:
 
-``install_dave_decrypt`` wraps the reader's RTP decryptor so the payload is decrypted once more on the way
-through. While the group is still forming Discord sends plaintext (passthrough mode), so a session that is not
-ready yet is left alone.
+* **DAVE.** Discord now encrypts call audio end to end. ``discord.py-self`` speaks it (it needs the ``davey``
+  package, or the voice socket closes with 4017), but the reader decrypts the transport layer with nacl and hands
+  the payload straight to Opus. Once the call's DAVE group is ready that payload is MLS ciphertext, so every
+  packet fails to decode with ``OpusError: corrupted stream`` and the router stops listening for good.
+  ``install_dave_decrypt`` wraps the reader's RTP decryptor to decrypt it once more.
+
+* **Private calls.** The gateway hook reads ``vc.guild.me`` and ``vc.guild.get_member``, and a group DM's client
+  has no guild at all, so the handshake dies with ``AttributeError: 'NoneType' object has no attribute 'me'``.
+  ``install_private_call_hook`` swaps in a hook that resolves members from the channel's own recipients. Guild
+  calls keep the upstream hook untouched.
 """
 
 from __future__ import annotations
@@ -20,6 +23,16 @@ try:  # optional, like voice receive itself: without davey the bot cannot join a
     import davey
 except ImportError:  # pragma: no cover - exercised by the main venv, which has no davey
     davey = None  # type: ignore[assignment]
+
+try:  # optional: the main venv has no voice receive, and then neither bridge has anything to wrap
+    from discord.enums import SpeakingState, try_enum
+    from discord.ext.voice_recv import gateway as vr_gateway
+    from discord.ext.voice_recv import voice_client as vr_client
+except ImportError:  # pragma: no cover - exercised by the main venv
+    SpeakingState = None  # type: ignore[assignment]
+    try_enum = None  # type: ignore[assignment]
+    vr_gateway = None  # type: ignore[assignment]
+    vr_client = None  # type: ignore[assignment]
 
 logger = logging.getLogger("bombagif.selfbot")
 
@@ -51,4 +64,58 @@ def install_dave_decrypt(client: Any) -> bool:
             return b""
 
     decryptor.decrypt_rtp = decrypt_rtp
+    return True
+
+
+def _private_member(client: Any, user_id: int) -> Any:
+    """The user behind an id in a private call: its recipients plus ourselves, since there is no guild to ask."""
+    channel = getattr(client, "channel", None)
+    for user in (*getattr(channel, "recipients", ()), getattr(channel, "me", None)):
+        if user is not None and getattr(user, "id", None) == user_id:
+            return user
+    return None
+
+
+async def _private_hook(ws: Any, msg: dict, client: Any) -> None:
+    """The upstream gateway hook, minus the guild: a private call resolves members from its own recipients."""
+    op = msg["op"]
+    data = msg.get("d", {})
+    if op == vr_gateway.READY:
+        client._add_ssrc(client.user.id, data["ssrc"])
+    elif op == vr_gateway.SESSION_DESCRIPTION:
+        if client._reader:
+            client._reader.update_secret_key(bytes(ws.secret_key))
+    elif op == vr_gateway.SPEAKING:
+        user_id = int(data["user_id"])
+        client._add_ssrc(user_id, data["ssrc"])
+        state = try_enum(SpeakingState, data["speaking"])
+        client.dispatch("voice_member_speaking_state", _private_member(client, user_id), data["ssrc"], state)
+    elif op == vr_gateway.CLIENT_CONNECT:
+        for user_id in (int(uid) for uid in data["user_ids"]):
+            client.dispatch("voice_member_connect", _private_member(client, user_id))
+    elif op == vr_gateway.CLIENT_DISCONNECT:
+        user_id = int(data["user_id"])
+        ssrc = client._get_ssrc_from_id(user_id)
+        if client._reader and ssrc is not None:
+            client._reader.packet_router.destroy_decoder(ssrc)
+        client._remove_ssrc(user_id=user_id)
+        client.dispatch("voice_member_disconnect", _private_member(client, user_id), ssrc)
+
+
+def install_private_call_hook() -> bool:
+    """Let voice_recv's gateway hook handle a private call. Returns False when voice receive is not installed."""
+    if vr_client is None:
+        return False
+    if getattr(vr_client.hook, "_bombagif_private", False):
+        return True
+    original = vr_client.hook
+
+    async def hook(ws: Any, msg: dict) -> None:
+        client = ws._connection.voice_client
+        if getattr(client, "guild", None) is not None:
+            return await original(ws, msg)
+        return await _private_hook(ws, msg, client)
+
+    hook._bombagif_private = True  # type: ignore[attr-defined]
+    vr_client.hook = hook
     return True

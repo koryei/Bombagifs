@@ -97,7 +97,7 @@ from scout_voice import (
     parse_voice_request,
     resolve_target,
 )
-from scout_voice_recv import install_dave_decrypt
+from scout_voice_recv import install_dave_decrypt, install_private_call_hook
 from scout_wake import WakeWord, build_wake_word
 from selfbot_logic import (
     apply_timezone,
@@ -1187,6 +1187,7 @@ class SelfBot(discord.Client):
             if isinstance(target, (discord.DMChannel, discord.GroupChannel)):
                 # A private call's connect() takes no self_deaf/self_mute, and ring=False keeps it from ringing
                 # everyone in the group. Nothing is transmitted anyway: the bot never plays an audio source.
+                install_private_call_hook()
                 client = await target.connect(cls=VoiceRecvClient, ring=False)
             else:
                 # self_deaf must stay False: a deafened client is never sent audio, so there would be nothing to clip.

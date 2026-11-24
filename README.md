@@ -328,6 +328,11 @@ Once the call's DAVE group is ready that payload is ciphertext, and every packet
 stream` until the router gives up. `scout_voice_recv.py` wraps the reader's RTP decryptor to decrypt it once more,
 and leaves packets alone while the group is still forming (Discord sends plaintext then).
 
+The same module teaches the extension about private calls. Its gateway hook reads `vc.guild.me` and
+`vc.guild.get_member`, and a group DM's client has no guild, so the handshake dies with `AttributeError: 'NoneType'
+object has no attribute 'me'`. A private call gets a hook that resolves members from the channel's own recipients;
+guild calls keep the upstream one.
+
 Then, from a text channel in the server, or from the group DM itself:
 
 | Command | What it does |

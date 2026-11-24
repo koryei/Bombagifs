@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import scout_voice_recv
-from scout_voice_recv import install_dave_decrypt
+from scout_voice_recv import _private_hook, install_dave_decrypt, install_private_call_hook
 
 FAKE_DAVEY = SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))
 
@@ -85,6 +85,101 @@ class InstallDaveDecryptTests(unittest.TestCase):
         client, decryptor = make_client(session=session, ssrc_to_id={42: 7})
         install_dave_decrypt(client)
         self.assertEqual(decryptor.decrypt_rtp(SimpleNamespace(ssrc=42)), b"")
+
+
+FAKE_GATEWAY = SimpleNamespace(
+    READY=2, SESSION_DESCRIPTION=4, SPEAKING=5, CLIENT_CONNECT=11, CLIENT_DISCONNECT=13
+)
+
+
+class FakeRecvClient:
+    """Stands in for VoiceRecvClient on a private call: no guild, recipients instead of members."""
+
+    def __init__(self, recipients=(), me=None) -> None:
+        self.channel = SimpleNamespace(recipients=list(recipients), me=me)
+        self.user = SimpleNamespace(id=999)
+        self.guild = None
+        self._reader = SimpleNamespace(
+            update_secret_key=Mock(), packet_router=SimpleNamespace(destroy_decoder=Mock())
+        )
+        self.ssrcs: dict[int, int] = {}
+        self.events: list[tuple] = []
+
+    def _add_ssrc(self, user_id, ssrc) -> None:
+        self.ssrcs[ssrc] = user_id
+
+    def _get_ssrc_from_id(self, user_id):
+        return next((ssrc for ssrc, uid in self.ssrcs.items() if uid == user_id), None)
+
+    def _remove_ssrc(self, *, user_id) -> None:
+        for ssrc, uid in list(self.ssrcs.items()):
+            if uid == user_id:
+                del self.ssrcs[ssrc]
+
+    def dispatch(self, event, *args) -> None:
+        self.events.append((event, args))
+
+
+class PrivateCallHookTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        for name, value in (("vr_gateway", FAKE_GATEWAY), ("try_enum", lambda enum, value: value)):
+            patcher = patch.object(scout_voice_recv, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def test_registers_our_own_ssrc(self) -> None:
+        client = FakeRecvClient()
+        await _private_hook(SimpleNamespace(secret_key=b""), {"op": 2, "d": {"ssrc": 55}}, client)
+        self.assertEqual(client.ssrcs, {55: 999})
+
+    async def test_registers_a_speaker_and_names_them(self) -> None:
+        pranit = SimpleNamespace(id=7, name="Pranit")
+        client = FakeRecvClient(recipients=[pranit])
+        await _private_hook(
+            SimpleNamespace(secret_key=b""), {"op": 5, "d": {"user_id": "7", "ssrc": 42, "speaking": 1}}, client
+        )
+        self.assertEqual(client.ssrcs, {42: 7})
+        self.assertEqual(client.events, [("voice_member_speaking_state", (pranit, 42, 1))])
+
+    async def test_updates_the_secret_key(self) -> None:
+        client = FakeRecvClient()
+        await _private_hook(SimpleNamespace(secret_key=[1, 2, 3]), {"op": 4, "d": {}}, client)
+        client._reader.update_secret_key.assert_called_once_with(b"\x01\x02\x03")
+
+    async def test_drops_a_disconnected_speaker(self) -> None:
+        client = FakeRecvClient(recipients=[SimpleNamespace(id=7, name="Pranit")])
+        client.ssrcs = {42: 7}
+        await _private_hook(SimpleNamespace(secret_key=b""), {"op": 13, "d": {"user_id": "7"}}, client)
+        client._reader.packet_router.destroy_decoder.assert_called_once_with(42)
+        self.assertEqual(client.ssrcs, {})
+
+    def test_install_returns_false_without_voice_recv(self) -> None:
+        with patch.object(scout_voice_recv, "vr_client", None):
+            self.assertFalse(install_private_call_hook())
+
+    def test_install_wraps_the_hook_once(self) -> None:
+        async def original(ws, msg):
+            return None
+
+        fake = SimpleNamespace(hook=original)
+        with patch.object(scout_voice_recv, "vr_client", fake):
+            self.assertTrue(install_private_call_hook())
+            self.assertTrue(install_private_call_hook())  # idempotent: never wrap our own wrapper
+        self.assertIsNot(fake.hook, original)
+        self.assertTrue(getattr(fake.hook, "_bombagif_private", False))
+
+    async def test_the_wrapped_hook_leaves_guild_calls_alone(self) -> None:
+        seen = []
+
+        async def original(ws, msg):
+            seen.append(msg)
+
+        fake = SimpleNamespace(hook=original)
+        with patch.object(scout_voice_recv, "vr_client", fake):
+            install_private_call_hook()
+        ws = SimpleNamespace(_connection=SimpleNamespace(voice_client=SimpleNamespace(guild=object())))
+        await fake.hook(ws, {"op": 2, "d": {"ssrc": 1}})
+        self.assertEqual(seen, [{"op": 2, "d": {"ssrc": 1}}])
 
 
 if __name__ == "__main__":
