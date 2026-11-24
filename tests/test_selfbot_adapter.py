@@ -2125,6 +2125,20 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.assertIsNone(self.bot._voice_client)
         self.assertIn("Join a voice channel", self.owner_dm.await_args.args[0])
 
+    async def test_join_refuses_a_dm_call(self) -> None:
+        # A private call is a voice state too, but its channel cannot be recorded and connect() takes no self_deaf.
+        self.owner_voice = SimpleNamespace(channel=Mock(spec=discord.DMChannel))
+        await self.bot.on_message(self.owner_message("!join"))
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("server call", self.owner_dm.await_args.args[0])
+
+    async def test_join_refuses_when_asked_in_a_dm(self) -> None:
+        message = self.owner_message("!join")
+        message.channel = Mock(spec=discord.DMChannel)
+        await self.bot.on_message(message)
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("server text channel", self.owner_dm.await_args.args[0])
+
     async def test_leave_disconnects_and_forgets_the_buffer(self) -> None:
         await self.join()
         client = self.bot._voice_client

@@ -1158,7 +1158,12 @@ class SelfBot(discord.Client):
             return "Voice receive is not installed on the host (`discord-ext-voice-recv`)."
         if self._voice_client is not None and self._voice_client.is_connected():
             return "I'm already in a call. Run `!leave` first."
+        if isinstance(message.channel, (discord.DMChannel, discord.GroupChannel)):
+            return "Run `!join` in the server text channel where you want the clips posted."
         target = getattr(getattr(message.author, "voice", None), "channel", None)
+        if isinstance(target, (discord.DMChannel, discord.GroupChannel)):
+            # A private call is a voice state too, but it cannot be recorded and its connect() takes no self_deaf.
+            return "I can only join a server call, not a DM call. Join a voice channel in the server, then run `!join`."
         if target is None:
             return "Join a voice channel first, then run `!join`."
         try:
