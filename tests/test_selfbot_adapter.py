@@ -2139,6 +2139,12 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.assertIsNone(self.bot._voice_client)
         self.assertIn("server text channel", self.owner_dm.await_args.args[0])
 
+    async def test_join_explains_a_missing_libopus(self) -> None:
+        self.voice_channel.connect = AsyncMock(side_effect=discord.opus.OpusNotLoaded)
+        await self.bot.on_message(self.owner_message("!join"))
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("libopus", self.owner_dm.await_args.args[0])
+
     async def test_leave_disconnects_and_forgets_the_buffer(self) -> None:
         await self.join()
         client = self.bot._voice_client

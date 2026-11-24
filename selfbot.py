@@ -1169,6 +1169,8 @@ class SelfBot(discord.Client):
         try:
             # self_deaf must stay False: a deafened client is never sent audio, so there would be nothing to clip.
             client = await target.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=True)
+        except discord.opus.OpusNotLoaded:
+            return "The host has no libopus, so I can't decode voice. Install it (`sudo apt install libopus0`) and restart me."
         except Exception:
             self.logger.warning("Could not join a voice channel", exc_info=True)
             return "I couldn't join that call."
