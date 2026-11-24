@@ -354,6 +354,7 @@ main voice off >/dev/null 2>&1 || fail "voice off should work"
 assert_equal "off" "$(env_get SCOUT_VOICE)" "voice off turns call clips off"
 status="$(main voice status 2>&1)"
 assert_contains "$status" "SCOUT_VOICE=off" "voice status shows the setting"
+assert_contains "$status" "libopus" "voice status reports whether libopus is available"
 assert_not_contains "$status" "secret-token" "voice status never prints secrets"
 if (main voice sideways >/dev/null 2>&1); then fail "an unknown voice action must fail"; fi
 

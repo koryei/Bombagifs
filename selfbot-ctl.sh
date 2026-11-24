@@ -45,6 +45,10 @@ version() {
   git_ describe --tags --always --dirty 2>/dev/null || git_ rev-parse --short HEAD 2>/dev/null || echo unknown
 }
 
+opus_ok() {  # true when the venv can load libopus, which voice clips need to decode
+  py -c 'import discord.opus, sys; sys.exit(0 if discord.opus.is_loaded() else 1)' >/dev/null 2>&1
+}
+
 # --- .env -----------------------------------------------------------------------------------------------------
 # You bring your own .env (e.g. scp it to $DIR/.env); this script never prompts for secrets. `training` rewrites only
 # the scout settings it manages, and never prints a value.
@@ -490,6 +494,7 @@ cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clip
         py -m pip install --quiet PyNaCl && py -m pip install --quiet --no-deps discord-ext-voice-recv
       fi
       env_set SCOUT_VOICE on
+      opus_ok || warn "libopus is missing: sudo apt install libopus0 (voice clips need it to decode)"
       ok "Voice clips are on. Join a call, then run !join in a text channel."
       ;;
     off)
@@ -503,6 +508,8 @@ cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clip
       done
       if py -c 'import discord.ext.voice_recv' >/dev/null 2>&1; then ok "voice receive is installed"
       else warn "voice receive is not installed: ./selfbot-ctl.sh voice on"; fi
+      if opus_ok; then ok "libopus is available"
+      else warn "libopus is missing: sudo apt install libopus0"; fi
       return 0
       ;;
     *) die "voice takes: on, off, status" ;;
@@ -534,6 +541,7 @@ cmd_doctor() {
   env_has SELFBOT_OWNER_ID || warn "SELFBOT_OWNER_ID is not set: nobody can use !on / !help (conversions still work)."
   env_has INCEPTION_API_KEY || env_has SCOUT_LLM_API_KEY || warn "No clip-judge key (INCEPTION_API_KEY or SCOUT_LLM_*): clip scouting can't post."
   py -c 'import discord.ext.voice_recv' >/dev/null 2>&1 || say "  ${C_DIM}voice receive: not installed (./selfbot-ctl.sh voice on)${C_RESET}"
+  py -c 'import discord.ext.voice_recv' >/dev/null 2>&1 && { opus_ok || warn "libopus is missing: sudo apt install libopus0 (voice clips need it to decode)"; }
   [[ "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env" 2>/dev/null)" == 600 ]] || warn ".env should be mode 600: chmod 600 $DIR/.env"
   [[ -e "$DIR/data/captcha-blocked.json" ]] && warn "Paused by a CAPTCHA (data/captcha-blocked.json)."
   return $bad

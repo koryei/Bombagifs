@@ -316,6 +316,9 @@ The bot can sit in a call and clip what someone just said. It is off by default;
 `discord-ext-voice-recv` is installed with `--no-deps` on purpose. Its own dependency is `discord.py`, which would
 replace `discord.py-self` and break the self-bot; the extension itself imports fine against the fork.
 
+The host also needs `libopus` (`sudo apt install libopus0`). Without it the bot cannot decode voice and `!join` says
+so instead of failing silently. `./selfbot-ctl.sh voice status` reports both the extension and libopus.
+
 Then, from a text channel in the server:
 
 | Command | What it does |
@@ -327,6 +330,9 @@ Then, from a text channel in the server:
 | `clip that last 20 seconds` | A different length, capped at what is buffered |
 | `!voice` | Whether it is listening, and how many voices are buffered |
 | `!leave` | Stops listening and disconnects |
+
+`!join` only works in a **server** text channel, and only when you are in a server voice channel. A DM call is a
+voice state too, but it cannot be recorded, so the bot refuses it and says why.
 
 The bot joins **undeafened** (a deafened client is never sent audio) and muted, so everyone in the call sees it
 listening. Say so before you turn it on: recording people without telling them is illegal in two-party-consent
