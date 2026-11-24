@@ -45,8 +45,14 @@ version() {
   git_ describe --tags --always --dirty 2>/dev/null || git_ rev-parse --short HEAD 2>/dev/null || echo unknown
 }
 
+opus_version() {  # the libopus version the venv can load, empty when it cannot
+  # is_loaded() is False until something loads the library, so ask for the version: that loads it and raises
+  # OpusNotLoaded when the host has none.
+  py -c 'import discord.opus; print(discord.opus._OpusStruct.get_opus_version())' 2>/dev/null
+}
+
 opus_ok() {  # true when the venv can load libopus, which voice clips need to decode
-  py -c 'import discord.opus, sys; sys.exit(0 if discord.opus.is_loaded() else 1)' >/dev/null 2>&1
+  [[ -n "$(opus_version)" ]]
 }
 
 # --- .env -----------------------------------------------------------------------------------------------------
@@ -508,7 +514,7 @@ cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clip
       done
       if py -c 'import discord.ext.voice_recv' >/dev/null 2>&1; then ok "voice receive is installed"
       else warn "voice receive is not installed: ./selfbot-ctl.sh voice on"; fi
-      if opus_ok; then ok "libopus is available"
+      if opus="$(opus_version)" && [[ -n "$opus" ]]; then ok "libopus $opus is available"
       else warn "libopus is missing: sudo apt install libopus0"; fi
       return 0
       ;;
