@@ -83,8 +83,22 @@ def _tokens(text: str) -> list[str]:
     return words
 
 
+# Every word the parser already understands. Anything else in a short message is a candidate name.
+VOCABULARY = frozenset(_FILLER | _OBJECT | _CLIP_VERBS | _CLIPPED | _GIF_WORDS)
+
+
+def tokens(text: str) -> list[str]:
+    """Lowercase words with emoji, punctuation and stretched letters removed (shared with the voice parser)."""
+    return _tokens(text)
+
+
 def _is_filler(word: str) -> bool:
     return word in _FILLER or any(pattern.match(word) for pattern in _LAUGH_RES)
+
+
+def is_filler(word: str) -> bool:
+    """True for filler words and laughter ("bro", "lmfao"), which can never be a name."""
+    return _is_filler(word)
 
 
 def _sure_clip(core: list[str], is_reply: bool) -> Trigger | None:
