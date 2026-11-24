@@ -9,4 +9,5 @@ python-dotenv==1.2.4
 rich==15.0.0
 emoji==2.16.0
 # Voice clips are optional and NOT listed here on purpose: discord-ext-voice-recv depends on discord.py, which
-# would replace discord.py-self and break the self-bot. `./selfbot-ctl.sh voice on` installs it with --no-deps.
+# would replace discord.py-self and break the self-bot. `./selfbot-ctl.sh voice on` installs it with --no-deps,
+# plus davey (Discord refuses a voice connection without the DAVE protocol) and PyNaCl.

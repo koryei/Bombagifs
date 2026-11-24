@@ -311,13 +311,17 @@ real names and text. Only lines you chose to rate are kept. Say so in the chat.
 ### Voice clips
 
 The bot can sit in a call and clip what someone just said. It is off by default; turn it on with
-`./selfbot-ctl.sh voice on`, which installs `PyNaCl` and `discord-ext-voice-recv` and sets `SCOUT_VOICE=on`.
+`./selfbot-ctl.sh voice on`, which installs `PyNaCl`, `discord-ext-voice-recv` and `davey`, and sets `SCOUT_VOICE=on`.
 
 `discord-ext-voice-recv` is installed with `--no-deps` on purpose. Its own dependency is `discord.py`, which would
 replace `discord.py-self` and break the self-bot; the extension itself imports fine against the fork.
 
 The host also needs `libopus` (`sudo apt install libopus0`). Without it the bot cannot decode voice and `!join` says
-so instead of failing silently. `./selfbot-ctl.sh voice status` reports both the extension and libopus.
+so instead of failing silently. `./selfbot-ctl.sh voice status` reports the extension, `davey` and libopus.
+
+`davey` is the DAVE end-to-end-encryption library Discord now requires for voice: without it the voice socket closes
+with code 4017 and the bot never finishes joining. `discord.py-self` asks for `davey==0.1.0`, which is not on PyPI,
+so `voice on` pins `0.1.7` by hand.
 
 Then, from a text channel in the server:
 

@@ -42,6 +42,14 @@ except ImportError:  # pragma: no cover - exercised by the main venv, which has 
     VoiceRecvClient = None  # type: ignore[assignment]
     HAS_VOICE_RECV = False
 
+try:  # Discord requires the DAVE protocol for voice now; without davey the socket closes with 4017
+    import davey
+
+    HAS_DAVE = True
+except ImportError:  # pragma: no cover - exercised by the main venv, which has no davey
+    davey = None  # type: ignore[assignment]
+    HAS_DAVE = False
+
 from bombagif_core import (
     DOWNLOAD_TIMEOUT,
     MAX_GIF_BATCH,
@@ -1156,6 +1164,8 @@ class SelfBot(discord.Client):
             return "Voice clips are off. Set `SCOUT_VOICE=on` in `.env` and restart me."
         if not HAS_VOICE_RECV:
             return "Voice receive is not installed on the host (`discord-ext-voice-recv`)."
+        if not HAS_DAVE:
+            return "The host is missing `davey`, which Discord now requires for voice. Run `./selfbot-ctl.sh voice on`."
         if self._voice_client is not None and self._voice_client.is_connected():
             return "I'm already in a call. Run `!leave` first."
         if isinstance(message.channel, (discord.DMChannel, discord.GroupChannel)):

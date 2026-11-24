@@ -2081,8 +2081,8 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.text_channel = Mock(spec=discord.TextChannel)
         self.text_channel.id = CHAT
         self.text_channel.send = AsyncMock()
-        # The test venv has no voice_recv, so the adapter's optional import is stubbed for these tests.
-        for name, value in (("HAS_VOICE_RECV", True), ("VoiceRecvClient", FakeVoiceClient)):
+        # The test venv has no voice_recv or davey, so the adapter's optional imports are stubbed for these tests.
+        for name, value in (("HAS_VOICE_RECV", True), ("HAS_DAVE", True), ("VoiceRecvClient", FakeVoiceClient)):
             patcher = patch.object(selfbot_module, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -2144,6 +2144,13 @@ class SelfBotVoiceTests(_SelfBotCase):
         await self.bot.on_message(self.owner_message("!join"))
         self.assertIsNone(self.bot._voice_client)
         self.assertIn("libopus", self.owner_dm.await_args.args[0])
+
+    async def test_join_refuses_without_dave(self) -> None:
+        # Discord closes the voice socket with 4017 when the client cannot do the DAVE protocol.
+        with patch("selfbot.HAS_DAVE", False):
+            await self.bot.on_message(self.owner_message("!join"))
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("davey", self.owner_dm.await_args.args[0])
 
     async def test_leave_disconnects_and_forgets_the_buffer(self) -> None:
         await self.join()

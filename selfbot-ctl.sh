@@ -492,12 +492,14 @@ cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clip
   ensure_env
   case "$action" in
     on)
-      info "Installing voice receive (PyNaCl + discord-ext-voice-recv)..."
+      info "Installing voice receive (PyNaCl + discord-ext-voice-recv + davey)..."
       # --no-deps matters: voice-recv depends on discord.py, which would replace discord.py-self and break the bot.
+      # davey is pinned by hand: discord.py-self asks for 0.1.0, which is not on PyPI, and Discord closes a voice
+      # connection without the DAVE protocol (close code 4017).
       if [[ -n "${SELFBOT_CTL_PIP:-}" ]]; then
-        "$SELFBOT_CTL_PIP" PyNaCl && "$SELFBOT_CTL_PIP" --no-deps discord-ext-voice-recv
+        "$SELFBOT_CTL_PIP" PyNaCl && "$SELFBOT_CTL_PIP" --no-deps discord-ext-voice-recv && "$SELFBOT_CTL_PIP" davey==0.1.7
       else
-        py -m pip install --quiet PyNaCl && py -m pip install --quiet --no-deps discord-ext-voice-recv
+        py -m pip install --quiet PyNaCl && py -m pip install --quiet --no-deps discord-ext-voice-recv && py -m pip install --quiet davey==0.1.7
       fi
       env_set SCOUT_VOICE on
       opus_ok || warn "libopus is missing: sudo apt install libopus0 (voice clips need it to decode)"
@@ -514,6 +516,8 @@ cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clip
       done
       if py -c 'import discord.ext.voice_recv' >/dev/null 2>&1; then ok "voice receive is installed"
       else warn "voice receive is not installed: ./selfbot-ctl.sh voice on"; fi
+      if py -c 'import davey' >/dev/null 2>&1; then ok "davey is installed"
+      else warn "davey is missing: ./selfbot-ctl.sh voice on"; fi
       if opus="$(opus_version)" && [[ -n "$opus" ]]; then ok "libopus $opus is available"
       else warn "libopus is missing: sudo apt install libopus0"; fi
       return 0
@@ -546,8 +550,12 @@ cmd_doctor() {
   say "${C_DIM}timezone: $(td show -p Timezone --value 2>/dev/null || echo unknown) (the bot also honours TZ in .env)${C_RESET}"
   env_has SELFBOT_OWNER_ID || warn "SELFBOT_OWNER_ID is not set: nobody can use !on / !help (conversions still work)."
   env_has INCEPTION_API_KEY || env_has SCOUT_LLM_API_KEY || warn "No clip-judge key (INCEPTION_API_KEY or SCOUT_LLM_*): clip scouting can't post."
-  py -c 'import discord.ext.voice_recv' >/dev/null 2>&1 || say "  ${C_DIM}voice receive: not installed (./selfbot-ctl.sh voice on)${C_RESET}"
-  py -c 'import discord.ext.voice_recv' >/dev/null 2>&1 && { opus_ok || warn "libopus is missing: sudo apt install libopus0 (voice clips need it to decode)"; }
+  if py -c 'import discord.ext.voice_recv' >/dev/null 2>&1; then
+    py -c 'import davey' >/dev/null 2>&1 || warn "davey is missing: ./selfbot-ctl.sh voice on (Discord requires it for voice)"
+    opus_ok || warn "libopus is missing: sudo apt install libopus0 (voice clips need it to decode)"
+  else
+    say "  ${C_DIM}voice receive: not installed (./selfbot-ctl.sh voice on)${C_RESET}"
+  fi
   [[ "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env" 2>/dev/null)" == 600 ]] || warn ".env should be mode 600: chmod 600 $DIR/.env"
   [[ -e "$DIR/data/captcha-blocked.json" ]] && warn "Paused by a CAPTCHA (data/captcha-blocked.json)."
   return $bad
