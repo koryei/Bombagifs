@@ -340,10 +340,28 @@ assert_contains "$status" "SCOUT_REVIEW=dry-run" "status shows the settings"
 assert_not_contains "$status" "secret-token" "status never prints secrets"
 if (main training sideways >/dev/null 2>&1); then fail "an unknown training action must fail"; fi
 
+# --- voice form ------------------------------------------------------------------------------------------------
+DIR="$TEST_ROOT/voice"; mkdir -p "$DIR"
+printf 'SELFBOT_TOKEN=secret-token\n' >"$DIR/.env"
+chmod 600 "$DIR/.env"
+echo active >"$FAKE_STATE/active"; : >"$FAKE_STATE/calls"
+main voice on >/dev/null 2>&1 || fail "voice on should work"
+assert_equal "on" "$(env_get SCOUT_VOICE)" "voice on turns call clips on"
+assert_contains "$(cat "$FAKE_STATE/calls")" "--no-deps discord-ext-voice-recv" "voice receive is installed without its discord.py dependency"
+assert_contains "$(cat "$FAKE_STATE/calls")" "PyNaCl" "the voice encryption library is installed"
+assert_contains "$(cat "$FAKE_STATE/calls")" "restart bombagif-selfbot.service" "voice on restarts the bot"
+main voice off >/dev/null 2>&1 || fail "voice off should work"
+assert_equal "off" "$(env_get SCOUT_VOICE)" "voice off turns call clips off"
+status="$(main voice status 2>&1)"
+assert_contains "$status" "SCOUT_VOICE=off" "voice status shows the setting"
+assert_not_contains "$status" "secret-token" "voice status never prints secrets"
+if (main voice sideways >/dev/null 2>&1); then fail "an unknown voice action must fail"; fi
+
 # the script itself
 bash -n "$ROOT/selfbot-ctl.sh"
 out="$("$ROOT/selfbot-ctl.sh" help)"; assert_contains "$out" "update" "usage mentions update"
 assert_contains "$out" "training" "usage mentions training"
+assert_contains "$out" "voice" "usage mentions voice"
 if "$ROOT/selfbot-ctl.sh" nonsense >/dev/null 2>&1; then fail "unknown command must fail"; fi
 
 echo "selfbot-ctl checks passed."

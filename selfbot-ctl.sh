@@ -477,6 +477,44 @@ cmd_training() {  # training [on|off|status]: the training-phase form (dry-run, 
   fi
 }
 
+cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clips on
+  local action="${1:-status}"
+  ensure_env
+  case "$action" in
+    on)
+      info "Installing voice receive (PyNaCl + discord-ext-voice-recv)..."
+      # --no-deps matters: voice-recv depends on discord.py, which would replace discord.py-self and break the bot.
+      if [[ -n "${SELFBOT_CTL_PIP:-}" ]]; then
+        "$SELFBOT_CTL_PIP" PyNaCl && "$SELFBOT_CTL_PIP" --no-deps discord-ext-voice-recv
+      else
+        py -m pip install --quiet PyNaCl && py -m pip install --quiet --no-deps discord-ext-voice-recv
+      fi
+      env_set SCOUT_VOICE on
+      ok "Voice clips are on. Join a call, then run !join in a text channel."
+      ;;
+    off)
+      env_set SCOUT_VOICE off
+      ok "Voice clips are off."
+      ;;
+    status)
+      say "${C_BOLD}Voice clips${C_RESET} ($DIR/.env)"
+      for key in SCOUT_VOICE SCOUT_VOICE_SECONDS SCOUT_VOICE_KEEP_SECONDS SCOUT_VOICE_WAKE SCOUT_VOICE_WAKE_KEYWORD; do
+        say "  $key=$(env_get "$key")"
+      done
+      if py -c 'import discord.ext.voice_recv' >/dev/null 2>&1; then ok "voice receive is installed"
+      else warn "voice receive is not installed: ./selfbot-ctl.sh voice on"; fi
+      return 0
+      ;;
+    *) die "voice takes: on, off, status" ;;
+  esac
+  if [[ "$(sc_read is-active "$SERVICE.service" 2>/dev/null || true)" == active ]]; then
+    sc_write restart "$SERVICE.service"
+    ok "Restarted the bot."
+  else
+    say "  Start it with: ./selfbot-ctl.sh start"
+  fi
+}
+
 cmd_logs() {
   local follow=()
   [[ "${1:-}" == "-f" ]] && follow=(-f)
@@ -495,6 +533,7 @@ cmd_doctor() {
   say "${C_DIM}timezone: $(td show -p Timezone --value 2>/dev/null || echo unknown) (the bot also honours TZ in .env)${C_RESET}"
   env_has SELFBOT_OWNER_ID || warn "SELFBOT_OWNER_ID is not set: nobody can use !on / !help (conversions still work)."
   env_has INCEPTION_API_KEY || env_has SCOUT_LLM_API_KEY || warn "No clip-judge key (INCEPTION_API_KEY or SCOUT_LLM_*): clip scouting can't post."
+  py -c 'import discord.ext.voice_recv' >/dev/null 2>&1 || say "  ${C_DIM}voice receive: not installed (./selfbot-ctl.sh voice on)${C_RESET}"
   [[ "$(stat -c %a "$DIR/.env" 2>/dev/null || stat -f %Lp "$DIR/.env" 2>/dev/null)" == 600 ]] || warn ".env should be mode 600: chmod 600 $DIR/.env"
   [[ -e "$DIR/data/captcha-blocked.json" ]] && warn "Paused by a CAPTCHA (data/captcha-blocked.json)."
   return $bad
@@ -510,6 +549,7 @@ Usage: ./selfbot-ctl.sh <command>
   logs [-f]          recent logs (follow with -f)
   timezone [zone]    show or set the VM's timezone (clip cards print clock times in it)
   training [on|off|status]  dry-run training form: review every judged run, then rate the DMs
+  voice [on|off|status]     install voice receive and clip what people say in a call
   doctor             check the install without printing secrets
   start|stop|restart control the service
   version            the checked-out version
@@ -527,6 +567,7 @@ main() {
     status) cmd_status ;;
     timezone) cmd_timezone "$@" ;;
     training) cmd_training "$@" ;;
+    voice) cmd_voice "$@" ;;
     logs) cmd_logs "$@" ;;
     doctor) cmd_doctor ;;
     stop) sc_write stop "$SERVICE.service" && ok "stop: done." ;;

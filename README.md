@@ -308,6 +308,40 @@ as false positives. Rate them, run `!tune`, then put the near-miss bars back to 
 Privacy: the examples are real chat lines sent (anonymised) to the model on every judging call, and review DMs show you
 real names and text. Only lines you chose to rate are kept. Say so in the chat.
 
+### Voice clips
+
+The bot can sit in a call and clip what someone just said. It is off by default; turn it on with
+`./selfbot-ctl.sh voice on`, which installs `PyNaCl` and `discord-ext-voice-recv` and sets `SCOUT_VOICE=on`.
+
+`discord-ext-voice-recv` is installed with `--no-deps` on purpose. Its own dependency is `discord.py`, which would
+replace `discord.py-self` and break the self-bot; the extension itself imports fine against the fork.
+
+Then, from a text channel in the server:
+
+| Command | What it does |
+|---|---|
+| `!join` | Joins the voice channel you are in and starts buffering the last `SCOUT_VOICE_KEEP_SECONDS` of each speaker |
+| `clip that` | Posts the last `SCOUT_VOICE_SECONDS` of whoever spoke last, as an Ogg the chat plays inline |
+| `clip Pranit that` | Same, for one person by name (an exact name beats a longer one that starts the same) |
+| `clip what he just said` | Same as `clip that` |
+| `clip that last 20 seconds` | A different length, capped at what is buffered |
+| `!voice` | Whether it is listening, and how many voices are buffered |
+| `!leave` | Stops listening and disconnects |
+
+The bot joins **undeafened** (a deafened client is never sent audio) and muted, so everyone in the call sees it
+listening. Say so before you turn it on: recording people without telling them is illegal in two-party-consent
+places and against Discord's guidelines. Only the owner can ask for a clip, and the buffer is memory-only.
+
+**The spoken trigger.** With `SCOUT_VOICE_WAKE=on`, a wake word posts a clip without any typing. It needs a free
+Picovoice access key in `PICOVOICE_ACCESS_KEY` and either a built-in keyword (`SCOUT_VOICE_WAKE_KEYWORD=computer`,
+`jarvis`, ...) or a custom `.ppn` file trained in their console (`SCOUT_VOICE_WAKE_PATH`). Without the key or the
+package the bot logs one warning and simply has no spoken trigger. Hits are rate limited by
+`SCOUT_VOICE_COOLDOWN_SECONDS`.
+
+**What it cannot do.** There is no video: Discord sends camera and screen share as WebRTC video, and no Python
+library receives it. Voice clips are audio only, and they are request-only — the judge scores text, so it cannot
+decide that a moment was funny on its own.
+
 ### `!help`
 
 `!help` (or `!help`) from the owner DMs the full command list. Anyone else gets the short guide, and only in a
