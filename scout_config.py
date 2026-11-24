@@ -51,6 +51,8 @@ class ScoutConfig:
     manual: bool = True
     review: ReviewMode = "dry-run"
     review_per_hour: int = 6
+    review_batch: int = 10
+    review_batch_minutes: int = 15
     near_miss_decide_funny: float = 0.6
     near_miss_final_funny: float = 6.0
     examples_per_label: int = 8
@@ -168,6 +170,8 @@ def read_scout_config(env: Mapping[str, str]) -> ScoutConfig:
         manual=_choice(env, "SCOUT_MANUAL", ("on", "off"), "on") == "on",
         review=_choice(env, "SCOUT_REVIEW", ("off", "dry-run", "always"), "dry-run"),  # type: ignore[arg-type]
         review_per_hour=_positive_int(env, "SCOUT_REVIEW_PER_HOUR", 6),
+        review_batch=_positive_int(env, "SCOUT_REVIEW_BATCH", 10),
+        review_batch_minutes=_positive_int(env, "SCOUT_REVIEW_BATCH_MINUTES", 15),
         near_miss_decide_funny=_number(env, "SCOUT_NEAR_MISS_DECIDE_FUNNY", 0.6, 0.0, 1.0),
         near_miss_final_funny=_number(env, "SCOUT_NEAR_MISS_FINAL_FUNNY", 6.0, 0.0, 10.0),
         examples_per_label=_positive_int(env, "SCOUT_EXAMPLES", 8),
