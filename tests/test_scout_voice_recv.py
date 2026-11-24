@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import scout_voice_recv
-from scout_voice_recv import _private_hook, install_dave_decrypt, install_private_call_hook
+from scout_voice_recv import (
+    _private_hook,
+    _private_lookup_member,
+    install_dave_decrypt,
+    install_private_call_hook,
+)
 
 FAKE_DAVEY = SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))
 
@@ -152,6 +157,35 @@ class PrivateCallHookTests(unittest.IsolatedAsyncioTestCase):
         await _private_hook(SimpleNamespace(secret_key=b""), {"op": 13, "d": {"user_id": "7"}}, client)
         client._reader.packet_router.destroy_decoder.assert_called_once_with(42)
         self.assertEqual(client.ssrcs, {})
+
+    def test_lookup_member_names_a_group_dm_speaker(self) -> None:
+        pranit = SimpleNamespace(id=7, name="Pranit")
+        reader = SimpleNamespace(
+            voice_client=SimpleNamespace(
+                _get_id_from_ssrc=lambda ssrc: {42: 7}.get(ssrc),
+                channel=SimpleNamespace(recipients=[pranit], recipient=None, me=None),
+            )
+        )
+        self.assertIs(_private_lookup_member(reader, 42), pranit)
+
+    def test_lookup_member_names_a_one_to_one_dm_speaker(self) -> None:
+        aarav = SimpleNamespace(id=7, name="aarav")
+        reader = SimpleNamespace(
+            voice_client=SimpleNamespace(
+                _get_id_from_ssrc=lambda ssrc: 7,
+                channel=SimpleNamespace(recipients=[], recipient=aarav, me=None),
+            )
+        )
+        self.assertIs(_private_lookup_member(reader, 42), aarav)
+
+    def test_lookup_member_returns_none_for_an_unknown_ssrc(self) -> None:
+        reader = SimpleNamespace(
+            voice_client=SimpleNamespace(
+                _get_id_from_ssrc=lambda ssrc: None,
+                channel=SimpleNamespace(recipients=[], recipient=None, me=None),
+            )
+        )
+        self.assertIsNone(_private_lookup_member(reader, 42))
 
     def test_install_returns_false_without_voice_recv(self) -> None:
         with patch.object(scout_voice_recv, "vr_client", None):

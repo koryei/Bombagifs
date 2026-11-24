@@ -70,10 +70,38 @@ def install_dave_decrypt(client: Any) -> bool:
 def _private_member(client: Any, user_id: int) -> Any:
     """The user behind an id in a private call: its recipients plus ourselves, since there is no guild to ask."""
     channel = getattr(client, "channel", None)
-    for user in (*getattr(channel, "recipients", ()), getattr(channel, "me", None)):
+    for user in (*getattr(channel, "recipients", ()), getattr(channel, "recipient", None), getattr(channel, "me", None)):
         if user is not None and getattr(user, "id", None) == user_id:
             return user
     return None
+
+
+def _private_lookup_member(reader: Any, ssrc: int) -> Any:
+    """The member behind an ssrc in a private call, where the reader's own lookup has no guild to ask."""
+    user_id = reader.voice_client._get_id_from_ssrc(ssrc)
+    if not user_id:
+        return None
+    return _private_member(reader.voice_client, user_id)
+
+
+def _patch_lookup_member() -> None:
+    """The reader asks the guild for a speaker's member on every packet, which kills the audio thread."""
+    try:
+        from discord.ext.voice_recv.reader import AudioReader
+    except ImportError:  # pragma: no cover - exercised by the main venv, which has no voice receive
+        return
+
+    if getattr(AudioReader._lookup_member, "_bombagif_private", False):
+        return
+    original = AudioReader._lookup_member
+
+    def _lookup_member(self: Any, ssrc: int) -> Any:
+        if self.voice_client.guild is not None:
+            return original(self, ssrc)
+        return _private_lookup_member(self, ssrc)
+
+    _lookup_member._bombagif_private = True  # type: ignore[attr-defined]
+    AudioReader._lookup_member = _lookup_member
 
 
 async def _private_hook(ws: Any, msg: dict, client: Any) -> None:
@@ -103,9 +131,10 @@ async def _private_hook(ws: Any, msg: dict, client: Any) -> None:
 
 
 def install_private_call_hook() -> bool:
-    """Let voice_recv's gateway hook handle a private call. Returns False when voice receive is not installed."""
+    """Let voice_recv handle a private call. Returns False when voice receive is not installed."""
     if vr_client is None:
         return False
+    _patch_lookup_member()
     if getattr(vr_client.hook, "_bombagif_private", False):
         return True
     original = vr_client.hook
