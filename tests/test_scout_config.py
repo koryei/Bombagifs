@@ -79,6 +79,35 @@ class ScoutConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, name):
                     read_scout_config({name: value})
 
+    def test_voice_defaults_are_off(self) -> None:
+        cfg = read_scout_config({})
+        self.assertEqual((cfg.voice, cfg.voice_wake), (False, False))
+        self.assertEqual((cfg.voice_seconds, cfg.voice_keep_seconds, cfg.voice_cooldown_s), (30, 45, 10))
+        self.assertEqual((cfg.voice_wake_keyword, cfg.voice_wake_path), ("computer", ""))
+
+    def test_voice_can_be_turned_on_and_tuned(self) -> None:
+        cfg = read_scout_config(
+            {
+                "SCOUT_VOICE": "ON",
+                "SCOUT_VOICE_SECONDS": "20",
+                "SCOUT_VOICE_KEEP_SECONDS": "60",
+                "SCOUT_VOICE_WAKE": "on",
+                "SCOUT_VOICE_WAKE_KEYWORD": "jarvis",
+                "SCOUT_VOICE_WAKE_PATH": "/opt/bomba.ppn",
+                "SCOUT_VOICE_COOLDOWN_SECONDS": "30",
+            }
+        )
+        self.assertEqual((cfg.voice, cfg.voice_wake), (True, True))
+        self.assertEqual((cfg.voice_seconds, cfg.voice_keep_seconds, cfg.voice_cooldown_s), (20, 60, 30))
+        self.assertEqual((cfg.voice_wake_keyword, cfg.voice_wake_path), ("jarvis", "/opt/bomba.ppn"))
+
+    def test_voice_rejects_unknown_choices_and_bad_numbers(self) -> None:
+        for name, value in (("SCOUT_VOICE", "yes"), ("SCOUT_VOICE_WAKE", "maybe"), ("SCOUT_VOICE_SECONDS", "0"),
+                            ("SCOUT_VOICE_KEEP_SECONDS", "-1"), ("SCOUT_VOICE_COOLDOWN_SECONDS", "x")):
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(RuntimeError, name):
+                    read_scout_config({name: value})
+
     def test_review_batching_can_be_tuned(self) -> None:
         cfg = read_scout_config({"SCOUT_REVIEW_BATCH": "3", "SCOUT_REVIEW_BATCH_MINUTES": "2"})
         self.assertEqual((cfg.review_batch, cfg.review_batch_minutes), (3, 2))

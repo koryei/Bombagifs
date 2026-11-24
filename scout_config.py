@@ -53,6 +53,13 @@ class ScoutConfig:
     review_per_hour: int = 6
     review_batch: int = 10
     review_batch_minutes: int = 15
+    voice: bool = False
+    voice_seconds: int = 30
+    voice_keep_seconds: int = 45
+    voice_wake: bool = False
+    voice_wake_keyword: str = "computer"
+    voice_wake_path: str = ""
+    voice_cooldown_s: int = 10
     near_miss_decide_funny: float = 0.6
     near_miss_final_funny: float = 6.0
     examples_per_label: int = 8
@@ -172,6 +179,13 @@ def read_scout_config(env: Mapping[str, str]) -> ScoutConfig:
         review_per_hour=_positive_int(env, "SCOUT_REVIEW_PER_HOUR", 6),
         review_batch=_positive_int(env, "SCOUT_REVIEW_BATCH", 10),
         review_batch_minutes=_positive_int(env, "SCOUT_REVIEW_BATCH_MINUTES", 15),
+        voice=_choice(env, "SCOUT_VOICE", ("on", "off"), "off") == "on",
+        voice_seconds=_positive_int(env, "SCOUT_VOICE_SECONDS", 30),
+        voice_keep_seconds=_positive_int(env, "SCOUT_VOICE_KEEP_SECONDS", 45),
+        voice_wake=_choice(env, "SCOUT_VOICE_WAKE", ("on", "off"), "off") == "on",
+        voice_wake_keyword=_text(env, "SCOUT_VOICE_WAKE_KEYWORD") or "computer",
+        voice_wake_path=_text(env, "SCOUT_VOICE_WAKE_PATH"),
+        voice_cooldown_s=_positive_int(env, "SCOUT_VOICE_COOLDOWN_SECONDS", 10),
         near_miss_decide_funny=_number(env, "SCOUT_NEAR_MISS_DECIDE_FUNNY", 0.6, 0.0, 1.0),
         near_miss_final_funny=_number(env, "SCOUT_NEAR_MISS_FINAL_FUNNY", 6.0, 0.0, 10.0),
         examples_per_label=_positive_int(env, "SCOUT_EXAMPLES", 8),

@@ -499,15 +499,18 @@ def format_clip_notice(names: Sequence[str], deleted: bool, requested_by: str | 
 class ScoutCommand:
     """A parsed owner command (``!on|off [chat id]``, ``status``, ``list``, ``taste``, ``examples``, ``tune``, ``help``)."""
 
-    action: Literal["on", "off", "status", "list", "taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help"]
+    action: Literal[
+        "on", "off", "status", "list", "taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help",
+        "join", "leave", "voice",
+    ]
     chat_id: int | None
     arg: str | None = None
 
 
 _COMMAND_RE = re.compile(r"^!(?:scout\s+)?(on|off|status|list)(?:\s+(\d+))?$", re.IGNORECASE)
-_SIMPLE_RE = re.compile(r"^!(?:scout\s+)?(taste|examples|tune|help)(?:\s+(clear))?$", re.IGNORECASE)
+_SIMPLE_RE = re.compile(r"^!(?:scout\s+)?(taste|examples|tune|help|join|leave|voice)(?:\s+(clear))?$", re.IGNORECASE)
 _TASTE_ADD_RE = re.compile(r"^!(?:scout\s+)?taste\s+add\s+(.+)$", re.IGNORECASE | re.DOTALL)
-_SIMPLE_ACTIONS = {"taste": "taste", "examples": "examples", "tune": "tune", "help": "help"}
+_SIMPLE_ACTIONS = {"taste": "taste", "examples": "examples", "tune": "tune", "help": "help", "join": "join", "leave": "leave", "voice": "voice"}
 
 
 def parse_scout_command(text: str) -> ScoutCommand | None:
@@ -591,6 +594,10 @@ HELP_OWNER = (
     "In dry-run I DM you candidates and near-misses, a few to a message. Reply `good`, `bad` or `skip`, numbered when "
     "there are several (`1 good 2 bad 3 skip`). You can also reply `good`/`bad` to any clip I posted. Your ratings "
     "become examples the judge sees.\n"
+    "**Voice**\n"
+    "`!join` makes me listen in your call (I join undeafened, so everyone sees it); `!leave` stops. Then say "
+    "`clip that` in a text channel, or `clip Pranit that`, or `clip what he just said`, and I post the last 30s as "
+    "audio. `!voice` says whether I'm listening.\n"
     "**Clip that**\n"
     "In chats where scouting is on, say or reply `clip that` (no ping needed; typos and \"lmfao\" are fine) and I clip "
     "that message, or the latest one if you don't reply. Replying `gif that` to an image or "

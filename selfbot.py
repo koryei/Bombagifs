@@ -22,7 +22,7 @@ import string
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -32,6 +32,15 @@ from urllib.parse import urlparse
 import aiohttp
 import discord
 from dotenv import load_dotenv
+
+try:  # voice receive is optional: without it the bot still runs, it just cannot join a call
+    from discord.ext.voice_recv import AudioSink, VoiceRecvClient
+
+    HAS_VOICE_RECV = True
+except ImportError:  # pragma: no cover - exercised by the main venv, which has no voice_recv
+    AudioSink = object  # type: ignore[assignment,misc]
+    VoiceRecvClient = None  # type: ignore[assignment]
+    HAS_VOICE_RECV = False
 
 from bombagif_core import (
     DOWNLOAD_TIMEOUT,
@@ -71,6 +80,16 @@ from scout_stores import ClipRecord
 from scout_taste import NOTES_MAX_CHARS, TasteBook, tune_report
 from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
 from scout_trigger import Trigger, parse_trigger
+from scout_voice import (
+    DEFAULT_CLIP_S,
+    VoiceBuffer,
+    VoiceRequest,
+    encode_ogg,
+    format_voice_notice,
+    parse_voice_request,
+    resolve_target,
+)
+from scout_wake import WakeWord, build_wake_word
 from selfbot_logic import (
     apply_timezone,
     CLIP_OPT_OUT_CONFIRMATION,
@@ -99,6 +118,7 @@ from selfbot_logic import (
 )
 
 
+logger = logging.getLogger("bombagif.selfbot")
 _MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
 UPDATE_NOTICE_NAME = "update-notice.json"  # written by selfbot-ctl.sh update, read once on boot
 REVIEW_DM_LIMIT = 1800  # a batch DM is split before Discord's 2000-character limit
@@ -107,6 +127,43 @@ REVIEW_DM_LIMIT = 1800  # a batch DM is split before Discord's 2000-character li
 def _escape_markdown(text: str) -> str:
     """Backslash-escape Discord markdown characters (so a quoted line shows exactly as written)."""
     return _MARKDOWN_SPECIALS.sub(r"\\\1", text)
+
+
+class _VoiceSink(AudioSink):
+    """Feeds decoded call audio to the ring buffer, and to the wake word when one is configured."""
+
+    def __init__(
+        self, buffer: VoiceBuffer, on_wake: Callable[[], None] | None = None, wake: WakeWord | None = None
+    ) -> None:
+        super().__init__()
+        self.buffer = buffer
+        self.on_wake = on_wake
+        self.wake = wake
+
+    def wants_opus(self) -> bool:
+        return False  # decoded PCM: the buffer and the wake word both want samples, not packets
+
+    def write(self, user: Any, data: Any) -> None:
+        if user is None or not data.pcm:
+            return
+        self.buffer.add(user.id, data.pcm)
+        if self.on_wake is not None and self.wake_feed(data.pcm):
+            self.on_wake()
+
+    def wake_feed(self, pcm: bytes) -> bool:
+        """True when the wake word was heard. A detector failure must never stop the audio loop."""
+        detector = getattr(self, "wake", None)
+        if detector is None:
+            return False
+        try:
+            return detector.feed(pcm)
+        except Exception:
+            logger.warning("The wake-word detector failed; turning it off", exc_info=True)
+            self.wake = None
+            return False
+
+    def cleanup(self) -> None:
+        return None
 
 
 class SelfBot(discord.Client):
@@ -140,6 +197,11 @@ class SelfBot(discord.Client):
         self._help_user_cooldown = Cooldown(3600.0)  # a stranger gets the help text at most once an hour...
         self._help_chat_cooldown = Cooldown(600.0)  # ...and a chat at most once every 10 minutes
         self._clip_message_ids: set[int] = set()  # clips we posted, so a reply of `stop` to one can be recognised
+        self._voice: VoiceBuffer | None = None  # the rolling call buffer, while joined
+        self._voice_client: Any | None = None
+        self._voice_channel_id: int | None = None  # where a wake-word clip is posted
+        self._voice_last_clip = 0.0
+        self._wake: WakeWord | None = None
         self._booted = False
         self._update_announced = False  # the update notice is delivered once per process, not per reconnect
         self.announce_updates = announce_updates  # SELFBOT_UPDATE_NOTICES=false keeps the bot quiet about updates
@@ -816,6 +878,9 @@ class SelfBot(discord.Client):
         if self.captcha_guard.blocked:
             return True
         cfg = runtime.cfg
+        if command.action in ("join", "leave", "voice"):
+            await self._owner_say(message, await self._voice_command(command.action, message))
+            return True
         if command.action in ("taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help"):
             await self._owner_say(message, self._teaching_reply(command, runtime))
             return True
@@ -964,6 +1029,11 @@ class SelfBot(discord.Client):
             self.logger.exception("Unhandled owner command error")
             return
         try:
+            if await self._handle_voice_request(message):
+                return
+        except Exception:
+            self.logger.exception("Unhandled voice clip request", extra={"user_id": message.author.id})
+        try:
             if await self._handle_trigger(message):
                 return
         except discord.CaptchaRequired:
@@ -1070,6 +1140,150 @@ class SelfBot(discord.Client):
         except Exception:
             self.logger.exception("Unexpected self-bot processing error", extra=context)
             return source.filename, "Could not process this file.", False
+
+    # clip scout: voice clips ----------------------------------------------------------------------------------
+
+    def _voice_members(self) -> list[tuple[int, str]]:
+        """Everyone in the call, as ``(user_id, display name)``, so a name in a request can be resolved."""
+        channel = getattr(self._voice_client, "channel", None)
+        members = getattr(channel, "members", None) or ()
+        return [(member.id, getattr(member, "display_name", None) or member.name) for member in members]
+
+    async def _voice_join(self, message: discord.Message) -> str:
+        """Join the owner's voice channel and start buffering audio. Returns the answer to DM back."""
+        runtime = self.scout
+        if runtime is None or not runtime.cfg.voice:
+            return "Voice clips are off. Set `SCOUT_VOICE=on` in `.env` and restart me."
+        if not HAS_VOICE_RECV:
+            return "Voice receive is not installed on the host (`discord-ext-voice-recv`)."
+        if self._voice_client is not None and self._voice_client.is_connected():
+            return "I'm already in a call. Run `!leave` first."
+        target = getattr(getattr(message.author, "voice", None), "channel", None)
+        if target is None:
+            return "Join a voice channel first, then run `!join`."
+        try:
+            # self_deaf must stay False: a deafened client is never sent audio, so there would be nothing to clip.
+            client = await target.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=True)
+        except Exception:
+            self.logger.warning("Could not join a voice channel", exc_info=True)
+            return "I couldn't join that call."
+        self._voice = VoiceBuffer(keep_s=runtime.cfg.voice_keep_seconds)
+        self._voice_client = client
+        self._voice_channel_id = message.channel.id
+        self._wake = build_wake_word(
+            enabled=runtime.cfg.voice_wake,
+            access_key=os.environ.get("PICOVOICE_ACCESS_KEY", "").strip(),
+            keyword=runtime.cfg.voice_wake_keyword,
+            keyword_path=runtime.cfg.voice_wake_path,
+        )
+        client.listen(_VoiceSink(self._voice, self._on_wake_audio, self._wake))
+        self.stats.note("info", f"joined voice in {getattr(target, 'name', 'a call')}")
+        wake = " Say the wake word or `clip that`." if self._wake is not None else " Say `clip that` here."
+        return f"Listening in **{getattr(target, 'name', 'the call')}**.{wake}"
+
+    async def _voice_leave(self) -> None:
+        """Stop listening and disconnect. Safe to call when not in a call."""
+        client, self._voice_client = self._voice_client, None
+        self._voice = None
+        self._voice_channel_id = None
+        if self._wake is not None:
+            self._wake.close()
+            self._wake = None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+
+    def _voice_report(self) -> str:
+        """One line on whether the bot is listening, and to what."""
+        runtime = self.scout
+        if runtime is None or not runtime.cfg.voice:
+            return "Voice clips are off (`SCOUT_VOICE=off`)."
+        if self._voice_client is None or not self._voice_client.is_connected():
+            return "I'm not in a call. Run `!join` in a text channel while you're in one."
+        channel = getattr(self._voice_client, "channel", None)
+        speakers = len(self._voice.speakers()) if self._voice is not None else 0
+        wake = "on" if self._wake is not None else "off"
+        return f"In **{getattr(channel, 'name', 'a call')}**: {speakers} voice(s) buffered, wake word {wake}."
+
+    async def _voice_command(self, action: str, message: discord.Message) -> str:
+        if action == "join":
+            return await self._voice_join(message)
+        if action == "leave":
+            await self._voice_leave()
+            return "Left the call."
+        return self._voice_report()
+
+    def _on_wake_audio(self) -> None:
+        """The sink heard the wake word. Called from the audio loop, so it only schedules the work."""
+        loop = getattr(self, "loop", None)
+        if loop is None or loop.is_closed():
+            return
+        loop.create_task(self._clip_from_wake())
+
+    async def _clip_from_wake(self) -> None:
+        """Post a clip because the wake word was heard, rate limited so one word cannot spam the chat."""
+        runtime = self.scout
+        if runtime is None or self._voice is None or self._voice_channel_id is None:
+            return
+        now = time.monotonic()
+        if now - self._voice_last_clip < runtime.cfg.voice_cooldown_s:
+            return
+        self._voice_last_clip = now
+        channel = self.get_channel(self._voice_channel_id)
+        if channel is None:
+            return
+        await self._post_voice_clip(channel, VoiceRequest(), runtime)
+
+    async def _handle_voice_request(self, message: discord.Message) -> bool:
+        """The owner typing "clip that" / "clip Pranit that" while the bot is in a call. True when it was one."""
+        runtime = self.scout
+        if runtime is None or not runtime.cfg.voice or self._voice is None or self._voice_client is None:
+            return False
+        if runtime.cfg.owner_id is None or message.author.id != runtime.cfg.owner_id:
+            return False
+        if message.author.bot or message.is_system() or isinstance(message.channel, discord.DMChannel):
+            return False  # a call clip belongs in the server, not in a DM
+        request = parse_voice_request(message.content or "", self._voice_members())
+        if request is None:
+            return False
+        await self._post_voice_clip(message.channel, request, runtime)
+        return True
+
+    async def _post_voice_clip(self, channel: Any, request: VoiceRequest, runtime: ScoutRuntime) -> None:
+        """Cut the requested seconds out of the buffer and post them as an Ogg the chat can play inline."""
+        if self._voice is None:
+            return
+        members = self._voice_members()
+        user_id, problem = resolve_target(request, self._voice, members)
+        if problem is not None:
+            await self._say(channel, problem)
+            return
+        seconds = min(request.seconds or runtime.cfg.voice_seconds or DEFAULT_CLIP_S, runtime.cfg.voice_keep_seconds)
+        pcm = self._voice.clip(seconds=seconds, user_id=user_id)
+        if not pcm:
+            await self._say(channel, "Nothing to clip yet: I haven't heard anyone.")
+            return
+        try:
+            ogg = await asyncio.to_thread(encode_ogg, pcm)
+        except RuntimeError as exc:
+            await self._say(channel, str(exc))
+            return
+        name = next((name for member_id, name in members if member_id == user_id), "everyone")
+        try:
+            await channel.send(
+                format_voice_notice(name, seconds),
+                file=discord.File(io.BytesIO(ogg), filename="clip.ogg"),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            self.logger.warning("Could not post a voice clip", exc_info=True)
+
+    async def _say(self, channel: Any, text: str) -> None:
+        """Post a short line in a channel, never pinging anyone."""
+        try:
+            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            self.logger.warning("Could not post a voice-clip message", exc_info=True)
 
     async def _convert_and_reply(self, message: discord.Message, *, gif_only: bool = False) -> None:
         """Convert the message's media and answer with a single reply. ``gif_only`` (a spoken "gif that") never falls back to a clip or a complaint."""
@@ -1215,6 +1429,7 @@ class SelfBot(discord.Client):
                 self._scout_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._scout_task
+            await self._voice_leave()
             if self.http_session is not None and not self.http_session.closed:
                 await self.http_session.close()
             loop = asyncio.get_running_loop()

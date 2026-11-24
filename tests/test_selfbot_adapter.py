@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import struct
 import tempfile
 import unittest
 from importlib import metadata
@@ -2024,6 +2025,222 @@ class SelfBotTeachingCommandTests(_CommandCase):
 
 def review_item(*, id: int = 1, would_clip: bool = True, names=("Pranit",), lines=(("A", "the better one was me"),), funny: float = 8.7) -> ReviewItem:
     return ReviewItem(id, CHAT, tuple(names), tuple(lines), funny, {"funny": 0.93, "standalone": 0.88, "sensitive": 0.02}, "deadpan and standalone", would_clip)
+
+
+class FakeVoiceClient:
+    """Stands in for VoiceRecvClient: records the sink and whether it was disconnected."""
+
+    def __init__(self, channel) -> None:
+        self.channel = channel
+        self.sink = None
+        self.connected = True
+
+    def listen(self, sink) -> None:
+        self.sink = sink
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    async def disconnect(self) -> None:
+        self.connected = False
+
+
+class FakeVoiceChannel:
+    """Stands in for a discord VoiceChannel: records how the bot connected."""
+
+    def __init__(self, name: str = "General", members=()) -> None:
+        self.name = name
+        self.members = list(members)
+        self.client: FakeVoiceClient | None = None
+        self.connect_kwargs: dict | None = None
+
+    async def connect(self, **kwargs):
+        self.connect_kwargs = kwargs
+        self.client = FakeVoiceClient(self)
+        return self.client
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotVoiceTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        import aiohttp
+        import selfbot as selfbot_module
+        from selfbot import SelfBot
+
+        self.root = Path(self._tmp.name)
+        self.runtime = make_runtime(self.root, mode="dry-run", SELFBOT_OWNER_ID=str(OWNER), SCOUT_VOICE="on")
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.bot.http_session = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.bot.close)
+        self.bot._start_scout()
+        self.scout = self.runtime.scout
+        self.voice_channel = FakeVoiceChannel(
+            members=[SimpleNamespace(id=OWNER, display_name="Koryei"), SimpleNamespace(id=7, display_name="Pranit")]
+        )
+        self.text_channel = Mock(spec=discord.TextChannel)
+        self.text_channel.id = CHAT
+        self.text_channel.send = AsyncMock()
+        # The test venv has no voice_recv, so the adapter's optional import is stubbed for these tests.
+        for name, value in (("HAS_VOICE_RECV", True), ("VoiceRecvClient", FakeVoiceClient)):
+            patcher = patch.object(selfbot_module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.owner_dm = AsyncMock()
+        self.owner_voice = SimpleNamespace(channel=self.voice_channel)
+
+    def owner_message(self, content: str, *, in_voice: bool = True, author: int = OWNER):
+        extra = {"send": self.owner_dm}
+        if in_voice:
+            extra["voice"] = self.owner_voice
+        message = make_message(
+            author_id=author, channel_cls=discord.TextChannel, channel_id=CHAT, content=content, author_extra=extra
+        )
+        message.channel = self.text_channel  # so a posted clip lands somewhere the test can see it
+        return message
+
+    async def join(self) -> None:
+        await self.bot.on_message(self.owner_message("!join"))
+        self.assertIsNotNone(self.bot._voice_client)
+
+    def feed(self, user_id: int = 7, seconds: float = 1.0, value: int = 1000) -> None:
+        self.bot._voice.add(user_id, struct.pack("<h", value) * int(seconds * 48000) * 2)
+
+    async def test_join_connects_undeafened_and_starts_listening(self) -> None:
+        await self.join()
+        self.assertIs(self.voice_channel.connect_kwargs["cls"], FakeVoiceClient)
+        self.assertFalse(self.voice_channel.connect_kwargs["self_deaf"])  # a deafened client is sent no audio
+        self.assertTrue(self.voice_channel.connect_kwargs["self_mute"])
+        self.assertIsNotNone(self.voice_channel.client.sink)
+        self.assertIn("Listening", self.owner_dm.await_args.args[0])
+
+    async def test_join_refuses_when_voice_is_off(self) -> None:
+        self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "dry-run", "SELFBOT_OWNER_ID": str(OWNER)})
+        await self.bot.on_message(self.owner_message("!join"))
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("SCOUT_VOICE", self.owner_dm.await_args.args[0])
+
+    async def test_join_refuses_when_the_owner_is_not_in_a_call(self) -> None:
+        await self.bot.on_message(self.owner_message("!join", in_voice=False))
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("Join a voice channel", self.owner_dm.await_args.args[0])
+
+    async def test_leave_disconnects_and_forgets_the_buffer(self) -> None:
+        await self.join()
+        client = self.bot._voice_client
+        await self.bot.on_message(self.owner_message("!leave"))
+        self.assertFalse(client.connected)
+        self.assertIsNone(self.bot._voice)
+        self.assertIsNone(self.bot._voice_client)
+        self.assertIn("Left", self.owner_dm.await_args.args[0])
+
+    async def test_voice_reports_what_it_is_listening_to(self) -> None:
+        await self.bot.on_message(self.owner_message("!voice"))
+        self.assertIn("not in a call", self.owner_dm.await_args.args[0])
+        await self.join()
+        self.feed()
+        await self.bot.on_message(self.owner_message("!voice"))
+        self.assertIn("1 voice(s) buffered", self.owner_dm.await_args.args[0])
+
+    async def test_clip_that_posts_the_last_speaker_as_an_ogg(self) -> None:
+        await self.join()
+        self.feed(7)
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake") as encode:
+            await self.bot.on_message(self.owner_message("clip that"))
+        encode.assert_called_once()
+        self.text_channel.send.assert_awaited_once()
+        self.assertEqual(self.text_channel.send.await_args.args[0], "🎙️ **Pranit**, last 30s")
+        self.assertEqual(self.text_channel.send.await_args.kwargs["file"].filename, "clip.ogg")
+
+    async def test_clip_a_named_person_uses_that_persons_audio(self) -> None:
+        await self.join()
+        self.feed(7, value=1000)
+        self.feed(OWNER, value=2000)
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake") as encode:
+            await self.bot.on_message(self.owner_message("clip pranit that"))
+        self.assertIn("Pranit", self.text_channel.send.await_args.args[0])
+        pcm = struct.unpack(f"<{len(encode.call_args.args[0]) // 2}h", encode.call_args.args[0])
+        self.assertEqual({sample for sample in pcm if sample}, {1000})  # only Pranit's audio, silence-padded
+
+    async def test_clip_what_he_just_said_uses_the_last_speaker(self) -> None:
+        await self.join()
+        self.feed(7, value=1000)
+        self.feed(OWNER, value=2000)
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake"):
+            await self.bot.on_message(self.owner_message("clip what he just said"))
+        self.assertIn("Koryei", self.text_channel.send.await_args.args[0])
+
+    async def test_an_unknown_name_is_refused_without_a_clip(self) -> None:
+        await self.join()
+        self.feed(7)
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake") as encode:
+            await self.bot.on_message(self.owner_message("clip zendaya that"))
+        encode.assert_not_called()
+        self.assertIn("zendaya", self.text_channel.send.await_args.args[0])
+
+    async def test_an_empty_buffer_says_so(self) -> None:
+        await self.join()
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake") as encode:
+            await self.bot.on_message(self.owner_message("clip that"))
+        encode.assert_not_called()
+        self.assertIn("Nothing to clip", self.text_channel.send.await_args.args[0])
+
+    async def test_a_clip_request_from_someone_else_is_ignored(self) -> None:
+        await self.join()
+        self.feed(7)
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake") as encode:
+            await self.bot.on_message(self.owner_message("clip that", author=99))
+        encode.assert_not_called()
+        self.text_channel.send.assert_not_awaited()
+
+    async def test_a_clip_request_without_being_in_a_call_is_ignored(self) -> None:
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake") as encode:
+            await self.bot.on_message(self.owner_message("clip that"))
+        encode.assert_not_called()
+
+    async def test_the_wake_word_posts_a_clip(self) -> None:
+        await self.join()
+        self.feed(7)
+        self.bot.get_channel = Mock(return_value=self.text_channel)  # type: ignore[method-assign]
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake"):
+            await self.bot._clip_from_wake()
+        self.text_channel.send.assert_awaited_once()
+        self.assertIn("Pranit", self.text_channel.send.await_args.args[0])
+
+    async def test_the_wake_word_is_rate_limited(self) -> None:
+        await self.join()
+        self.feed(7)
+        self.bot.get_channel = Mock(return_value=self.text_channel)  # type: ignore[method-assign]
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake"):
+            await self.bot._clip_from_wake()
+            await self.bot._clip_from_wake()
+        self.text_channel.send.assert_awaited_once()  # the second one is inside the cooldown
+
+    async def test_the_sink_feeds_the_buffer_and_the_wake_word(self) -> None:
+        await self.join()
+        sink = self.voice_channel.client.sink
+        heard: list[int] = []
+        sink.on_wake = lambda: heard.append(1)
+        sink.wake = SimpleNamespace(feed=lambda pcm: True)
+        sink.write(SimpleNamespace(id=7), SimpleNamespace(pcm=struct.pack("<h", 5) * 960))
+        self.assertEqual(self.bot._voice.speakers(), [7])
+        self.assertEqual(heard, [1])
+
+    async def test_a_broken_wake_word_is_turned_off_not_raised(self) -> None:
+        await self.join()
+        sink = self.voice_channel.client.sink
+        sink.wake = SimpleNamespace(feed=lambda pcm: (_ for _ in ()).throw(RuntimeError("boom")))
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            sink.write(SimpleNamespace(id=7), SimpleNamespace(pcm=struct.pack("<h", 5) * 960))
+        self.assertIsNone(sink.wake)
+        self.assertEqual(self.bot._voice.speakers(), [7])  # the audio still reached the buffer
+
+    async def test_the_sink_ignores_unknown_users_and_empty_frames(self) -> None:
+        await self.join()
+        sink = self.voice_channel.client.sink
+        sink.write(None, SimpleNamespace(pcm=b"\x00\x00"))
+        sink.write(SimpleNamespace(id=7), SimpleNamespace(pcm=b""))
+        self.assertEqual(self.bot._voice.speakers(), [])
 
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
