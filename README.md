@@ -155,7 +155,8 @@ five minutes after boot.
 
 `training` is the form for a teaching phase: it asks a few questions (or takes `on` / `off` / `status`) and writes only
 the scout settings in `.env` — `SELFBOT_SCOUT_MODE=dry-run`, `SCOUT_REVIEW=always`, `SCOUT_REVIEW_PER_HOUR=30`,
-`SCOUT_NEAR_MISS_*_FUNNY=0`, `SCOUT_EXAMPLES=12` — then restarts. Your tokens and every other line stay as they are,
+`SCOUT_REVIEW_BATCH=5`, `SCOUT_REVIEW_BATCH_MINUTES=5`, `SCOUT_NEAR_MISS_*_FUNNY=0`, `SCOUT_EXAMPLES=12` — then
+restarts. Your tokens and every other line stay as they are,
 and nothing is printed. `training off` puts the review defaults back; `training status` shows the current values.
 
 **Update announcements.** Every update leaves `data/update-notice.json` behind, and the bot DMs it to everyone on the
@@ -284,9 +285,13 @@ come by DM):
 1. **Taste notes**, plain English, up to 1,500 characters: `!taste add we like deadpan one-liners, skip
    anything about exams`. They go into the judge's instructions. `!taste` shows them, `!taste clear` wipes
    them, and `data/scout-taste.txt` can be edited by hand (changes apply on the next judging call).
-2. **Rate examples.** In dry-run the account DMs you each candidate (what it would clip, plus some near-misses; at most
-   `SCOUT_REVIEW_PER_HOUR`). **Reply to that DM** with `good` (clip-worthy), `bad` (never) or `skip` (the account never adds reactions, they are
-   rate limited; your own 👍/👎/🙈 reactions on the DM still count). You can also reply `good`/`bad` to any clip it posted. Your
+2. **Rate examples.** In dry-run the account DMs you the candidates (what it would clip, plus some near-misses; at most
+   `SCOUT_REVIEW_PER_HOUR`). They are **batched**: candidates queue up and arrive as one numbered DM once
+   `SCOUT_REVIEW_BATCH` of them are waiting or `SCOUT_REVIEW_BATCH_MINUTES` have passed, whichever comes first, so a
+   busy chat does not turn into a stream of one-line DMs. **Reply to that DM** with `1 good 2 bad 3 skip` (or `1g 2b`,
+   one per line); a DM with a single candidate still takes a bare `good` / `bad` / `skip`. The account never adds
+   reactions, they are rate limited; your own 👍/👎/🙈 reactions on a single-candidate DM still count. You can also
+   reply `good`/`bad` to any clip it posted. Your
    ratings are stored in `data/taste.jsonl` (only lines you rated, anonymous speaker labels, mode 600) and the newest
    `SCOUT_EXAMPLES` good and bad ones are shown to the judge as examples. `!examples` lists them,
    `!examples clear` forgets them.
@@ -294,10 +299,11 @@ come by DM):
    5 scored of each).
 
 **Training phase.** To teach it fast, run `SELFBOT_SCOUT_MODE=dry-run` with `SCOUT_REVIEW=always`,
-`SCOUT_REVIEW_PER_HOUR=30`, `SCOUT_SCREEN=all`, `SCOUT_NEAR_MISS_DECIDE_FUNNY=0`, `SCOUT_NEAR_MISS_FINAL_FUNNY=0`
-and `SCOUT_EXAMPLES=12`: every judged run is DM'd to you (still capped per hour), including the ones the judge
-rejected, so you can catch misses as well as false positives. Rate them, run `!tune`, then put the near-miss bars
-back to `0.6` / `6` and switch to `SELFBOT_SCOUT_MODE=on` when the scores separate your taste.
+`SCOUT_REVIEW_PER_HOUR=30`, `SCOUT_REVIEW_BATCH=5`, `SCOUT_REVIEW_BATCH_MINUTES=5`, `SCOUT_SCREEN=all`,
+`SCOUT_NEAR_MISS_DECIDE_FUNNY=0`, `SCOUT_NEAR_MISS_FINAL_FUNNY=0` and `SCOUT_EXAMPLES=12`: every judged run is DM'd
+to you (still capped per hour, five to a DM), including the ones the judge rejected, so you can catch misses as well
+as false positives. Rate them, run `!tune`, then put the near-miss bars back to `0.6` / `6` and switch to
+`SELFBOT_SCOUT_MODE=on` when the scores separate your taste.
 
 Privacy: the examples are real chat lines sent (anonymised) to the model on every judging call, and review DMs show you
 real names and text. Only lines you chose to rate are kept. Say so in the chat.

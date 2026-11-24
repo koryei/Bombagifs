@@ -49,7 +49,7 @@ version() {
 # You bring your own .env (e.g. scp it to $DIR/.env); this script never prompts for secrets. `training` rewrites only
 # the scout settings it manages, and never prints a value.
 REQUIRED_KEYS="SELFBOT_TOKEN ZIPLINE_URL ZIPLINE_TOKEN"
-TRAINING_KEYS="SELFBOT_SCOUT_MODE SCOUT_REVIEW SCOUT_REVIEW_PER_HOUR SCOUT_SCREEN SCOUT_NEAR_MISS_DECIDE_FUNNY SCOUT_NEAR_MISS_FINAL_FUNNY SCOUT_EXAMPLES SCOUT_MANUAL"
+TRAINING_KEYS="SELFBOT_SCOUT_MODE SCOUT_REVIEW SCOUT_REVIEW_PER_HOUR SCOUT_REVIEW_BATCH SCOUT_REVIEW_BATCH_MINUTES SCOUT_SCREEN SCOUT_NEAR_MISS_DECIDE_FUNNY SCOUT_NEAR_MISS_FINAL_FUNNY SCOUT_EXAMPLES SCOUT_MANUAL"
 
 env_has() {  # env_has KEY: non-empty value in .env, without printing it
   KEY="$1" ENVFILE="$DIR/.env" python3 - <<'PY'
@@ -415,19 +415,21 @@ cmd_timezone() {  # timezone [Area/City]: show, or set, the VM's timezone (clip 
   fi
 }
 
-training_write() {  # training_write MODE REVIEW PER_HOUR NEAR_DECIDE NEAR_FINAL EXAMPLES MANUAL
+training_write() {  # training_write MODE REVIEW PER_HOUR BATCH BATCH_MINUTES NEAR_DECIDE NEAR_FINAL EXAMPLES MANUAL
   env_set SELFBOT_SCOUT_MODE "$1"
   env_set SCOUT_REVIEW "$2"
   env_set SCOUT_REVIEW_PER_HOUR "$3"
+  env_set SCOUT_REVIEW_BATCH "$4"
+  env_set SCOUT_REVIEW_BATCH_MINUTES "$5"
   env_set SCOUT_SCREEN all
-  env_set SCOUT_NEAR_MISS_DECIDE_FUNNY "$4"
-  env_set SCOUT_NEAR_MISS_FINAL_FUNNY "$5"
-  env_set SCOUT_EXAMPLES "$6"
-  env_set SCOUT_MANUAL "$7"
+  env_set SCOUT_NEAR_MISS_DECIDE_FUNNY "$6"
+  env_set SCOUT_NEAR_MISS_FINAL_FUNNY "$7"
+  env_set SCOUT_EXAMPLES "$8"
+  env_set SCOUT_MANUAL "$9"
 }
 
 cmd_training() {  # training [on|off|status]: the training-phase form (dry-run, review every judged run)
-  local action="${1:-form}" mode="" per_hour="" examples="" near_decide="" near_final="" manual="" answer=""
+  local action="${1:-form}" mode="" per_hour="" batch="" batch_minutes="" examples="" near_decide="" near_final="" manual="" answer=""
   ensure_env
   case "$action" in
     status)
@@ -437,19 +439,21 @@ cmd_training() {  # training [on|off|status]: the training-phase form (dry-run, 
     off)
       mode="$(env_get SELFBOT_SCOUT_MODE)"; mode="${mode:-off}"
       manual="$(env_get SCOUT_MANUAL)"; manual="${manual:-on}"
-      training_write "$mode" dry-run 6 0.6 6 8 "$manual"
+      training_write "$mode" dry-run 6 10 15 0.6 6 8 "$manual"
       ok "Review settings are back to the defaults."
       say "  SELFBOT_SCOUT_MODE is still $mode; set it to on when you are ready to post."
       ;;
     on)
       manual="$(env_get SCOUT_MANUAL)"; manual="${manual:-on}"
-      training_write dry-run always 30 0 0 12 "$manual"
-      ok "Training phase: dry-run, every judged run reviewed, up to 30 DMs an hour."
+      training_write dry-run always 30 5 5 0 0 12 "$manual"
+      ok "Training phase: dry-run, every judged run reviewed, up to 30 candidates an hour in batches of 5."
       ;;
     form)
       say "${C_BOLD}Training phase${C_RESET}: judge everything, post nothing, DM you every judged run."
       read -r -p "  Scout mode (off, dry-run, on) [dry-run]: " mode || true; mode="${mode:-dry-run}"
       read -r -p "  Review DMs per hour [30]: " per_hour || true; per_hour="${per_hour:-30}"
+      read -r -p "  Candidates per DM [5]: " batch || true; batch="${batch:-5}"
+      read -r -p "  Send a partial batch after how many minutes [5]: " batch_minutes || true; batch_minutes="${batch_minutes:-5}"
       read -r -p "  Review every judged run, including rejects? [Y/n]: " answer || true
       if [[ "$answer" =~ ^[Nn] ]]; then near_decide=0.6; near_final=6; else near_decide=0; near_final=0; fi
       read -r -p "  Examples per label [12]: " examples || true; examples="${examples:-12}"
@@ -457,8 +461,10 @@ cmd_training() {  # training [on|off|status]: the training-phase form (dry-run, 
       if [[ "$answer" =~ ^[Nn] ]]; then manual=off; else manual=on; fi
       [[ "$mode" =~ ^(off|dry-run|on)$ ]] || die "mode must be off, dry-run or on"
       [[ "$per_hour" =~ ^[1-9][0-9]*$ ]] || die "review DMs per hour must be a positive whole number"
+      [[ "$batch" =~ ^[1-9][0-9]*$ ]] || die "candidates per DM must be a positive whole number"
+      [[ "$batch_minutes" =~ ^[1-9][0-9]*$ ]] || die "batch minutes must be a positive whole number"
       [[ "$examples" =~ ^[1-9][0-9]*$ ]] || die "examples per label must be a positive whole number"
-      training_write "$mode" always "$per_hour" "$near_decide" "$near_final" "$examples" "$manual"
+      training_write "$mode" always "$per_hour" "$batch" "$batch_minutes" "$near_decide" "$near_final" "$examples" "$manual"
       ok "Saved to $DIR/.env."
       ;;
     *) die "training takes: on, off, status (or nothing for the form)" ;;
