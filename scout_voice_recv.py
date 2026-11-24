@@ -46,6 +46,7 @@ def install_dave_decrypt(client: Any) -> bool:
     if decryptor is None:
         return False
     original = decryptor.decrypt_rtp
+    media_type = getattr(davey.MediaType, "audio", None) or getattr(davey.MediaType, "AUDIO", None)
 
     def decrypt_rtp(packet: Any) -> bytes:
         data = original(packet)
@@ -56,12 +57,12 @@ def install_dave_decrypt(client: Any) -> bool:
         if user_id is None:
             return data
         try:
-            return session.decrypt(user_id, davey.MediaType.audio, data)
+            return session.decrypt(user_id, media_type, data)
         except Exception:
-            # Handing ciphertext to Opus raises, and the router treats that as fatal and stops listening, so
-            # drop the packet as silence instead.
-            logger.debug("Could not decrypt a DAVE packet from %s", user_id, exc_info=True)
-            return b""
+            # Hand the packet on as-is: if it was plaintext after all, Opus still decodes it, and if it was
+            # ciphertext the decoder's own guard drops it as silence instead of killing the router thread.
+            logger.warning("Could not decrypt a DAVE packet from %s", user_id, exc_info=True)
+            return data
 
     decryptor.decrypt_rtp = decrypt_rtp
     return True
@@ -104,6 +105,42 @@ def _patch_lookup_member() -> None:
     SpeakingTimer._lookup_member = _lookup_member
 
 
+def _patch_decoder() -> None:
+    """The decoder asks the guild for a speaker's user, and one undecodable packet kills the router thread."""
+    try:
+        from discord.ext.voice_recv.opus import PacketDecoder
+        from discord.opus import OpusError
+    except ImportError:  # pragma: no cover - exercised by the main venv, which has no voice receive
+        return
+
+    original_user = getattr(PacketDecoder, "_get_user", None)
+    if original_user is not None and not getattr(original_user, "_bombagif_private", False):
+
+        def _get_user(self: Any, user_id: int) -> Any:
+            client = self.sink.voice_client
+            if client.guild is not None:
+                return original_user(self, user_id)
+            return _private_member(client, user_id) or client.client.get_user(user_id)
+
+        _get_user._bombagif_private = True  # type: ignore[attr-defined]
+        PacketDecoder._get_user = _get_user
+
+    original_decode = getattr(PacketDecoder, "_decode_packet", None)
+    if original_decode is not None and not getattr(original_decode, "_bombagif_silence", False):
+
+        def _decode_packet(self: Any, packet: Any) -> Any:
+            try:
+                return original_decode(self, packet)
+            except OpusError:
+                # The router thread dies on any exception, and then the bot hears nothing for the rest of the
+                # call, so a packet we cannot decode becomes silence instead.
+                logger.debug("Dropped an undecodable voice packet", exc_info=True)
+                return packet, b""
+
+        _decode_packet._bombagif_silence = True  # type: ignore[attr-defined]
+        PacketDecoder._decode_packet = _decode_packet
+
+
 async def _private_hook(ws: Any, msg: dict, client: Any) -> None:
     """The upstream gateway hook, minus the guild: a private call resolves members from its own recipients."""
     op = msg["op"]
@@ -135,6 +172,7 @@ def install_private_call_hook() -> bool:
     if vr_client is None:
         return False
     _patch_lookup_member()
+    _patch_decoder()
     if getattr(vr_client.hook, "_bombagif_private", False):
         return True
     original = vr_client.hook

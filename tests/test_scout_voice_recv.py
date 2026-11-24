@@ -8,8 +8,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import discord
+
 import scout_voice_recv
 from scout_voice_recv import (
+    _patch_decoder,
     _patch_lookup_member,
     _private_hook,
     _private_lookup_member,
@@ -87,12 +90,14 @@ class InstallDaveDecryptTests(unittest.TestCase):
         self.assertEqual(decryptor.decrypt_rtp(SimpleNamespace(ssrc=99)), b"cipher")
         self.assertEqual(session.calls, [])
 
-    def test_a_failed_decrypt_becomes_silence_not_a_dead_reader(self) -> None:
-        # Handing ciphertext to Opus raises, and the router treats that as fatal and stops listening for good.
+    def test_a_failed_decrypt_passes_the_packet_on(self) -> None:
+        # Empty bytes make Opus raise "invalid argument", so hand the packet on and let the decoder's guard
+        # drop it: a packet we cannot decrypt must not cost the whole call.
         session = FakeSession(fail=True)
         client, decryptor = make_client(session=session, ssrc_to_id={42: 7})
         install_dave_decrypt(client)
-        self.assertEqual(decryptor.decrypt_rtp(SimpleNamespace(ssrc=42)), b"")
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            self.assertEqual(decryptor.decrypt_rtp(SimpleNamespace(ssrc=42)), b"cipher")
 
 
 FAKE_GATEWAY = SimpleNamespace(
@@ -233,6 +238,64 @@ class PrivateCallHookTests(unittest.IsolatedAsyncioTestCase):
             channel=SimpleNamespace(recipients=[], recipient=aarav, me=None),
         )
         self.assertIs(timer._lookup_member(42), aarav)
+
+    def test_patch_decoder_names_a_private_call_speaker(self) -> None:
+        # PacketDecoder._get_user does vc.guild.get_member(...) too, and a private call has no guild.
+        class PacketDecoder:
+            def _get_user(self, user_id):
+                return "from-the-guild"
+
+            def _decode_packet(self, packet):
+                return packet, b"pcm"
+
+        fake = types.ModuleType("discord.ext.voice_recv.opus")
+        fake.PacketDecoder = PacketDecoder
+        with patch.dict(sys.modules, {"discord.ext.voice_recv.opus": fake}):
+            _patch_decoder()
+            _patch_decoder()  # idempotent
+        aarav = SimpleNamespace(id=7, name="aarav")
+        decoder = PacketDecoder()
+        decoder.sink = SimpleNamespace(
+            voice_client=SimpleNamespace(
+                guild=None,
+                client=SimpleNamespace(get_user=lambda uid: None),
+                channel=SimpleNamespace(recipients=[], recipient=aarav, me=None),
+            )
+        )
+        self.assertIs(decoder._get_user(7), aarav)
+
+    def test_patch_decoder_leaves_guild_calls_alone(self) -> None:
+        class PacketDecoder:
+            def _get_user(self, user_id):
+                return "from-the-guild"
+
+            def _decode_packet(self, packet):
+                return packet, b"pcm"
+
+        fake = types.ModuleType("discord.ext.voice_recv.opus")
+        fake.PacketDecoder = PacketDecoder
+        with patch.dict(sys.modules, {"discord.ext.voice_recv.opus": fake}):
+            _patch_decoder()
+        decoder = PacketDecoder()
+        decoder.sink = SimpleNamespace(voice_client=SimpleNamespace(guild=object()))
+        self.assertEqual(decoder._get_user(7), "from-the-guild")
+
+    def test_patch_decoder_turns_an_undecodable_packet_into_silence(self) -> None:
+        # The router thread dies on any exception, so one bad packet would end the call's audio for good.
+        class PacketDecoder:
+            def _get_user(self, user_id):
+                return None
+
+            def _decode_packet(self, packet):
+                # __new__ skips OpusError.__init__, which needs libopus loaded to format its message.
+                raise discord.opus.OpusError.__new__(discord.opus.OpusError)
+
+        fake = types.ModuleType("discord.ext.voice_recv.opus")
+        fake.PacketDecoder = PacketDecoder
+        with patch.dict(sys.modules, {"discord.ext.voice_recv.opus": fake}):
+            _patch_decoder()
+        packet = SimpleNamespace(ssrc=42)
+        self.assertEqual(PacketDecoder()._decode_packet(packet), (packet, b""))
 
     def test_install_returns_false_without_voice_recv(self) -> None:
         with patch.object(scout_voice_recv, "vr_client", None):
