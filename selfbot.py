@@ -97,6 +97,7 @@ from scout_voice import (
     parse_voice_request,
     resolve_target,
 )
+from scout_voice_recv import install_dave_decrypt
 from scout_wake import WakeWord, build_wake_word
 from selfbot_logic import (
     apply_timezone,
@@ -1195,6 +1196,7 @@ class SelfBot(discord.Client):
             keyword_path=runtime.cfg.voice_wake_path,
         )
         client.listen(_VoiceSink(self._voice, self._on_wake_audio, self._wake))
+        install_dave_decrypt(client)
         self.stats.note("info", f"joined voice in {getattr(target, 'name', 'a call')}")
         wake = " Say the wake word or `clip that`." if self._wake is not None else " Say `clip that` here."
         return f"Listening in **{getattr(target, 'name', 'the call')}**.{wake}"
