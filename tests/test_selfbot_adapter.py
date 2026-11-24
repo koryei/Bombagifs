@@ -2152,6 +2152,17 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.assertIsNone(self.bot._voice_client)
         self.assertIn("davey", self.owner_dm.await_args.args[0])
 
+    async def test_a_failed_join_drops_the_half_open_client(self) -> None:
+        # py-self registers the voice client before the handshake, so a failure would make the next !join say
+        # "Already connected to a voice channel" until the bot restarted.
+        half_open = SimpleNamespace(disconnect=AsyncMock())
+        self.voice_channel.guild = SimpleNamespace(voice_client=half_open)
+        self.voice_channel.connect = AsyncMock(side_effect=RuntimeError("handshake failed"))
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            await self.bot.on_message(self.owner_message("!join"))
+        half_open.disconnect.assert_awaited_once_with(force=True)
+        self.assertIn("couldn't join", self.owner_dm.await_args.args[0])
+
     async def test_leave_disconnects_and_forgets_the_buffer(self) -> None:
         await self.join()
         client = self.bot._voice_client

@@ -1183,6 +1183,7 @@ class SelfBot(discord.Client):
             return "The host has no libopus, so I can't decode voice. Install it (`sudo apt install libopus0`) and restart me."
         except Exception:
             self.logger.warning("Could not join a voice channel", exc_info=True)
+            await self._voice_abort(target)
             return "I couldn't join that call."
         self._voice = VoiceBuffer(keep_s=runtime.cfg.voice_keep_seconds)
         self._voice_client = client
@@ -1197,6 +1198,13 @@ class SelfBot(discord.Client):
         self.stats.note("info", f"joined voice in {getattr(target, 'name', 'a call')}")
         wake = " Say the wake word or `clip that`." if self._wake is not None else " Say `clip that` here."
         return f"Listening in **{getattr(target, 'name', 'the call')}**.{wake}"
+
+    async def _voice_abort(self, channel: Any) -> None:
+        """Drop a half-open voice client, or the next `!join` is refused with "Already connected to a voice channel"."""
+        client = getattr(getattr(channel, "guild", None), "voice_client", None)
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.disconnect(force=True)
 
     async def _voice_leave(self) -> None:
         """Stop listening and disconnect. Safe to call when not in a call."""
