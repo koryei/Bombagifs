@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import scout_voice_recv
 from scout_voice_recv import (
+    _patch_lookup_member,
     _private_hook,
     _private_lookup_member,
     install_dave_decrypt,
@@ -186,6 +189,50 @@ class PrivateCallHookTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIsNone(_private_lookup_member(reader, 42))
+
+    def test_patch_lookup_member_targets_the_speaking_timer(self) -> None:
+        # _lookup_member lives on SpeakingTimer, not AudioReader: patching the wrong class broke every join.
+        class SpeakingTimer:
+            def _lookup_member(self, ssrc):
+                return "from-the-guild"
+
+        fake = types.ModuleType("discord.ext.voice_recv.reader")
+        fake.SpeakingTimer = SpeakingTimer
+        with patch.dict(sys.modules, {"discord.ext.voice_recv.reader": fake}):
+            _patch_lookup_member()
+            _patch_lookup_member()  # idempotent: never wrap our own wrapper
+        self.assertTrue(getattr(SpeakingTimer._lookup_member, "_bombagif_private", False))
+
+    def test_the_patched_lookup_leaves_guild_calls_alone(self) -> None:
+        class SpeakingTimer:
+            def _lookup_member(self, ssrc):
+                return "from-the-guild"
+
+        fake = types.ModuleType("discord.ext.voice_recv.reader")
+        fake.SpeakingTimer = SpeakingTimer
+        with patch.dict(sys.modules, {"discord.ext.voice_recv.reader": fake}):
+            _patch_lookup_member()
+        timer = SpeakingTimer()
+        timer.voice_client = SimpleNamespace(guild=object())
+        self.assertEqual(timer._lookup_member(42), "from-the-guild")
+
+    def test_the_patched_lookup_names_a_private_call_speaker(self) -> None:
+        class SpeakingTimer:
+            def _lookup_member(self, ssrc):
+                return "from-the-guild"
+
+        fake = types.ModuleType("discord.ext.voice_recv.reader")
+        fake.SpeakingTimer = SpeakingTimer
+        with patch.dict(sys.modules, {"discord.ext.voice_recv.reader": fake}):
+            _patch_lookup_member()
+        aarav = SimpleNamespace(id=7, name="aarav")
+        timer = SpeakingTimer()
+        timer.voice_client = SimpleNamespace(
+            guild=None,
+            _get_id_from_ssrc=lambda ssrc: 7,
+            channel=SimpleNamespace(recipients=[], recipient=aarav, me=None),
+        )
+        self.assertIs(timer._lookup_member(42), aarav)
 
     def test_install_returns_false_without_voice_recv(self) -> None:
         with patch.object(scout_voice_recv, "vr_client", None):

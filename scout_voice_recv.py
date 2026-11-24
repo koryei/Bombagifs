@@ -85,15 +85,15 @@ def _private_lookup_member(reader: Any, ssrc: int) -> Any:
 
 
 def _patch_lookup_member() -> None:
-    """The reader asks the guild for a speaker's member on every packet, which kills the audio thread."""
+    """The speaking timer asks the guild for a speaker's member on every packet, which kills the audio thread."""
     try:
-        from discord.ext.voice_recv.reader import AudioReader
+        from discord.ext.voice_recv.reader import SpeakingTimer
     except ImportError:  # pragma: no cover - exercised by the main venv, which has no voice receive
         return
 
-    if getattr(AudioReader._lookup_member, "_bombagif_private", False):
-        return
-    original = AudioReader._lookup_member
+    original = getattr(SpeakingTimer, "_lookup_member", None)
+    if original is None or getattr(original, "_bombagif_private", False):
+        return  # a rename upstream: better to lose the names than to break every join
 
     def _lookup_member(self: Any, ssrc: int) -> Any:
         if self.voice_client.guild is not None:
@@ -101,7 +101,7 @@ def _patch_lookup_member() -> None:
         return _private_lookup_member(self, ssrc)
 
     _lookup_member._bombagif_private = True  # type: ignore[attr-defined]
-    AudioReader._lookup_member = _lookup_member
+    SpeakingTimer._lookup_member = _lookup_member
 
 
 async def _private_hook(ws: Any, msg: dict, client: Any) -> None:
