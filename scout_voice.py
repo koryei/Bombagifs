@@ -159,6 +159,20 @@ class VoiceBuffer:
 _PRONOUNS = frozenset({"he", "she", "they", "him", "her", "them"})
 # Read from the raw text: the tokenizer applies leet substitutions, which turn "30s" into "eos".
 _DURATION_RE = re.compile(r"\b(?:last\s+)?(\d{1,3})\s*(?:s|sec|secs|seconds?)\b", re.IGNORECASE)
+# Also raw: the tokenizer turns a mention's digits into letters, so "clip <@123>" would name nobody.
+_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+
+def _take_mention(text: str) -> tuple[int | None, str]:
+    """Pull a mention out of the raw text, returning its id and the text without it.
+
+    The id is kept even when that person is not in the call, so ``resolve_target`` can say so instead of the
+    request quietly naming nobody.
+    """
+    match = _MENTION_RE.search(text)
+    if match is None:
+        return None, text
+    return int(match.group(1)), text[: match.start()] + " " + text[match.end() :]
 
 
 def _take_seconds(text: str) -> tuple[float | None, str]:
@@ -172,7 +186,7 @@ def _take_seconds(text: str) -> tuple[float | None, str]:
 
 
 def _take_pronoun(words: list[str]) -> bool:
-    """Pull "what he just said" out of the tokens: the owner means whoever spoke last."""
+    """Pull "what he just said" (or a bare "him") out of the tokens: the owner means whoever spoke last."""
     for index, word in enumerate(words):
         if word != "what":
             continue
@@ -184,6 +198,10 @@ def _take_pronoun(words: list[str]) -> bool:
             if len(words) > end and words[end] == "said":
                 del words[index : end + 1]
                 return True
+    for index, word in enumerate(words):
+        if word in _PRONOUNS:
+            del words[index]
+            return True
     return False
 
 
@@ -226,11 +244,14 @@ def parse_voice_request(text: str, members: Sequence[tuple[int, str]] = ()) -> V
     everything that is not a request, including "gif that" (there is no voice GIF).
     """
     seconds, text = _take_seconds(text)
+    mentioned_id, text = _take_mention(text)
     words = tokens(text)
     if not words:
         return None
     last_speaker = _take_pronoun(words)
     target_id, target_name = _take_member(words, members)
+    if mentioned_id is not None:
+        target_id, target_name = mentioned_id, None
     # A named or implied target is the "message" a bare "clip" points at, so it counts as a reply.
     trigger = parse_trigger(
         " ".join(words), is_reply=bool(last_speaker or target_id or target_name or seconds is not None)

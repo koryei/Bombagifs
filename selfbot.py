@@ -1161,8 +1161,12 @@ class SelfBot(discord.Client):
         """Everyone in the call, as ``(user_id, display name)``, so a name in a request can be resolved."""
         channel = getattr(self._voice_client, "channel", None)
         members = getattr(channel, "members", None)
-        if members is None:  # a group DM has recipients and no members list
-            members = [*getattr(channel, "recipients", ()), getattr(channel, "me", None)]
+        if members is None:  # a private call has no members list: a group DM has recipients, a 1:1 has one
+            members = [
+                *getattr(channel, "recipients", ()),
+                getattr(channel, "recipient", None),
+                getattr(channel, "me", None),
+            ]
         return [
             (member.id, getattr(member, "display_name", None) or member.name)
             for member in members

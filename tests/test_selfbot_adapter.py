@@ -2160,6 +2160,41 @@ class SelfBotVoiceTests(_SelfBotCase):
         group.send.assert_awaited_once()
         self.assertEqual(group.send.await_args.args[0], "🎙️ **Pranit**, last 30s")
 
+    def dm_call(self) -> Mock:
+        """A 1:1 DM in a call: one recipient, no guild, and a connect() that takes no self_mute."""
+        dm = Mock(spec=discord.DMChannel)
+        dm.guild = None
+        dm.me = SimpleNamespace(id=OWNER, display_name="Koryei")
+        dm.recipient = SimpleNamespace(id=7, display_name="aarav")
+        dm.send = AsyncMock()
+        dm.connect = AsyncMock(return_value=FakeVoiceClient(dm))
+        return dm
+
+    async def test_join_works_in_a_one_to_one_dm(self) -> None:
+        dm = self.dm_call()
+        self.owner_voice = SimpleNamespace(channel=dm)
+        message = self.owner_message("!join")
+        message.channel = dm
+        await self.bot.on_message(message)
+        self.assertIs(self.bot._voice_client.channel, dm)
+        self.assertFalse(dm.connect.await_args.kwargs.get("ring", True))  # never ring the other person
+        self.assertIn("Listening", self.owner_dm.await_args.args[0])
+
+    async def test_clip_aarav_works_in_a_one_to_one_dm(self) -> None:
+        # A 1:1 DM has a single recipient, not a recipients list, so the name has to resolve from that.
+        dm = self.dm_call()
+        self.owner_voice = SimpleNamespace(channel=dm)
+        message = self.owner_message("!join")
+        message.channel = dm
+        await self.bot.on_message(message)
+        self.feed(7)
+        clip = self.owner_message("clip aarav")
+        clip.channel = dm
+        with patch("selfbot.encode_ogg", return_value=b"OggS-fake"):
+            await self.bot.on_message(clip)
+        dm.send.assert_awaited_once()
+        self.assertEqual(dm.send.await_args.args[0], "🎙️ **aarav**, last 30s")
+
     async def test_join_explains_a_missing_libopus(self) -> None:
         self.voice_channel.connect = AsyncMock(side_effect=discord.opus.OpusNotLoaded)
         await self.bot.on_message(self.owner_message("!join"))

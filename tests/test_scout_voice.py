@@ -144,6 +144,19 @@ class ParseVoiceRequestTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_voice_request(text), VoiceRequest(last_speaker=True))
 
+    def test_a_bare_pronoun_means_the_last_speaker(self) -> None:
+        for text in ("clip him", "clip her", "clip them"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_voice_request(text), VoiceRequest(last_speaker=True))
+
+    def test_a_mention_picks_that_person(self) -> None:
+        self.assertEqual(parse_voice_request("clip <@7>", MEMBERS), VoiceRequest(target_id=7))
+        self.assertEqual(parse_voice_request("clip <@!7> that", MEMBERS), VoiceRequest(target_id=7))
+
+    def test_a_mention_of_someone_not_in_the_call_is_still_a_target(self) -> None:
+        # resolve_target turns this into "I don't see that person in the call."
+        self.assertEqual(parse_voice_request("clip <@999>", MEMBERS), VoiceRequest(target_id=999))
+
     def test_a_name_picks_that_person(self) -> None:
         self.assertEqual(parse_voice_request("clip pranit that", MEMBERS), VoiceRequest(target_id=7))
         self.assertEqual(parse_voice_request("clip koryei", MEMBERS), VoiceRequest(target_id=8))
