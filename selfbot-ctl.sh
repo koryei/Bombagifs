@@ -197,10 +197,10 @@ WantedBy=timers.target
 UNIT
 }
 
-render_sudoers() {  # lets the service user restart only this service without a password (for unattended updates)
+render_sudoers() {  # lets the service user restart this service, and kick off its update unit, without a password
   local user="$1"
-  printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl restart %s.service, /usr/bin/systemctl start %s.service, /usr/bin/systemctl stop %s.service\n' \
-    "$user" "$SERVICE" "$SERVICE" "$SERVICE"
+  printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl restart %s.service, /usr/bin/systemctl start %s.service, /usr/bin/systemctl stop %s.service, /usr/bin/systemctl start %s-update.service\n' \
+    "$user" "$SERVICE" "$SERVICE" "$SERVICE" "$SERVICE"
 }
 
 install_file() {  # install_file <content-producing function + args...> -- <dest> <mode>
@@ -370,6 +370,18 @@ cmd_update() {
   write_notice "$(git_ rev-parse --short "$old")" "$(git_ rev-parse --short "$new")" rolled-back "$commits"
   sc_write restart "$SERVICE.service"
   die "Update failed and was rolled back to $(version). Look at: ./selfbot-ctl.sh logs"
+}
+
+cmd_update_service() {  # install just the update unit, so !update works without the timer
+  local user group
+  user="$(id -un)"; group="$(id -gn)"
+  install_file render_sudoers "$user" -- "/etc/sudoers.d/$SERVICE" 0440
+  if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "/etc/sudoers.d/$SERVICE" >/dev/null; then
+    as_root rm -f "/etc/sudoers.d/$SERVICE"; die "Could not validate the sudoers entry; !update not enabled."
+  fi
+  install_file render_update_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE-update.service" 0644
+  sc_write daemon-reload
+  ok "!update is enabled: it runs ./selfbot-ctl.sh update in its own unit, so the restart cannot kill it."
 }
 
 cmd_auto() {
@@ -567,6 +579,7 @@ Usage: ./selfbot-ctl.sh <command>
   install            set up the venv and the systemd service (you supply .env; asks for sudo once)
   update [--quiet]   fast-forward to the latest commit, restart, roll back if it won't stay up
   auto on [min]|off  check for updates on a timer (default every 15 min)
+  update-service     let the bot run !update from Discord (installs the update unit, no timer)
   status             service state and version
   logs [-f]          recent logs (follow with -f)
   timezone [zone]    show or set the VM's timezone (clip cards print clock times in it)
@@ -585,6 +598,7 @@ main() {
   case "$command" in
     install) cmd_install ;;
     update) cmd_update ;;
+    update-service) cmd_update_service ;;
     auto) cmd_auto "$@" ;;
     status) cmd_status ;;
     timezone) cmd_timezone "$@" ;;

@@ -144,6 +144,14 @@ assert_contains "$(cat "$FAKE_STATE/calls")" "disable --now bombagif-selfbot-upd
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "auto off removes the update service"
 [[ ! -f "$sudoers_file" ]] || fail "auto off removes the sudoers entry"
 
+# update-service installs the unit and the sudoers rule without the timer, so !update works on its own
+: >"$FAKE_STATE/calls"
+cmd_update_service >/dev/null 2>&1 || fail "update-service should succeed"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "update-service writes the update unit"
+[[ ! -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "update-service must not install the timer"
+assert_contains "$(cat "$FAKE_STATE/calls")" "daemon-reload" "update-service reloads systemd"
+assert_contains "$(cat "$sudoers_file")" "/usr/bin/systemctl start bombagif-selfbot-update.service" "the bot may start its update unit"
+
 # --- waiting for idle before a restart ---------------------------------------------------------------------
 DIR="$TEST_ROOT/idle"; mkdir -p "$DIR/data"
 busy_file="$DIR/data/busy.json"
