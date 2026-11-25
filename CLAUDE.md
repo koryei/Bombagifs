@@ -29,6 +29,8 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   `scout_intent.py` (`IntentClassifier`: the AI check for unsure ones; one line of chat text, as data, daily cap).
 - `console_ui.py` — discord-free Rich terminal UI for the self-bot (boot banner, live status panel, pretty log
   handler, `TerminalUi`, `demo()`); needs `rich` (in `requirements-selfbot.txt`). Preview: `python console_ui.py`.
+- `logfmt.py` — reformats the JSON log lines written before `LOG_FORMAT=text` became the default, so
+  `./selfbot-ctl.sh logs` reads the same across the whole journal. Discord-free, stdlib only.
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
   `.venv-selfbot/bin/python -m unittest tests.test_selfbot_adapter -v` for the self-bot adapter (skipped elsewhere);
   `bash tests/test_installer.sh`.

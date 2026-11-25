@@ -368,6 +368,24 @@ assert_contains "$status" "davey" "voice status reports whether davey is install
 assert_not_contains "$status" "secret-token" "voice status never prints secrets"
 if (main voice sideways >/dev/null 2>&1); then fail "an unknown voice action must fail"; fi
 
+# --- logs: entries written before the switch to text logs still read as text -----------------------------------
+DIR="$ROOT"
+cat >"$FAKE_BIN/journalctl" <<'FAKE'
+#!/usr/bin/env bash
+echo "journalctl $*" >>"$FAKE_STATE/calls"
+printf 'Nov 24 23:49:35 host python[1]: {"time": "2026-11-25T04:49:35+00:00", "level": "INFO", "logger": "bombagif.scout", "message": "judged a run"}\n'
+printf 'Nov 24 23:50:00 host python[1]: 23:50:00 INFO    scout      already text\n'
+FAKE
+chmod +x "$FAKE_BIN/journalctl"
+export SELFBOT_CTL_JOURNALCTL="$FAKE_BIN/journalctl"
+export SELFBOT_CTL_PYTHON="$(command -v python3)"
+out="$(cmd_logs)"
+assert_contains "$out" "INFO    scout      judged a run" "logs reformats a JSON entry"
+assert_not_contains "$out" '{"time"' "logs hides the JSON"
+assert_contains "$out" "python[1]: INFO    scout      already text" "logs drops the clock journald already printed"
+assert_contains "$(cat "$FAKE_STATE/calls")" "-u bombagif-selfbot.service" "logs reads the service journal"
+unset SELFBOT_CTL_JOURNALCTL SELFBOT_CTL_PYTHON
+
 # the script itself
 bash -n "$ROOT/selfbot-ctl.sh"
 out="$("$ROOT/selfbot-ctl.sh" help)"; assert_contains "$out" "update" "usage mentions update"

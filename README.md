@@ -172,7 +172,8 @@ systemd, and Docker get the same log lines without the colour or the panel. Forc
 
 **Logs.** One line per event, meant to be read: `23:49:35 INFO    scout      judged a run in chat …`. `discord.*`
 login and gateway-resume chatter is hidden until `LOG_LEVEL=DEBUG`. Set `LOG_FORMAT=json` for machine-readable
-one-line JSON instead (the app and the self-bot both honour it).
+one-line JSON instead (the app and the self-bot both honour it). `./selfbot-ctl.sh logs` reformats the JSON entries
+written before this change, so a peek reads the same throughout the journal.
 
 **CAPTCHA guard.** The self-bot cannot solve CAPTCHAs, and retrying only makes Discord stricter. If Discord asks
 for one (for example when replying, fetching a message, or accepting a friend request), the self-bot logs a single

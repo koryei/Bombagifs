@@ -37,6 +37,7 @@ sc_write() {
   else sudo systemctl "$@"; fi
 }
 as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+journal_() { if [[ -n "${SELFBOT_CTL_JOURNALCTL:-}" ]]; then "$SELFBOT_CTL_JOURNALCTL" "$@"; else journalctl "$@"; fi; }
 
 py() { "${SELFBOT_CTL_PYTHON:-$VENV/bin/python}" "$@"; }
 git_() { git -C "$DIR" "$@"; }
@@ -547,7 +548,12 @@ cmd_voice() {  # voice [on|off|status]: install voice receive and turn call clip
 cmd_logs() {
   local follow=()
   [[ "${1:-}" == "-f" ]] && follow=(-f)
-  journalctl -u "$SERVICE.service" -n 60 --no-pager ${follow[@]+"${follow[@]}"}
+  # Entries written before the switch to text logs are JSON: reformat them so a peek reads the same throughout.
+  if [[ -x "${SELFBOT_CTL_PYTHON:-$VENV/bin/python}" ]]; then
+    journal_ -u "$SERVICE.service" -n 60 --no-pager ${follow[@]+"${follow[@]}"} | py "$DIR/logfmt.py"
+  else
+    journal_ -u "$SERVICE.service" -n 60 --no-pager ${follow[@]+"${follow[@]}"}
+  fi
 }
 
 cmd_doctor() {
