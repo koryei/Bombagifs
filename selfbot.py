@@ -804,11 +804,19 @@ class SelfBot(discord.Client):
     # clip scout: owner commands -----------------------------------------------------------------------------------
 
     async def _owner_say(self, message: discord.Message, text: str) -> None:
-        """Answer the owner privately (a DM), so commands never add noise to a public chat."""
+        """Answer where the command was typed, so a server channel works as well as a DM."""
         try:
-            await message.author.send(text)
+            await message.channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+            return
         except discord.CaptchaRequired:
-            self._trip_captcha("answering a owner command")
+            self._trip_captcha("answering an owner command")
+            return
+        except discord.HTTPException:
+            self.logger.warning("Could not answer an owner command in the channel", exc_info=True)
+        try:
+            await message.author.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except discord.CaptchaRequired:
+            self._trip_captcha("answering an owner command")
         except discord.HTTPException:
             self.logger.warning("Could not DM the owner an owner-command answer", exc_info=True)
 

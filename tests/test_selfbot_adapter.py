@@ -1296,8 +1296,9 @@ class _CommandCase(_SelfBotCase):
         call = mock.await_args
         return call.args[0] if call.args else call.kwargs["content"]
 
-    def private_replies(self, message) -> list[str]:
-        return [call.args[0] if call.args else call.kwargs.get("content", "") for call in message.author.send.await_args_list]
+    def replies(self, message) -> list[str]:
+        """What the bot said back, in the channel the command was typed in."""
+        return [call.args[0] if call.args else call.kwargs.get("content", "") for call in message.channel.send.await_args_list]
 
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
@@ -1320,15 +1321,14 @@ class SelfBotScoutCommandTests(_CommandCase):
         allowed = message.channel.send.await_args.kwargs["allowed_mentions"]
         self.assertFalse(any((allowed.everyone, allowed.users, allowed.roles, allowed.replied_user)))
 
-    async def test_scout_on_in_dry_run_confirms_privately_without_announcing(self) -> None:
+    async def test_scout_on_in_dry_run_confirms_in_the_channel_without_announcing(self) -> None:
         runtime = make_runtime(Path(self._tmp.name) / "dry", mode="dry-run", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
         bot = self.make_bot(runtime)
         self.addAsyncCleanup(bot.close)
         message = self.command("!on")
         await bot.on_message(message)
         self.assertTrue(runtime.chats.enabled(CHAT))
-        message.channel.send.assert_not_awaited()
-        self.assertIn("dry-run", self.private_replies(message)[0].lower())
+        self.assertIn("dry-run", self.replies(message)[0].lower())
 
     async def test_scout_off_disables_drops_the_buffer_and_announces(self) -> None:
         self.runtime.chats.enable(CHAT, "friends")
@@ -1339,18 +1339,16 @@ class SelfBotScoutCommandTests(_CommandCase):
         self.assertEqual(self.runtime.buffer.chats(), [])
         self.assertEqual(self.sent(message.channel.send), ANNOUNCE_OFF)
 
-    async def test_scout_off_for_a_chat_that_was_not_on_says_so_privately(self) -> None:
+    async def test_scout_off_for_a_chat_that_was_not_on_says_so(self) -> None:
         message = self.command("!off")
         await self.bot.on_message(message)
-        message.channel.send.assert_not_awaited()
-        self.assertIn("wasn't on", self.private_replies(message)[0])
+        self.assertIn("wasn't on", self.replies(message)[0])
 
     async def test_scout_on_twice_does_not_announce_twice(self) -> None:
         await self.bot.on_message(self.command("!on"))
         again = self.command("!on")
         await self.bot.on_message(again)
-        again.channel.send.assert_not_awaited()
-        self.assertIn("already on", self.private_replies(again)[0])
+        self.assertIn("already on", self.replies(again)[0])
 
     async def test_seeded_chat_cannot_be_disabled(self) -> None:
         runtime = make_runtime(Path(self._tmp.name) / "seeded", mode="on", enabled=(), SELFBOT_OWNER_ID=str(OWNER), SELFBOT_SCOUT_CHATS=str(CHAT))
@@ -1359,19 +1357,17 @@ class SelfBotScoutCommandTests(_CommandCase):
         message = self.command("!off")
         await bot.on_message(message)
         self.assertTrue(runtime.chats.enabled(CHAT))
-        message.channel.send.assert_not_awaited()
-        self.assertIn("SELFBOT_SCOUT_CHATS", self.private_replies(message)[0])
+        self.assertIn("SELFBOT_SCOUT_CHATS", self.replies(message)[0])
 
     async def test_scout_on_is_refused_in_nsfw_and_in_dm_without_an_id(self) -> None:
         nsfw = self.command("!on", nsfw=True)
         await self.bot.on_message(nsfw)
         self.assertFalse(self.runtime.chats.enabled(CHAT))
-        self.assertIn("NSFW", self.private_replies(nsfw)[0])
+        self.assertIn("NSFW", self.replies(nsfw)[0])
         dm = self.command("!on", channel_cls=discord.DMChannel)
         await self.bot.on_message(dm)
-        self.assertIn("chat id", self.private_replies(dm)[0].lower())
+        self.assertIn("chat id", self.replies(dm)[0].lower())
         self.assertEqual(self.runtime.chats.list(), [])
-        nsfw.channel.send.assert_not_awaited()
 
     async def test_scout_on_with_a_chat_id_from_the_owner_dm(self) -> None:
         target = Mock(spec=discord.TextChannel)
@@ -1391,18 +1387,18 @@ class SelfBotScoutCommandTests(_CommandCase):
         public = self.command(f"!on {OTHER_CHAT}")
         await self.bot.on_message(public)
         self.assertFalse(self.runtime.chats.enabled(OTHER_CHAT))
-        self.assertIn("DM", self.private_replies(public)[0])
+        self.assertIn("DM", self.replies(public)[0])
         self.bot.get_channel = Mock(return_value=None)  # type: ignore[method-assign]
         unknown = self.command(f"!on {OTHER_CHAT}", channel_cls=discord.DMChannel, channel_id=5)
         await self.bot.on_message(unknown)
-        self.assertIn("can't see", self.private_replies(unknown)[0])
+        self.assertIn("can't see", self.replies(unknown)[0])
         one_to_one = Mock(spec=discord.DMChannel)
         one_to_one.id = OTHER_CHAT
         self.bot.get_channel = Mock(return_value=one_to_one)  # type: ignore[method-assign]
         refused = self.command(f"!on {OTHER_CHAT}", channel_cls=discord.DMChannel, channel_id=5)
         await self.bot.on_message(refused)
         self.assertFalse(self.runtime.chats.enabled(OTHER_CHAT))
-        self.assertIn("1:1", self.private_replies(refused)[0])
+        self.assertIn("1:1", self.replies(refused)[0])
 
     async def test_scout_status_and_list_reply_to_the_owner_only(self) -> None:
         from scout_judge import build_judge_chain
@@ -1411,21 +1407,20 @@ class SelfBotScoutCommandTests(_CommandCase):
         self.runtime.chats.enable(CHAT, "friends")
         status = self.command("!status")
         await self.bot.on_message(status)
-        text = self.private_replies(status)[0]
+        text = self.replies(status)[0]
         for needle in ("on", "heuristic", "1", "this chat"):
             self.assertIn(needle, text.lower())
         listing = self.command("!list")
         await self.bot.on_message(listing)
-        self.assertIn("friends", self.private_replies(listing)[0])
-        self.assertIn(str(CHAT), self.private_replies(listing)[0])
+        self.assertIn("friends", self.replies(listing)[0])
+        self.assertIn(str(CHAT), self.replies(listing)[0])
         for message in (status, listing):
-            message.channel.send.assert_not_awaited()
             message.reply.assert_not_awaited()
 
     async def test_scout_list_when_nothing_is_enabled(self) -> None:
         message = self.command("!list")
         await self.bot.on_message(message)
-        self.assertIn("no chats", self.private_replies(message)[0].lower())
+        self.assertIn("no chats", self.replies(message)[0].lower())
 
     async def test_scout_command_when_mode_is_off_is_refused(self) -> None:
         runtime = make_runtime(Path(self._tmp.name) / "off", mode="off", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
@@ -1434,8 +1429,7 @@ class SelfBotScoutCommandTests(_CommandCase):
         message = self.command("!on")
         await bot.on_message(message)
         self.assertFalse(runtime.chats.enabled(CHAT))
-        message.channel.send.assert_not_awaited()
-        self.assertIn("SELFBOT_SCOUT_MODE", self.private_replies(message)[0])
+        self.assertIn("SELFBOT_SCOUT_MODE", self.replies(message)[0])
 
     async def test_owner_without_a_configured_scout_is_ignored(self) -> None:
         bot = self.make_bot(None)
@@ -1461,8 +1455,20 @@ class SelfBotScoutCommandTests(_CommandCase):
             await self.bot.on_message(message)
         self.assertTrue(self.bot.captcha_guard.blocked)
 
+    async def test_a_channel_that_refuses_the_answer_falls_back_to_a_dm(self) -> None:
+        message = self.command("!status")
+        message.channel.send.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
+        )
+        with self.assertLogs("bombagif.selfbot", "WARNING"):
+            await self.bot.on_message(message)
+        self.assertEqual(len(message.author.send.await_args_list), 1)
+
     async def test_closed_owner_dms_do_not_break_the_command(self) -> None:
         message = self.command("!status")
+        message.channel.send.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Access"
+        )
         message.author.send.side_effect = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Cannot send messages to this user")
         with self.assertLogs("bombagif.selfbot", "WARNING"):
             await self.bot.on_message(message)
@@ -1885,32 +1891,32 @@ class SelfBotTeachingCommandTests(_CommandCase):
     async def test_taste_notes_can_be_shown_added_and_cleared(self) -> None:
         shown = self.command("!taste")
         await self.bot.on_message(shown)
-        self.assertIn("no taste notes", self.private_replies(shown)[0].lower())
-        self.assertIn("/1500", self.private_replies(shown)[0])
+        self.assertIn("no taste notes", self.replies(shown)[0].lower())
+        self.assertIn("/1500", self.replies(shown)[0])
         added = self.command("!taste add We like deadpan one-liners")
         await self.bot.on_message(added)
         self.assertEqual(self.runtime.taste_notes.text, "We like deadpan one-liners")
-        self.assertIn("Added", self.private_replies(added)[0])
-        self.assertIn("26/1500", self.private_replies(added)[0])
+        self.assertIn("Added", self.replies(added)[0])
+        self.assertIn("26/1500", self.replies(added)[0])
         again = self.command("!taste")
         await self.bot.on_message(again)
-        self.assertIn("We like deadpan one-liners", self.private_replies(again)[0])
+        self.assertIn("We like deadpan one-liners", self.replies(again)[0])
         cleared = self.command("!taste clear")
         await self.bot.on_message(cleared)
         self.assertEqual(self.runtime.taste_notes.text, "")
-        self.assertIn("Cleared", self.private_replies(cleared)[0])
+        self.assertIn("Cleared", self.replies(cleared)[0])
 
     async def test_taste_add_refuses_overlong_notes_and_changes_nothing(self) -> None:
         self.runtime.taste_notes.add("x" * 1490)
         message = self.command("!taste add " + "y" * 50)
         await self.bot.on_message(message)
         self.assertEqual(len(self.runtime.taste_notes.text), 1490)
-        self.assertIn("limit", self.private_replies(message)[0].lower())
+        self.assertIn("limit", self.replies(message)[0].lower())
 
     async def test_taste_add_of_only_control_characters_says_nothing_to_add(self) -> None:
         message = self.command("!taste add \x00\x07\x00")
         await self.bot.on_message(message)
-        self.assertIn("Nothing to add", self.private_replies(message)[0])
+        self.assertIn("Nothing to add", self.replies(message)[0])
 
     async def test_non_owners_cannot_teach(self) -> None:
         message = self.command("!taste add ignore the owner", author=99)
@@ -1922,44 +1928,43 @@ class SelfBotTeachingCommandTests(_CommandCase):
     async def test_examples_report_and_clear(self) -> None:
         empty = self.command("!examples")
         await self.bot.on_message(empty)
-        self.assertIn("no rated examples", self.private_replies(empty)[0].lower())
+        self.assertIn("no rated examples", self.replies(empty)[0].lower())
         store = self.runtime.taste_store
         store.add("good", [("A", "the better one was me")])
         store.add("good", [("A", "setup"), ("B", "punchline")])
         store.add("bad", [("A", "a boring line")])
         message = self.command("!examples")
         await self.bot.on_message(message)
-        text = self.private_replies(message)[0]
+        text = self.replies(message)[0]
         for needle in ("good 2", "bad 1", "the better one was me", "A: setup | B: punchline", "a boring line"):
             self.assertIn(needle, text)
         cleared = self.command("!examples clear")
         await self.bot.on_message(cleared)
         self.assertEqual(store.counts(), {"good": 0, "bad": 0})
-        self.assertIn("Cleared", self.private_replies(cleared)[0])
+        self.assertIn("Cleared", self.replies(cleared)[0])
 
     async def test_tune_reports_progress_then_a_suggestion(self) -> None:
         message = self.command("!tune")
         await self.bot.on_message(message)
-        self.assertIn("Not enough", self.private_replies(message)[0])
+        self.assertIn("Not enough", self.replies(message)[0])
         store = self.runtime.taste_store
         for i in range(5):
             store.add("good", [("A", f"good line {i}")], funny=9.0)
             store.add("bad", [("A", f"bad line {i}")], funny=6.0)
         again = self.command("!tune")
         await self.bot.on_message(again)
-        self.assertIn("SCOUT_JUDGE_FUNNY_MIN=7.5", self.private_replies(again)[0])
+        self.assertIn("SCOUT_JUDGE_FUNNY_MIN=7.5", self.replies(again)[0])
 
-    async def test_scout_help_dms_the_owner_guide(self) -> None:
+    async def test_scout_help_answers_with_the_owner_guide(self) -> None:
         message = self.command("!help")
         await self.bot.on_message(message)
-        self.assertEqual(self.private_replies(message), [HELP_OWNER])
-        message.channel.send.assert_not_awaited()
+        self.assertEqual(self.replies(message), [HELP_OWNER])
 
-    async def test_help_from_the_owner_anywhere_dms_the_owner_guide(self) -> None:
+    async def test_help_from_the_owner_answers_wherever_it_was_typed(self) -> None:
         for channel_cls, channel_id in ((discord.TextChannel, CHAT), (discord.DMChannel, 5)):
             message = self.command("!help", channel_cls=channel_cls, channel_id=channel_id)
             await self.bot.on_message(message)
-            self.assertEqual(self.private_replies(message), [HELP_OWNER])
+            self.assertEqual(self.replies(message), [HELP_OWNER])
             message.reply.assert_not_awaited()
 
     async def test_help_from_others_only_answers_in_a_one_to_one_dm(self) -> None:
@@ -2002,7 +2007,7 @@ class SelfBotTeachingCommandTests(_CommandCase):
         self.assertEqual(runtime.taste_notes.text, "keep it dry")
         on = self.command("!on")
         await bot.on_message(on)
-        self.assertIn("SELFBOT_SCOUT_MODE", self.private_replies(on)[0])  # the scouting commands are still refused
+        self.assertIn("SELFBOT_SCOUT_MODE", self.replies(on)[0])  # the scouting commands are still refused
 
     async def test_teaching_without_stores_says_so(self) -> None:
         self.runtime.taste_notes = None
@@ -2010,7 +2015,7 @@ class SelfBotTeachingCommandTests(_CommandCase):
         for text in ("!taste", "!taste add x here", "!examples", "!tune"):
             message = self.command(text)
             await self.bot.on_message(message)
-            self.assertIn("isn't set up", self.private_replies(message)[0])
+            self.assertIn("isn't set up", self.replies(message)[0])
 
     async def test_help_and_teaching_messages_are_never_buffered_or_converted(self) -> None:
         self.runtime.chats.enable(CHAT)
@@ -2102,6 +2107,12 @@ class SelfBotVoiceTests(_SelfBotCase):
     async def join(self) -> None:
         await self.bot.on_message(self.owner_message("!join"))
         self.assertIsNotNone(self.bot._voice_client)
+        self.join_reply = self.said()
+        self.text_channel.send.reset_mock()  # so a clip assertion sees only the clip
+
+    def said(self, channel=None) -> str:
+        """The last thing the bot said, in the channel the command was typed in."""
+        return (channel or self.text_channel).send.await_args.args[0]
 
     def feed(self, user_id: int = 7, seconds: float = 1.0, value: int = 1000) -> None:
         self.bot._voice.add(user_id, struct.pack("<h", value) * int(seconds * 48000) * 2)
@@ -2112,18 +2123,18 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.assertFalse(self.voice_channel.connect_kwargs["self_deaf"])  # a deafened client is sent no audio
         self.assertTrue(self.voice_channel.connect_kwargs["self_mute"])
         self.assertIsNotNone(self.voice_channel.client.sink)
-        self.assertIn("Listening", self.owner_dm.await_args.args[0])
+        self.assertIn("Listening", self.join_reply)
 
     async def test_join_refuses_when_voice_is_off(self) -> None:
         self.runtime.cfg = read_scout_config({"SELFBOT_SCOUT_MODE": "dry-run", "SELFBOT_OWNER_ID": str(OWNER)})
         await self.bot.on_message(self.owner_message("!join"))
         self.assertIsNone(self.bot._voice_client)
-        self.assertIn("SCOUT_VOICE", self.owner_dm.await_args.args[0])
+        self.assertIn("SCOUT_VOICE", self.said())
 
     async def test_join_refuses_when_the_owner_is_not_in_a_call(self) -> None:
         await self.bot.on_message(self.owner_message("!join", in_voice=False))
         self.assertIsNone(self.bot._voice_client)
-        self.assertIn("Join a voice channel", self.owner_dm.await_args.args[0])
+        self.assertIn("Join a voice channel", self.said())
 
     def group_call(self) -> Mock:
         """A group DM in a call: recipients instead of members, and a connect() that takes no self_mute."""
@@ -2144,7 +2155,7 @@ class SelfBotVoiceTests(_SelfBotCase):
         await self.bot.on_message(message)
         self.assertIs(self.bot._voice_client.channel, group)
         self.assertFalse(group.connect.await_args.kwargs.get("ring", True))  # never ring the whole group
-        self.assertIn("Listening", self.owner_dm.await_args.args[0])
+        self.assertIn("Listening", self.said(group))
 
     async def test_clip_that_works_in_a_group_dm(self) -> None:
         group = self.group_call()
@@ -2152,6 +2163,7 @@ class SelfBotVoiceTests(_SelfBotCase):
         message = self.owner_message("!join")
         message.channel = group
         await self.bot.on_message(message)
+        group.send.reset_mock()  # so the clip assertion sees only the clip
         self.feed(7)
         clip = self.owner_message("clip that")
         clip.channel = group
@@ -2178,7 +2190,7 @@ class SelfBotVoiceTests(_SelfBotCase):
         await self.bot.on_message(message)
         self.assertIs(self.bot._voice_client.channel, dm)
         self.assertFalse(dm.connect.await_args.kwargs.get("ring", True))  # never ring the other person
-        self.assertIn("Listening", self.owner_dm.await_args.args[0])
+        self.assertIn("Listening", self.said(dm))
 
     async def test_clip_aarav_works_in_a_one_to_one_dm(self) -> None:
         # A 1:1 DM has a single recipient, not a recipients list, so the name has to resolve from that.
@@ -2187,6 +2199,7 @@ class SelfBotVoiceTests(_SelfBotCase):
         message = self.owner_message("!join")
         message.channel = dm
         await self.bot.on_message(message)
+        dm.send.reset_mock()  # so the clip assertion sees only the clip
         self.feed(7)
         clip = self.owner_message("clip aarav")
         clip.channel = dm
@@ -2199,14 +2212,14 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.voice_channel.connect = AsyncMock(side_effect=discord.opus.OpusNotLoaded)
         await self.bot.on_message(self.owner_message("!join"))
         self.assertIsNone(self.bot._voice_client)
-        self.assertIn("libopus", self.owner_dm.await_args.args[0])
+        self.assertIn("libopus", self.said())
 
     async def test_join_refuses_without_dave(self) -> None:
         # Discord closes the voice socket with 4017 when the client cannot do the DAVE protocol.
         with patch("selfbot.HAS_DAVE", False):
             await self.bot.on_message(self.owner_message("!join"))
         self.assertIsNone(self.bot._voice_client)
-        self.assertIn("davey", self.owner_dm.await_args.args[0])
+        self.assertIn("davey", self.said())
 
     async def test_a_failed_join_drops_the_half_open_client(self) -> None:
         # py-self registers the voice client before the handshake, so a failure would make the next !join say
@@ -2217,7 +2230,7 @@ class SelfBotVoiceTests(_SelfBotCase):
         with self.assertLogs("bombagif.selfbot", "WARNING"):
             await self.bot.on_message(self.owner_message("!join"))
         half_open.disconnect.assert_awaited_once_with(force=True)
-        self.assertIn("couldn't join", self.owner_dm.await_args.args[0])
+        self.assertIn("couldn't join", self.said())
 
     async def test_leave_disconnects_and_forgets_the_buffer(self) -> None:
         await self.join()
@@ -2226,15 +2239,15 @@ class SelfBotVoiceTests(_SelfBotCase):
         self.assertFalse(client.connected)
         self.assertIsNone(self.bot._voice)
         self.assertIsNone(self.bot._voice_client)
-        self.assertIn("Left", self.owner_dm.await_args.args[0])
+        self.assertIn("Left", self.said())
 
     async def test_voice_reports_what_it_is_listening_to(self) -> None:
         await self.bot.on_message(self.owner_message("!voice"))
-        self.assertIn("not in a call", self.owner_dm.await_args.args[0])
+        self.assertIn("not in a call", self.said())
         await self.join()
         self.feed()
         await self.bot.on_message(self.owner_message("!voice"))
-        self.assertIn("1 voice(s) buffered", self.owner_dm.await_args.args[0])
+        self.assertIn("1 voice(s) buffered", self.said())
 
     async def test_clip_that_posts_the_last_speaker_as_an_ogg(self) -> None:
         await self.join()
