@@ -4,6 +4,7 @@
 #   git clone https://github.com/koryei/Bombagifs.git && cd Bombagifs && ./selfbot-ctl.sh install
 #   ./selfbot-ctl.sh update          # pull the latest main, restart, roll back if it does not stay up
 #   ./selfbot-ctl.sh auto on 15      # optional: check for updates every 15 minutes
+#   ./selfbot-ctl.sh dashboard       # one screen: state, scout, counters, recent activity
 #   ./selfbot-ctl.sh status | logs | doctor | restart | stop | start | version
 #
 # Secrets live in .env (mode 600) and are never printed. data/ (allowlist, taste, opt-outs) is never touched by updates.
@@ -556,6 +557,12 @@ cmd_logs() {
   fi
 }
 
+cmd_dashboard() {  # dashboard [--once]: the at-a-glance screen, live until Ctrl-C
+  [[ -x "${SELFBOT_CTL_PYTHON:-$VENV/bin/python}" ]] || die "The venv is missing: run ./selfbot-ctl.sh install"
+  py "$DIR/dashboard.py" --status "$DIR/data/status.json" --service "$SERVICE" --version "$(version)" \
+    --systemctl "${SELFBOT_CTL_SYSTEMCTL:-systemctl}" "$@"
+}
+
 cmd_doctor() {
   local bad=0
   check() { if "${@:2}" >/dev/null 2>&1; then ok "$1"; else warn "$1: MISSING"; bad=1; fi; }
@@ -586,6 +593,7 @@ Usage: ./selfbot-ctl.sh <command>
   update [--quiet]   fast-forward to the latest commit, restart, roll back if it won't stay up
   auto on [min]|off  check for updates on a timer (default every 15 min)
   update-service     let the bot run !update from Discord (installs the update unit, no timer)
+  dashboard [--once] one screen: state, scout, counters, recent activity (live until Ctrl-C)
   status             service state and version
   logs [-f]          recent logs (follow with -f)
   timezone [zone]    show or set the VM's timezone (clip cards print clock times in it)
@@ -606,6 +614,7 @@ main() {
     update) cmd_update ;;
     update-service) cmd_update_service ;;
     auto) cmd_auto "$@" ;;
+    dashboard) cmd_dashboard "$@" ;;
     status) cmd_status ;;
     timezone) cmd_timezone "$@" ;;
     training) cmd_training "$@" ;;

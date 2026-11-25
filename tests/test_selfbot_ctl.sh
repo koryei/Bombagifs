@@ -389,6 +389,23 @@ assert_contains "$out" "python[1]: INFO    scout      already text" "logs drops 
 assert_contains "$(cat "$FAKE_STATE/calls")" "-u bombagif-selfbot.service" "logs reads the service journal"
 unset SELFBOT_CTL_JOURNALCTL SELFBOT_CTL_PYTHON
 
+# --- dashboard: one command, pointed at the snapshot ------------------------------------------------------------
+DIR="$TEST_ROOT/dash"; mkdir -p "$DIR/data"
+cat >"$FAKE_BIN/python" <<'FAKE'
+#!/usr/bin/env bash
+echo "python $*" >>"$FAKE_STATE/calls"
+FAKE
+chmod +x "$FAKE_BIN/python"
+export SELFBOT_CTL_PYTHON="$FAKE_BIN/python"
+: >"$FAKE_STATE/calls"
+main dashboard --once >/dev/null 2>&1 || fail "dashboard should run"
+calls="$(cat "$FAKE_STATE/calls")"
+assert_contains "$calls" "dashboard.py" "dashboard runs the renderer"
+assert_contains "$calls" "--status $DIR/data/status.json" "dashboard points at the snapshot"
+assert_contains "$calls" "--service bombagif-selfbot" "dashboard reports on the service"
+assert_contains "$calls" "--once" "dashboard passes flags through"
+unset SELFBOT_CTL_PYTHON
+
 # the script itself
 bash -n "$ROOT/selfbot-ctl.sh"
 out="$("$ROOT/selfbot-ctl.sh" help)"; assert_contains "$out" "update" "usage mentions update"
