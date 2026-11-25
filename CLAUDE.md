@@ -31,6 +31,8 @@ Discord bot that converts images/videos (PNG, JPG, AVIF, WEBP, SVG, MP4, WebM) t
   handler, `TerminalUi`, `demo()`); needs `rich` (in `requirements-selfbot.txt`). Preview: `python console_ui.py`.
 - `logfmt.py` — reformats the JSON log lines written before `LOG_FORMAT=text` became the default, so
   `./selfbot-ctl.sh logs` reads the same across the whole journal. Discord-free, stdlib only.
+- `dashboard.py` — the at-a-glance screen (`./selfbot-ctl.sh dashboard`): reads `data/status.json` (written by
+  `selfbot_logic.write_status` every 5 s) and renders state, scout, counters, activity and "needs you". Discord-free.
 - `tests/` — `python3 -m unittest discover -s tests -v` (system env, `discord.py`);
   `.venv-selfbot/bin/python -m unittest tests.test_selfbot_adapter -v` for the self-bot adapter (skipped elsewhere);
   `bash tests/test_installer.sh`.
@@ -90,6 +92,15 @@ now writes `HH:MM:SS LEVEL logger message k=v` (same fields as `JsonFormatter`, 
 for both programs; `LOG_FORMAT=json` brings the JSON back, and `SELFBOT_UI=json` still implies it. `discord.*` INFO
 chatter is hidden in text mode too, as in pretty mode. `selfbot-ctl.sh logs` pipes the journal through `logfmt.py`, so
 entries written before the switch read as text as well.
+
+## v3.3 dashboard
+
+`./selfbot-ctl.sh dashboard` renders one screen from `data/status.json`, which the bot rewrites every 5 s from
+`setup_hook`'s `on_ready` (`SelfBot._write_status_loop`). The snapshot is `selfbot_logic.StatusSnapshot` (counters,
+scout mode/judge/chats/reviews, the activity feed) and never carries tokens or message text. The screen is four
+bands: header (state, account, Zipline, allowlist, uptime), scout + conversions, recent activity in the bot's own
+plain sentences, and "needs you" (derived only: service down, stale snapshot, CAPTCHA pause, judge cannot post,
+reviews waiting). `--once` prints one frame; the live view is `rich.live.Live(screen=True)`.
 
 ## v3 clip scout (branch `v3-scout`)
 

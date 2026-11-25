@@ -170,6 +170,12 @@ and warnings), writes readable coloured log lines above it, and signs off with a
 systemd, and Docker get the same log lines without the colour or the panel. Force a look with `SELFBOT_UI=pretty`,
 `text`, or `json` (default `auto`). Preview it without connecting to Discord: `.venv-selfbot/bin/python console_ui.py`.
 
+**Dashboard.** `./selfbot-ctl.sh dashboard` is one screen, refreshed every two seconds: whether the bot is online,
+what the clip scout is doing, this session's counters, the recent activity feed in plain sentences, and a short
+"needs you" list (a CAPTCHA pause, a judge that cannot post, review DMs waiting, a bot that stopped writing).
+`--once` prints a single frame. It reads `data/status.json`, which the bot rewrites every five seconds, so it never
+parses logs and still works while the bot is stopped (it then says so instead of showing zeros).
+
 **Logs.** One line per event, meant to be read: `23:49:35 INFO    scout      judged a run in chat …`. `discord.*`
 login and gateway-resume chatter is hidden until `LOG_LEVEL=DEBUG`. Set `LOG_FORMAT=json` for machine-readable
 one-line JSON instead (the app and the self-bot both honour it). `./selfbot-ctl.sh logs` reformats the JSON entries
