@@ -185,11 +185,14 @@ make_repos() {
   rm -rf "$TEST_ROOT/origin.git" "$TEST_ROOT/work" "$TEST_ROOT/vm"
   git init -q --bare -b main "$TEST_ROOT/origin.git"
   git clone -q "$TEST_ROOT/origin.git" "$TEST_ROOT/work" 2>/dev/null
+  # a machine-wide commit/push policy hook must not police these throwaway repos
+  git -C "$TEST_ROOT/work" config core.hooksPath ""
   echo "discord.py-self==1" >"$TEST_ROOT/work/requirements-selfbot.txt"
   echo "v1" >"$TEST_ROOT/work/app.txt"
   git -C "$TEST_ROOT/work" add -A && git -C "$TEST_ROOT/work" "${git_ident[@]}" commit -q -m "first"
   git -C "$TEST_ROOT/work" push -q origin HEAD:main 2>/dev/null
   git clone -q "$TEST_ROOT/origin.git" "$TEST_ROOT/vm" 2>/dev/null
+  git -C "$TEST_ROOT/vm" config core.hooksPath ""
   DIR="$TEST_ROOT/vm"
   : >"$FAKE_STATE/calls"; echo active >"$FAKE_STATE/active"; echo 0 >"$FAKE_STATE/restarts"; rm -f "$FAKE_STATE/crash-on-restart"
   export SELFBOT_CTL_SMOKE="true"
@@ -391,6 +394,7 @@ bash -n "$ROOT/selfbot-ctl.sh"
 out="$("$ROOT/selfbot-ctl.sh" help)"; assert_contains "$out" "update" "usage mentions update"
 assert_contains "$out" "training" "usage mentions training"
 assert_contains "$out" "voice" "usage mentions voice"
+assert_contains "$out" "dashboard" "usage mentions dashboard"
 if "$ROOT/selfbot-ctl.sh" nonsense >/dev/null 2>&1; then fail "unknown command must fail"; fi
 
 echo "selfbot-ctl checks passed."
