@@ -115,7 +115,9 @@ from selfbot_logic import (
     Incoming,
     Kind,
     RateLimiter,
+    StatusSnapshot,
     collect_media,
+    counters_from,
     decide,
     env_flag,
     env_flag_off,
@@ -126,6 +128,7 @@ from selfbot_logic import (
     resolve_ui_mode,
     update_notice_text,
     welcome_text,
+    write_status,
 )
 
 
@@ -208,6 +211,9 @@ class SelfBot(discord.Client):
         self.ui = ui  # console_ui.TerminalUi in pretty mode, else None
         self.scout = scout  # None unless the clip scout is configured
         self._scout_task: asyncio.Task[None] | None = None
+        self._status_path = allowlist.path.with_name("status.json")  # what ./selfbot-ctl.sh dashboard reads
+        self._status_task: asyncio.Task[None] | None = None
+        self.status_interval = 5.0  # seconds between snapshots: fresh enough to spot a hang, cheap enough to ignore
         self._manual_gate = ManualGate(scout.cfg) if scout is not None else None
         self.intent: IntentClassifier | None = None  # confirms typo'd "clip that" requests (set when the scout starts)
         if scout is not None and scout.cfg.owner_id is not None:
@@ -282,6 +288,39 @@ class SelfBot(discord.Client):
             info["reminder"] = "Inception: turn OFF 'Improve the model for everyone' in its API settings"
         return info
 
+    def _status_snapshot(self) -> StatusSnapshot:
+        """The facts ``./selfbot-ctl.sh dashboard`` shows, as this process sees them right now."""
+        runtime = self._scouting()
+        judge = runtime.judge if runtime is not None else None
+        scout = runtime.scout if runtime is not None else None
+        return StatusSnapshot(
+            at=time.time(),
+            state=self.ui_status(),
+            account=str(self.user) if self.user is not None else "not connected",
+            zipline=urlparse(self.config.zipline_url).netloc,
+            uptime_s=int(max(0.0, time.time() - self.stats.started_at)),
+            allowlist=len(self.allowlist),
+            scout={
+                "mode": runtime.cfg.mode if runtime is not None else "off",
+                "judge": judge.status if judge is not None else "starting",
+                "can_post": bool(judge is not None and judge.can_post),
+                "chats": len(runtime.chats.list()) if runtime is not None else 0,
+                "reviews_waiting": len(scout.reviews) if scout is not None else 0,
+                "manual": bool(runtime.cfg.manual) if runtime is not None else False,
+            },
+            counters=counters_from(self.stats),
+            activity=tuple(self.stats.activity),
+        )
+
+    async def _write_status_loop(self) -> None:
+        """Keep ``data/status.json`` fresh for the dashboard. A failed write is logged and retried, never fatal."""
+        while True:
+            try:
+                write_status(self._status_path, self._status_snapshot())
+            except OSError:
+                logger.warning("Could not write the dashboard snapshot to %s", self._status_path, exc_info=True)
+            await asyncio.sleep(self.status_interval)
+
     def _boot_info(self) -> dict[str, str]:
         """Facts for the boot banner. Never includes tokens."""
         return {**self._boot_basics(), **self._scout_info()}
@@ -303,6 +342,8 @@ class SelfBot(discord.Client):
 
     async def on_ready(self) -> None:
         self.logger.info("Self-bot connected", extra={"user_id": self.user.id if self.user else None})
+        if self._status_task is None:  # the dashboard describes a connected bot, so start it here, once
+            self._status_task = asyncio.create_task(self._write_status_loop(), name="status-snapshot")
         if self.ui is not None and not self._booted:
             self._booted = True  # reconnects fire on_ready again; the banner is printed once
             self.ui.show_boot(self._boot_info())
@@ -1540,6 +1581,10 @@ class SelfBot(discord.Client):
                 self._scout_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._scout_task
+            if self._status_task is not None:
+                self._status_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._status_task
             await self._voice_leave()
             if self.http_session is not None and not self.http_session.closed:
                 await self.http_session.close()

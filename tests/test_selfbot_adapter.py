@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import json
 import struct
@@ -1672,6 +1673,34 @@ class SelfBotScoutUiTests(_SelfBotCase):
         bot = SelfBot(SETTINGS, self.allowlist, scout=make_runtime(Path(self._tmp.name) / "nojudge", mode="on"))
         self.addAsyncCleanup(bot.close)
         self.assertEqual(bot.scout_view(), ("on", "starting", False))
+
+    async def test_status_snapshot_describes_the_bot_for_the_dashboard(self) -> None:
+        bot = self.bot_with("dry-run")
+        bot.stats.scout_screened = 41
+        bot.stats.clips_posted = 3
+        snapshot = bot._status_snapshot().to_dict()
+        self.assertEqual(snapshot["state"], "connecting")  # not logged in yet
+        self.assertEqual(snapshot["scout"]["mode"], "dry-run")
+        self.assertEqual(snapshot["scout"]["chats"], 1)  # make_runtime enables one chat
+        self.assertEqual((snapshot["counters"]["judged"], snapshot["counters"]["posted"]), (41, 3))
+        self.assertEqual(snapshot["zipline"], "z.example")
+        self.assertNotIn("token", json.dumps(snapshot).lower())
+
+    async def test_the_status_loop_writes_the_file_the_dashboard_reads(self) -> None:
+        bot = self.bot_with("dry-run")
+        bot.status_interval = 0.01
+        task = asyncio.create_task(bot._write_status_loop())
+        try:
+            for _ in range(100):
+                if bot._status_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self.assertTrue(bot._status_path.exists())
+        self.assertEqual(json.loads(bot._status_path.read_text())["scout"]["mode"], "dry-run")
 
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")

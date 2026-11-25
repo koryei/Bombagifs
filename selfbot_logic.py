@@ -585,3 +585,55 @@ class BotStats:
         if minutes:
             return f"{minutes}m {secs:02d}s"
         return f"{secs}s"
+
+
+def counters_from(stats: BotStats) -> dict[str, int]:
+    """The counters the dashboard shows, named the way the screen labels them."""
+    return {
+        "converted": stats.conversions_ok,
+        "failed": stats.conversions_failed,
+        "triggers": stats.triggers,
+        "rate_limited": stats.rate_limited,
+        "new_users": stats.registered,
+        "friends": stats.friends_accepted,
+        "judged": stats.scout_screened,
+        "passed": stats.scout_passed,
+        "posted": stats.clips_posted,
+        "rejected": stats.scout_rejected,
+        "dry_run_hits": stats.dry_run_hits,
+        "deleted_rescued": stats.deleted_rescued,
+    }
+
+
+@dataclass(frozen=True)
+class StatusSnapshot:
+    """What the bot tells the dashboard about itself. Never tokens, never message text."""
+
+    at: float
+    state: str  # connecting | online | paused
+    account: str
+    zipline: str
+    uptime_s: int
+    allowlist: int
+    scout: Mapping[str, Any]  # mode, judge, can_post, chats, reviews_waiting, manual
+    counters: Mapping[str, int]
+    activity: tuple[ActivityEntry, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """The JSON shape ``dashboard.py`` reads."""
+        return {
+            "at": self.at,
+            "state": self.state,
+            "account": self.account,
+            "zipline": self.zipline,
+            "uptime_s": self.uptime_s,
+            "allowlist": self.allowlist,
+            "scout": dict(self.scout),
+            "counters": dict(self.counters),
+            "activity": [{"at": entry.at, "level": entry.level, "text": entry.text} for entry in self.activity],
+        }
+
+
+def write_status(path: str | os.PathLike[str], snapshot: StatusSnapshot) -> None:
+    """Write the dashboard snapshot atomically (mode 600). A full disk must not stop the bot."""
+    write_private_json(Path(path), snapshot.to_dict())
