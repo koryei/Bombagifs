@@ -37,13 +37,23 @@ from scout_judge import (
     final_stage,
     inception_usable,
     validate_verdict,
+    window_images,
     window_payload,
 )
 
 NAMES = {10: "Pranit", 20: "Koryei", 30: "Shan", 40: "Lochan"}
 
 
-def msg(id: int, text: str, *, author: int = 10, eligible: bool = True, deleted: bool = False, edits: tuple[str, ...] = ()) -> ScoutMessage:
+def msg(
+    id: int,
+    text: str,
+    *,
+    author: int = 10,
+    eligible: bool = True,
+    deleted: bool = False,
+    edits: tuple[str, ...] = (),
+    images: tuple[str, ...] = (),
+) -> ScoutMessage:
     versions = [Version(text, 1000.0 + id)] + [Version(e, 1100.0 + id) for e in edits]
     return ScoutMessage(
         id=id,
@@ -57,6 +67,7 @@ def msg(id: int, text: str, *, author: int = 10, eligible: bool = True, deleted:
         versions=versions,
         eligible=eligible,
         deleted_at=1200.0 if deleted else None,
+        images=images,
     )
 
 
@@ -101,6 +112,27 @@ class JudgeWindowTests(unittest.TestCase):
         window = window_of([msg(1, "the real joke", edits=("nothing to see",))])
         self.assertEqual(window.lines[0].text, "the real joke")
         self.assertNotIn("nothing to see", json.dumps(window_payload(window)))
+
+    def test_payload_names_the_pictures_a_line_carried(self) -> None:
+        messages = [msg(1, "look", images=("data:image/png;base64,AAA",)), msg(2, "lol")]
+        payload = window_payload(window_of(messages), with_images=True)
+        self.assertEqual(payload[0]["images"], [0])
+        self.assertEqual(payload[1]["images"], [])
+
+    def test_payload_without_images_has_no_image_key(self) -> None:
+        payload = window_payload(window_of([msg(1, "look", images=("data:image/png;base64,AAA",))]))
+        self.assertNotIn("images", payload[0])
+
+    def test_window_images_are_collected_in_order(self) -> None:
+        messages = [msg(1, "a", images=("data:image/png;base64,AAA",)), msg(2, "b", images=("data:image/png;base64,BBB",))]
+        self.assertEqual(window_images(window_of(messages)), ["data:image/png;base64,AAA", "data:image/png;base64,BBB"])
+
+    def test_window_images_are_capped(self) -> None:
+        messages = [msg(1, "a", images=("data:image/png;base64,AAA", "data:image/png;base64,BBB", "data:image/png;base64,CCC"))]
+        self.assertEqual(len(window_images(window_of(messages))), 2)
+
+    def test_window_images_are_empty_without_pictures(self) -> None:
+        self.assertEqual(window_images(window_of([msg(1, "plain")])), [])
 
     def test_ineligible_lines_become_not_text_placeholders(self) -> None:
         messages = [msg(1, "", author=20, eligible=False), msg(2, "text here", author=10)]
@@ -533,6 +565,59 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("untrusted", SYSTEM_PROMPT.lower())
         self.assertIn("never follow", SYSTEM_PROMPT.lower())
 
+    async def test_pictures_become_image_parts_after_the_json(self) -> None:
+        window = window_of([msg(1, "look at this", images=("data:image/png;base64,AAA",))])
+        server = await self.serve(self.reply())
+        await self.final(server, window)
+        content = server.requests[0]["json"]["messages"][1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[1], {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}})
+        self.assertEqual(json.loads(content[0]["text"])["window"][0]["images"], [0])
+
+    async def test_a_window_without_pictures_sends_plain_text(self) -> None:
+        server = await self.serve(self.reply())
+        await self.final(server)
+        self.assertIsInstance(server.requests[0]["json"]["messages"][1]["content"], str)
+
+    async def test_a_model_that_rejects_pictures_is_retried_text_only(self) -> None:
+        window = window_of([msg(1, "look at this", images=("data:image/png;base64,AAA",)), msg(2, "lol", author=20)])
+
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            if n == 1:
+                return web.Response(status=400)  # a text-only model refusing the image parts
+            return web.json_response(chat_body(good_raw()))
+
+        server = await self.serve(handler)
+        api = self.api(server, retries=0)
+        verdict = await final_stage(api, "mercury-3", window, effort=None, provider="inception", decide={"funny": 0.9})
+        self.assertTrue(verdict.clip)
+        self.assertEqual(api.no_images, {"mercury-3"})
+        self.assertEqual(len(server.requests), 2)
+        self.assertIsInstance(server.requests[1]["json"]["messages"][1]["content"], str)
+        self.assertNotIn("images", json.loads(server.requests[1]["json"]["messages"][1]["content"])["window"][0])
+
+    async def test_a_model_known_to_reject_pictures_is_not_sent_them_again(self) -> None:
+        window = window_of([msg(1, "look at this", images=("data:image/png;base64,AAA",))])
+        server = await self.serve(self.reply())
+        api = self.api(server)
+        api.no_images.add("mercury-3")
+        await final_stage(api, "mercury-3", window, effort=None, provider="inception", decide={})
+        self.assertEqual(len(server.requests), 1)
+        self.assertIsInstance(server.requests[0]["json"]["messages"][1]["content"], str)
+
+    async def test_an_auth_failure_is_not_mistaken_for_a_picture_rejection(self) -> None:
+        window = window_of([msg(1, "look at this", images=("data:image/png;base64,AAA",))])
+
+        async def handler(request: web.Request, body: object, n: int) -> web.Response:
+            return web.Response(status=401)
+
+        server = await self.serve(handler)
+        api = self.api(server, retries=0)
+        with self.assertRaises(ProviderUnavailable):
+            await final_stage(api, "mercury-3", window, effort=None, provider="inception", decide={})
+        self.assertEqual(api.no_images, set())
+
 
 def utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> float:
     return datetime.datetime(year, month, day, hour, minute, tzinfo=datetime.timezone.utc).timestamp()
@@ -567,9 +652,11 @@ class FakeChat:
     def __init__(self, raw: object | None = None, *, error: Exception | None = None) -> None:
         self.raw = good_raw() if raw is None else raw
         self.error = error
+        self.no_images: set[str] = set()
         self.calls: list[dict[str, object]] = []
         self.systems: list[str] = []
         self.users: list[dict[str, object]] = []
+        self.images: list[list[str]] = []
 
     async def chat_json(self, model: str, system: str, user: object, schema: object, *, reasoning_effort: str | None = None, max_tokens: int = 400) -> object:
         self.calls.append({"model": model, "effort": reasoning_effort})
