@@ -56,6 +56,10 @@ def install_dave_decrypt(client: Any) -> bool:
         user_id = client._get_id_from_ssrc(packet.ssrc)
         if user_id is None:
             return data
+        can_passthrough = getattr(session, "can_passthrough", None)
+        if can_passthrough is not None and can_passthrough(user_id):
+            # The group is still transitioning, so this frame is plaintext and decrypting it would raise.
+            return data
         try:
             return session.decrypt(user_id, media_type, data)
         except Exception:
@@ -167,22 +171,47 @@ async def _private_hook(ws: Any, msg: dict, client: Any) -> None:
         client.dispatch("voice_member_disconnect", _private_member(client, user_id), ssrc)
 
 
+def _wrap_hook(original: Any) -> Any:
+    """A hook that hands private calls to ``_private_hook`` and everything else to whatever was there before."""
+
+    async def hook(ws: Any, msg: dict) -> None:
+        client = ws._connection.voice_client
+        if getattr(client, "guild", None) is not None:
+            if original is not None:
+                return await original(ws, msg)
+            return None
+        return await _private_hook(ws, msg, client)
+
+    hook._bombagif_private = True  # type: ignore[attr-defined]
+    return hook
+
+
+def _patch_connection_state() -> bool:
+    """The hook is captured when the voice client is built, so wrap it there instead of at the module global."""
+    client_cls = getattr(vr_client, "VoiceRecvClient", None)
+    original = getattr(client_cls, "create_connection_state", None)
+    if original is None or getattr(original, "_bombagif_private", False):
+        return original is not None
+
+    def create_connection_state(self: Any) -> Any:
+        state = original(self)
+        state.hook = _wrap_hook(getattr(state, "hook", None))
+        return state
+
+    create_connection_state._bombagif_private = True  # type: ignore[attr-defined]
+    client_cls.create_connection_state = create_connection_state
+    return True
+
+
 def install_private_call_hook() -> bool:
     """Let voice_recv handle a private call. Returns False when voice receive is not installed."""
     if vr_client is None:
         return False
     _patch_lookup_member()
     _patch_decoder()
+    if _patch_connection_state():
+        return True
     if getattr(vr_client.hook, "_bombagif_private", False):
         return True
-    original = vr_client.hook
-
-    async def hook(ws: Any, msg: dict) -> None:
-        client = ws._connection.voice_client
-        if getattr(client, "guild", None) is not None:
-            return await original(ws, msg)
-        return await _private_hook(ws, msg, client)
-
-    hook._bombagif_private = True  # type: ignore[attr-defined]
-    vr_client.hook = hook
+    vr_client.hook = _wrap_hook(vr_client.hook)
     return True

@@ -26,10 +26,14 @@ FAKE_DAVEY = SimpleNamespace(MediaType=SimpleNamespace(audio="audio"))
 class FakeSession:
     """Stands in for davey.DaveSession: records what it was asked to decrypt."""
 
-    def __init__(self, *, ready: bool = True, fail: bool = False) -> None:
+    def __init__(self, *, ready: bool = True, fail: bool = False, passthrough: bool = False) -> None:
         self.ready = ready
         self.fail = fail
+        self.passthrough = passthrough
         self.calls: list[tuple] = []
+
+    def can_passthrough(self, user_id):
+        return self.passthrough
 
     def decrypt(self, user_id, media_type, packet):
         self.calls.append((user_id, media_type, packet))
@@ -73,6 +77,15 @@ class InstallDaveDecryptTests(unittest.TestCase):
     def test_passes_through_while_the_group_is_forming(self) -> None:
         # Discord sends plaintext until the call's DAVE group is ready, so decrypting then would corrupt it.
         session = FakeSession(ready=False)
+        client, decryptor = make_client(session=session, ssrc_to_id={42: 7})
+        install_dave_decrypt(client)
+        self.assertEqual(decryptor.decrypt_rtp(SimpleNamespace(ssrc=42)), b"cipher")
+        self.assertEqual(session.calls, [])
+
+    def test_passes_through_while_the_group_is_transitioning(self) -> None:
+        # ready is True but this user's decryptor is still in passthrough mode, so the frame is plaintext and
+        # decrypting it would raise.
+        session = FakeSession(passthrough=True)
         client, decryptor = make_client(session=session, ssrc_to_id={42: 7})
         install_dave_decrypt(client)
         self.assertEqual(decryptor.decrypt_rtp(SimpleNamespace(ssrc=42)), b"cipher")
@@ -301,14 +314,30 @@ class PrivateCallHookTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(scout_voice_recv, "vr_client", None):
             self.assertFalse(install_private_call_hook())
 
-    def test_install_wraps_the_hook_once(self) -> None:
+    def test_install_wraps_the_connection_state_hook_once(self) -> None:
+        # The hook is captured when the voice client is built, so the module global is not enough.
         async def original(ws, msg):
             return None
 
-        fake = SimpleNamespace(hook=original)
+        class VoiceRecvClient:
+            def create_connection_state(self):
+                return SimpleNamespace(hook=original)
+
+        fake = SimpleNamespace(VoiceRecvClient=VoiceRecvClient, hook=original)
         with patch.object(scout_voice_recv, "vr_client", fake):
             self.assertTrue(install_private_call_hook())
             self.assertTrue(install_private_call_hook())  # idempotent: never wrap our own wrapper
+        state = VoiceRecvClient().create_connection_state()
+        self.assertIsNot(state.hook, original)
+        self.assertTrue(getattr(state.hook, "_bombagif_private", False))
+
+    def test_install_falls_back_to_the_module_hook(self) -> None:
+        async def original(ws, msg):
+            return None
+
+        fake = SimpleNamespace(hook=original)  # no VoiceRecvClient to wrap
+        with patch.object(scout_voice_recv, "vr_client", fake):
+            self.assertTrue(install_private_call_hook())
         self.assertIsNot(fake.hook, original)
         self.assertTrue(getattr(fake.hook, "_bombagif_private", False))
 
@@ -324,6 +353,18 @@ class PrivateCallHookTests(unittest.IsolatedAsyncioTestCase):
         ws = SimpleNamespace(_connection=SimpleNamespace(voice_client=SimpleNamespace(guild=object())))
         await fake.hook(ws, {"op": 2, "d": {"ssrc": 1}})
         self.assertEqual(seen, [{"op": 2, "d": {"ssrc": 1}}])
+
+    async def test_the_wrapped_hook_handles_a_private_call(self) -> None:
+        async def original(ws, msg):
+            raise AssertionError("a private call must not reach the guild hook")
+
+        fake = SimpleNamespace(hook=original)
+        with patch.object(scout_voice_recv, "vr_client", fake):
+            install_private_call_hook()
+        client = FakeRecvClient()
+        ws = SimpleNamespace(_connection=SimpleNamespace(voice_client=client), secret_key=b"")
+        await fake.hook(ws, {"op": 2, "d": {"ssrc": 55}})
+        self.assertEqual(client.ssrcs, {55: 999})
 
 
 if __name__ == "__main__":
