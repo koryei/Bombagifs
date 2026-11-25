@@ -239,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     status_path = Path(args.status)
     console: Console = create_console()
     frame = lambda: _frame(status_path, service=args.service, version=args.version, systemctl=args.systemctl)  # noqa: E731
-    if args.once:
+    if args.once or not console.is_terminal:  # a pipe gets one frame, not an empty alternate screen
         console.print(frame())
         return 0
     try:

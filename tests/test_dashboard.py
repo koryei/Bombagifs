@@ -149,6 +149,16 @@ class ServiceStateTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def test_a_pipe_gets_one_frame_instead_of_an_empty_screen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "status.json"
+            path.write_text(json.dumps(_snapshot()))
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                code = dashboard.main(["--status", str(path), "--systemctl", "/nonexistent"])
+        self.assertEqual(code, 0)
+        self.assertIn("Clip scout", printed.getvalue())
+
     def test_once_prints_one_frame_and_exits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "status.json"
