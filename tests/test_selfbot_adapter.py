@@ -3093,6 +3093,12 @@ class SelfBotScoutImageTests(_SelfBotCase):
         self.assertEqual(len(found.images), 1)
         self.assertTrue(found.images[0].startswith("data:image/png;base64,"))
 
+    async def test_nothing_is_fetched_before_the_http_session_exists(self) -> None:
+        message = self.buffered_image_message()
+        self.assertIsNone(self.bot.http_session)
+        await self.bot._attach_images(message, self.runtime, ["https://cdn.discordapp.com/a.png"])
+        self.assertEqual(self.runtime.buffer.get(CHAT, message.id).images, ())
+
     async def test_a_failed_download_leaves_the_message_without_pictures(self) -> None:
         message = self.buffered_image_message()
         self.bot.http_session = FakeImageSession(FakeImageResponse(status=404))

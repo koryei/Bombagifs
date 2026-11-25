@@ -493,6 +493,8 @@ class SelfBot(discord.Client):
 
     async def _attach_images(self, message: discord.Message, runtime: ScoutRuntime, urls: Sequence[str]) -> None:
         """Download a message's pictures so the judge can see them. A failure just means no picture."""
+        if self.http_session is None:
+            return
         images: list[str] = []
         for url in urls:
             try:
