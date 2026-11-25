@@ -9,6 +9,7 @@ WARNING: automating a user account violates Discord's Terms of Service. Use an a
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import io
 import json
@@ -87,7 +88,7 @@ from scout_judge import Verdict, build_judge_chain
 from scout_manual import ManualGate
 from scout_stores import ClipRecord
 from scout_taste import NOTES_MAX_CHARS, TasteBook, tune_report
-from scout_discord import chat_is_scoutable, message_is_clippable, to_scout_message
+from scout_discord import chat_is_scoutable, image_urls, message_is_clippable, to_scout_message
 from scout_trigger import Trigger, parse_trigger
 from scout_voice import (
     DEFAULT_CLIP_S,
@@ -132,6 +133,7 @@ logger = logging.getLogger("bombagif.selfbot")
 _MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
 UPDATE_NOTICE_NAME = "update-notice.json"  # written by selfbot-ctl.sh update, read once on boot
 UPDATE_UNIT = f"{os.environ.get('SELFBOT_SERVICE', 'bombagif-selfbot')}-update.service"  # runs the update outside our cgroup
+MAX_IMAGE_BYTES = 400_000  # a picture bigger than this is not worth the judge request
 REVIEW_DM_LIMIT = 1800  # a batch DM is split before Discord's 2000-character limit
 
 
@@ -213,6 +215,7 @@ class SelfBot(discord.Client):
         self._help_user_cooldown = Cooldown(3600.0)  # a stranger gets the help text at most once an hour...
         self._help_chat_cooldown = Cooldown(600.0)  # ...and a chat at most once every 10 minutes
         self._clip_message_ids: set[int] = set()  # clips we posted, so a reply of `stop` to one can be recognised
+        self._image_tasks: set[asyncio.Task] = set()  # in-flight picture downloads, kept so they are not collected
         self._voice: VoiceBuffer | None = None  # the rolling call buffer, while joined
         self._voice_client: Any | None = None
         self._voice_channel_id: int | None = None  # where a wake-word clip is posted
@@ -480,6 +483,31 @@ class SelfBot(discord.Client):
         if not chat_is_scoutable(channel) or not runtime.chats.enabled(channel.id):
             return
         runtime.buffer.add(to_scout_message(message, eligible=message_is_clippable(message)))
+        if runtime.cfg.images:
+            urls = image_urls(message)
+            if urls:
+                # Downloading must not hold up the message path, and the judge runs seconds later anyway.
+                task = asyncio.create_task(self._attach_images(message, runtime, urls), name="scout-images")
+                self._image_tasks.add(task)
+                task.add_done_callback(self._image_tasks.discard)
+
+    async def _attach_images(self, message: discord.Message, runtime: ScoutRuntime, urls: Sequence[str]) -> None:
+        """Download a message's pictures so the judge can see them. A failure just means no picture."""
+        images: list[str] = []
+        for url in urls:
+            try:
+                async with self.http_session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status != 200:
+                        continue
+                    data = await response.content.read(MAX_IMAGE_BYTES + 1)
+                    kind = str(response.headers.get("Content-Type", "")).split(";")[0].strip()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+            if len(data) > MAX_IMAGE_BYTES or not kind.startswith("image/"):
+                continue
+            images.append(f"data:{kind};base64,{base64.b64encode(data).decode('ascii')}")
+        if images:
+            runtime.buffer.attach_images(message.channel.id, message.id, images)
 
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         runtime = self._scouting()

@@ -133,6 +133,7 @@ class ScoutConfigTests(unittest.TestCase):
                 "SCOUT_LLM_API_KEY": "lk",
                 "SCOUT_LLM_MODEL": "m",
                 "SCOUT_SCREEN": "signals",
+                "SCOUT_IMAGES": "off",
                 "SCOUT_DECIDE_FUNNY_MIN": "0.9",
                 "SCOUT_DECIDE_STANDALONE_MIN": "0.7",
                 "SCOUT_DECIDE_SENSITIVE_MAX": "0.2",
@@ -154,6 +155,7 @@ class ScoutConfigTests(unittest.TestCase):
         self.assertEqual((cfg.mode, cfg.owner_id, cfg.seed_chats), ("dry-run", 42, frozenset({1, 2, 3})))
         self.assertEqual((cfg.judge, cfg.inception_api_key, cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model), ("openai", "ik", "https://llm.example", "lk", "m"))
         self.assertEqual(cfg.screen, "signals")
+        self.assertFalse(cfg.images)
         self.assertEqual((cfg.decide_funny_min, cfg.decide_standalone_min, cfg.decide_sensitive_max), (0.9, 0.7, 0.2))
         self.assertEqual((cfg.judge_funny_min, cfg.deleted_funny_min, cfg.deleted_sensitive_max), (7.5, 9.5, 0.01))
         self.assertEqual(cfg.clip_deleted, "owner")
@@ -166,12 +168,18 @@ class ScoutConfigTests(unittest.TestCase):
             ("SELFBOT_SCOUT_MODE", "maybe"),
             ("SCOUT_JUDGE", "gpt"),
             ("SCOUT_SCREEN", "some"),
+            ("SCOUT_IMAGES", "maybe"),
             ("SELFBOT_CLIP_DELETED", "yes"),
             ("CLIP_THEME", "neon"),
         ):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(RuntimeError, name):
                     read_scout_config({name: value})
+
+    def test_pictures_are_on_unless_turned_off(self) -> None:
+        self.assertTrue(read_scout_config({}).images)
+        self.assertTrue(read_scout_config({"SCOUT_IMAGES": "on"}).images)
+        self.assertFalse(read_scout_config({"SCOUT_IMAGES": "off"}).images)
 
     def test_modes_are_case_insensitive(self) -> None:
         self.assertEqual(read_scout_config({"SELFBOT_SCOUT_MODE": " DRY-RUN "}).mode, "dry-run")

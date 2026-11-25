@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 
@@ -54,6 +54,7 @@ class ScoutMessage:
     laugh_replies: int = 0
     screened: bool = False
     clipped: bool = False
+    images: tuple[str, ...] = ()  # data URLs of the pictures on this message, so the judge can see them
 
     @property
     def original(self) -> str:
@@ -141,6 +142,12 @@ class ScoutBuffer:
         found = self.get(chat_id, message_id)
         if found is not None and emoji in LAUGH_EMOJI:
             found.laugh_reactions = max(0, found.laugh_reactions + (1 if added else -1))
+
+    def attach_images(self, chat_id: int, message_id: int, images: Sequence[str]) -> None:
+        """Give a buffered message its pictures (downloaded after it was stored; unknown messages are ignored)."""
+        found = self.get(chat_id, message_id)
+        if found is not None and images:
+            found.images = tuple(images)
 
     def edit(self, chat_id: int, message_id: int, content: str, at: float | None = None) -> None:
         """Record a new version of a buffered message (unknown messages are ignored)."""

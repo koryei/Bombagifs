@@ -323,5 +323,30 @@ class RunAndWindowTests(unittest.TestCase):
         self.assertFalse(window[0].eligible)
 
 
+class ImageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.buffer = ScoutBuffer(max_age_s=900, max_per_chat=50, is_opted_out=lambda user_id: False, clock=FakeClock())
+        self.buffer.add(msg(1, "look at this"))
+
+    def test_attach_images_gives_a_buffered_message_its_pictures(self) -> None:
+        self.buffer.attach_images(1, 1, ["data:image/png;base64,AAA"])
+        self.assertEqual(self.buffer.get(1, 1).images, ("data:image/png;base64,AAA",))
+
+    def test_attach_images_ignores_an_unknown_message(self) -> None:
+        self.buffer.attach_images(1, 99, ["data:image/png;base64,AAA"])
+        self.assertEqual(self.buffer.get(1, 1).images, ())
+
+    def test_attach_images_ignores_an_unknown_chat(self) -> None:
+        self.buffer.attach_images(2, 1, ["data:image/png;base64,AAA"])
+        self.assertEqual(self.buffer.get(1, 1).images, ())
+
+    def test_attach_images_with_nothing_keeps_the_message_bare(self) -> None:
+        self.buffer.attach_images(1, 1, [])
+        self.assertEqual(self.buffer.get(1, 1).images, ())
+
+    def test_a_message_starts_with_no_pictures(self) -> None:
+        self.assertEqual(self.buffer.get(1, 1).images, ())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ class ScoutConfig:
     llm_api_key: str = field(default="", repr=False)
     llm_model: str = ""
     screen: Screen = "all"
+    images: bool = True
     decide_funny_min: float = 0.85
     decide_standalone_min: float = 0.80
     decide_sensitive_max: float = 0.10
@@ -158,6 +159,7 @@ def read_scout_config(env: Mapping[str, str]) -> ScoutConfig:
         llm_api_key=_text(env, "SCOUT_LLM_API_KEY"),
         llm_model=_text(env, "SCOUT_LLM_MODEL"),
         screen=_choice(env, "SCOUT_SCREEN", ("all", "signals"), "all"),  # type: ignore[arg-type]
+        images=_choice(env, "SCOUT_IMAGES", ("on", "off"), "on") == "on",
         decide_funny_min=_number(env, "SCOUT_DECIDE_FUNNY_MIN", 0.85, 0.0, 1.0),
         decide_standalone_min=_number(env, "SCOUT_DECIDE_STANDALONE_MIN", 0.80, 0.0, 1.0),
         decide_sensitive_max=_number(env, "SCOUT_DECIDE_SENSITIVE_MAX", 0.10, 0.0, 1.0),

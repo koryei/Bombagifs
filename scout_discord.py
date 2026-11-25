@@ -30,6 +30,35 @@ def message_is_clippable(message: discord.Message) -> bool:
     )
 
 
+MAX_IMAGES = 2  # a judge request carries at most this many pictures
+IMAGE_EDGE = 512  # ask the CDN for a small copy: the judge does not need the full-size picture
+
+
+def _small(url: str) -> str:
+    """A CDN URL resized down, so a 4K screenshot does not become a 6 MB request."""
+    if "cdn.discordapp.com" not in url and "media.discordapp.net" not in url:
+        return url
+    return f"{url}{'&' if '?' in url else '?'}width={IMAGE_EDGE}&height={IMAGE_EDGE}"
+
+
+def image_urls(message: discord.Message) -> list[str]:
+    """The pictures on a message (attachments, embed images, stickers), capped and resized."""
+    found: list[str] = []
+    for attachment in getattr(message, "attachments", ()) or ():
+        if str(getattr(attachment, "content_type", "") or "").startswith("image/"):
+            found.append(_small(str(attachment.url)))
+    for embed in getattr(message, "embeds", ()) or ():
+        for part in (getattr(embed, "image", None), getattr(embed, "thumbnail", None)):
+            url = getattr(part, "url", None)
+            if url:
+                found.append(_small(str(url)))
+    for sticker in getattr(message, "stickers", ()) or ():
+        url = getattr(sticker, "url", None)
+        if url:
+            found.append(_small(str(url)))
+    return found[:MAX_IMAGES]
+
+
 def _avatar_url(author: object) -> str:
     avatar = getattr(author, "display_avatar", None)
     if avatar is None:

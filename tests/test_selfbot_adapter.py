@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import struct
@@ -11,6 +12,8 @@ from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+
+import aiohttp
 
 from bombagif_core import Settings, UserFacingError
 from scout import ANNOUNCE_OFF, ANNOUNCE_ON, HELP_OWNER, HELP_USER, ClipPlan, ReviewItem, ScoutRuntime, format_clip_notice
@@ -3000,6 +3003,121 @@ class SelfBotTriggerTests(_SelfBotCase):
         request = self.say("clkip that", to=self.target("look", attachments=[attachment()]))
         await self.bot.on_message(request)
         self.convert.assert_awaited_once()
+
+
+class FakeImageResponse:
+    """Just enough of an aiohttp response for the picture download."""
+
+    def __init__(self, *, status: int = 200, body: bytes = b"\x89PNG", content_type: str = "image/png") -> None:
+        self.status = status
+        self.headers = {"Content-Type": content_type}
+        self.content = SimpleNamespace(read=AsyncMock(return_value=body))
+
+    async def __aenter__(self) -> "FakeImageResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class FakeImageSession:
+    """Records the URLs asked for and hands back one canned response (or raises)."""
+
+    def __init__(self, response: object | None = None, *, error: Exception | None = None) -> None:
+        self.response = response if response is not None else FakeImageResponse()
+        self.error = error
+        self.urls: list[str] = []
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def get(self, url: str, **kwargs: object) -> object:
+        self.urls.append(url)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+@unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
+class SelfBotScoutImageTests(_SelfBotCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        from selfbot import SelfBot
+
+        self.runtime = make_runtime(Path(self._tmp.name))
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.addAsyncCleanup(self.bot.close)
+
+    def image_message(self, url: str = "https://cdn.discordapp.com/a.png") -> SimpleNamespace:
+        attachment = SimpleNamespace(url=url, content_type="image/png")
+        return make_message(channel_cls=discord.TextChannel, content="look at this", attachments=[attachment])
+
+    def buffered_image_message(self) -> SimpleNamespace:
+        """A message already in the buffer, as it would be by the time its pictures finish downloading."""
+        message = self.image_message()
+        self.runtime.buffer.add(smsg(message.id, "look at this"))
+        return message
+
+    async def test_an_image_message_starts_a_picture_download(self) -> None:
+        message = self.image_message()
+        with patch.object(self.bot, "_attach_images", AsyncMock()) as attach:
+            await self.bot.on_message(message)
+            await asyncio.gather(*list(self.bot._image_tasks))
+        attach.assert_awaited_once()
+        self.assertEqual(attach.await_args.args[0], message)
+        self.assertEqual(len(attach.await_args.args[2]), 1)
+
+    async def test_a_text_only_message_starts_no_download(self) -> None:
+        with patch.object(self.bot, "_attach_images", AsyncMock()) as attach:
+            await self.bot.on_message(make_message(channel_cls=discord.TextChannel, content="just words"))
+            await asyncio.gather(*list(self.bot._image_tasks))
+        attach.assert_not_awaited()
+
+    async def test_pictures_are_not_downloaded_when_turned_off(self) -> None:
+        from selfbot import SelfBot
+
+        self.runtime = make_runtime(Path(self._tmp.name), SCOUT_IMAGES="off")
+        self.bot = SelfBot(SETTINGS, self.allowlist, scout=self.runtime)
+        self.addAsyncCleanup(self.bot.close)
+        with patch.object(self.bot, "_attach_images", AsyncMock()) as attach:
+            await self.bot.on_message(self.image_message())
+            await asyncio.gather(*list(self.bot._image_tasks))
+        attach.assert_not_awaited()
+
+    async def test_a_downloaded_picture_is_attached_to_the_buffered_message(self) -> None:
+        message = self.buffered_image_message()
+        self.bot.http_session = FakeImageSession(FakeImageResponse(body=b"\x89PNG"))
+        await self.bot._attach_images(message, self.runtime, ["https://cdn.discordapp.com/a.png"])
+        found = self.runtime.buffer.get(CHAT, message.id)
+        self.assertEqual(len(found.images), 1)
+        self.assertTrue(found.images[0].startswith("data:image/png;base64,"))
+
+    async def test_a_failed_download_leaves_the_message_without_pictures(self) -> None:
+        message = self.buffered_image_message()
+        self.bot.http_session = FakeImageSession(FakeImageResponse(status=404))
+        await self.bot._attach_images(message, self.runtime, ["https://cdn.discordapp.com/a.png"])
+        self.assertEqual(self.runtime.buffer.get(CHAT, message.id).images, ())
+
+    async def test_a_connection_error_leaves_the_message_without_pictures(self) -> None:
+        message = self.buffered_image_message()
+        self.bot.http_session = FakeImageSession(error=aiohttp.ClientError("boom"))
+        await self.bot._attach_images(message, self.runtime, ["https://cdn.discordapp.com/a.png"])
+        self.assertEqual(self.runtime.buffer.get(CHAT, message.id).images, ())
+
+    async def test_a_non_image_response_is_ignored(self) -> None:
+        message = self.buffered_image_message()
+        self.bot.http_session = FakeImageSession(FakeImageResponse(content_type="text/html"))
+        await self.bot._attach_images(message, self.runtime, ["https://cdn.discordapp.com/a.png"])
+        self.assertEqual(self.runtime.buffer.get(CHAT, message.id).images, ())
+
+    async def test_an_oversized_picture_is_ignored(self) -> None:
+        from selfbot import MAX_IMAGE_BYTES
+
+        message = self.buffered_image_message()
+        self.bot.http_session = FakeImageSession(FakeImageResponse(body=b"x" * (MAX_IMAGE_BYTES + 1)))
+        await self.bot._attach_images(message, self.runtime, ["https://cdn.discordapp.com/a.png"])
+        self.assertEqual(self.runtime.buffer.get(CHAT, message.id).images, ())
 
 
 if __name__ == "__main__":
