@@ -501,16 +501,19 @@ class ScoutCommand:
 
     action: Literal[
         "on", "off", "status", "list", "taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help",
-        "join", "leave", "voice",
+        "join", "leave", "voice", "update",
     ]
     chat_id: int | None
     arg: str | None = None
 
 
 _COMMAND_RE = re.compile(r"^!(?:scout\s+)?(on|off|status|list)(?:\s+(\d+))?$", re.IGNORECASE)
-_SIMPLE_RE = re.compile(r"^!(?:scout\s+)?(taste|examples|tune|help|join|leave|voice)(?:\s+(clear))?$", re.IGNORECASE)
+_SIMPLE_RE = re.compile(r"^!(?:scout\s+)?(taste|examples|tune|help|join|leave|voice|update)(?:\s+(clear))?$", re.IGNORECASE)
 _TASTE_ADD_RE = re.compile(r"^!(?:scout\s+)?taste\s+add\s+(.+)$", re.IGNORECASE | re.DOTALL)
-_SIMPLE_ACTIONS = {"taste": "taste", "examples": "examples", "tune": "tune", "help": "help", "join": "join", "leave": "leave", "voice": "voice"}
+_SIMPLE_ACTIONS = {
+    "taste": "taste", "examples": "examples", "tune": "tune", "help": "help",
+    "join": "join", "leave": "leave", "voice": "voice", "update": "update",
+}
 
 
 def parse_scout_command(text: str) -> ScoutCommand | None:
@@ -581,7 +584,7 @@ def parse_ratings(text: str, count: int) -> dict[int, str]:
 
 
 HELP_OWNER = (
-    "**Bombagif: owner guide** (I answer commands by DM)\n"
+    "**Bombagif: owner guide** (I answer where you type the command)\n"
     "**Clip scout**\n"
     "`!on` / `!off`: turn clipping on or off in the chat you type it in "
     "(DM me `!on <chat id>` for another chat)\n"
@@ -598,6 +601,8 @@ HELP_OWNER = (
     "`!join` makes me listen in your call, server or group DM (I join undeafened, so everyone sees it); `!leave` "
     "stops. Then say `clip that` in a text channel, or `clip Pranit that`, or `clip what he just said`, and I post "
     "the last 30s as audio. `!voice` says whether I'm listening.\n"
+    "**Updating**\n"
+    "`!update` pulls the latest code and restarts me (a version that won't start is rolled back).\n"
     "**Clip that**\n"
     "In chats where scouting is on, say or reply `clip that` (no ping needed; typos and \"lmfao\" are fine) and I clip "
     "that message, or the latest one if you don't reply. Replying `gif that` to an image or "

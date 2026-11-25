@@ -19,6 +19,7 @@ import platform
 import re
 import signal
 import string
+import subprocess
 import sys
 import time
 import uuid
@@ -130,6 +131,7 @@ from selfbot_logic import (
 logger = logging.getLogger("bombagif.selfbot")
 _MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
 UPDATE_NOTICE_NAME = "update-notice.json"  # written by selfbot-ctl.sh update, read once on boot
+UPDATE_UNIT = f"{os.environ.get('SELFBOT_SERVICE', 'bombagif-selfbot')}-update.service"  # runs the update outside our cgroup
 REVIEW_DM_LIMIT = 1800  # a batch DM is split before Discord's 2000-character limit
 
 
@@ -903,6 +905,9 @@ class SelfBot(discord.Client):
         if command.action in ("join", "leave", "voice"):
             await self._owner_say(message, await self._voice_command(command.action, message))
             return True
+        if command.action == "update":
+            await self._owner_say(message, await self._update_command())
+            return True
         if command.action in ("taste", "taste_add", "taste_clear", "examples", "examples_clear", "tune", "help"):
             await self._owner_say(message, self._teaching_reply(command, runtime))
             return True
@@ -1257,6 +1262,29 @@ class SelfBot(discord.Client):
         speakers = len(self._voice.speakers()) if self._voice is not None else 0
         wake = "on" if self._wake is not None else "off"
         return f"In **{_voice_name(channel)}**: {speakers} voice(s) buffered, wake word {wake}."
+
+    async def _update_command(self) -> str:
+        """Pull the latest code and restart, from Discord. The update runs in its own unit, so the restart it
+        triggers cannot kill it halfway through."""
+        try:
+            probe = await asyncio.to_thread(
+                subprocess.run, ["systemctl", "cat", UPDATE_UNIT], capture_output=True, timeout=15
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "I can't reach systemd on this host, so `!update` won't work here."
+        if probe.returncode != 0:
+            return (
+                "Updates aren't set up on this host. Run `./selfbot-ctl.sh update-service` once, then `!update` works."
+            )
+        try:
+            started = await asyncio.to_thread(
+                subprocess.run, ["sudo", "-n", "systemctl", "start", UPDATE_UNIT], capture_output=True, timeout=30
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "I couldn't start the update."
+        if started.returncode != 0:
+            return "I couldn't start the update (sudo refused). Run `./selfbot-ctl.sh update` on the host."
+        return "Updating now. I'll restart and post what changed."
 
     async def _voice_command(self, action: str, message: discord.Message) -> str:
         if action == "join":

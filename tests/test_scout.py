@@ -950,6 +950,14 @@ class NoticeAndCommandTests(unittest.TestCase):
         self.assertEqual(parse_scout_command("!scout tune"), ScoutCommand("tune", None))
         self.assertEqual(parse_scout_command("!scout help"), ScoutCommand("help", None))
 
+    def test_parse_update_command(self) -> None:
+        self.assertEqual(parse_scout_command("!update"), ScoutCommand("update", None))
+        self.assertEqual(parse_scout_command("  !UPDATE  "), ScoutCommand("update", None))
+        self.assertEqual(parse_scout_command("!scout update"), ScoutCommand("update", None))
+        for text in ("!update now", "!update 5", "update", "!updates"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_scout_command(text))
+
     def test_taste_add_keeps_the_text_as_written(self) -> None:
         self.assertEqual(parse_scout_command("!scout taste add We like deadpan"), ScoutCommand("taste_add", None, "We like deadpan"))
         self.assertEqual(parse_scout_command("!SCOUT Taste ADD   Keep   inner  spaces. "), ScoutCommand("taste_add", None, "Keep   inner  spaces."))

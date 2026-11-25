@@ -1300,6 +1300,17 @@ class _CommandCase(_SelfBotCase):
         """What the bot said back, in the channel the command was typed in."""
         return [call.args[0] if call.args else call.kwargs.get("content", "") for call in message.channel.send.await_args_list]
 
+    def update_run(self, *, cat_ok: bool = True, start_ok: bool = True):
+        """Fake subprocess.run for !update: the systemctl cat probe, then the sudo start."""
+        calls: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            ok = cat_ok if argv[1] == "cat" else start_ok
+            return SimpleNamespace(returncode=0 if ok else 1, stdout=b"", stderr=b"")
+
+        return run, calls
+
 
 @unittest.skipUnless(HAS_SELFBOT_LIB, "needs discord.py-self (run in .venv-selfbot)")
 class SelfBotScoutCommandTests(_CommandCase):
@@ -1421,6 +1432,35 @@ class SelfBotScoutCommandTests(_CommandCase):
         message = self.command("!list")
         await self.bot.on_message(message)
         self.assertIn("no chats", self.replies(message)[0].lower())
+
+    async def test_update_starts_the_update_unit(self) -> None:
+        import selfbot as selfbot_module
+
+        run, calls = self.update_run()
+        message = self.command("!update")
+        with patch.object(selfbot_module.subprocess, "run", run):
+            await self.bot.on_message(message)
+        self.assertEqual(calls[0], ["systemctl", "cat", "bombagif-selfbot-update.service"])
+        self.assertEqual(calls[1], ["sudo", "-n", "systemctl", "start", "bombagif-selfbot-update.service"])
+        self.assertIn("Updating now", self.replies(message)[0])
+
+    async def test_update_says_how_to_enable_it_when_the_unit_is_missing(self) -> None:
+        import selfbot as selfbot_module
+
+        run, _ = self.update_run(cat_ok=False)
+        message = self.command("!update")
+        with patch.object(selfbot_module.subprocess, "run", run):
+            await self.bot.on_message(message)
+        self.assertIn("update-service", self.replies(message)[0])
+
+    async def test_update_reports_a_refused_sudo(self) -> None:
+        import selfbot as selfbot_module
+
+        run, _ = self.update_run(start_ok=False)
+        message = self.command("!update")
+        with patch.object(selfbot_module.subprocess, "run", run):
+            await self.bot.on_message(message)
+        self.assertIn("sudo refused", self.replies(message)[0])
 
     async def test_scout_command_when_mode_is_off_is_refused(self) -> None:
         runtime = make_runtime(Path(self._tmp.name) / "off", mode="off", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
