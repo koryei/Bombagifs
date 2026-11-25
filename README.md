@@ -167,8 +167,12 @@ next boot. Set `SELFBOT_UPDATE_NOTICES=false` to keep the bot quiet about update
 **Terminal UI.** Run in a terminal, the self-bot prints a boot banner (account, Zipline host, allowlist size,
 guard state, limits), keeps a live status panel (state, uptime, counters, and a feed of recent conversions, sign-ups,
 and warnings), writes readable coloured log lines above it, and signs off with a session summary. Redirected output,
-systemd, and Docker keep the one-line JSON logs automatically. Force a look with `SELFBOT_UI=pretty` or `json`
-(default `auto`). Preview it without connecting to Discord: `.venv-selfbot/bin/python console_ui.py`.
+systemd, and Docker get the same log lines without the colour or the panel. Force a look with `SELFBOT_UI=pretty`,
+`text`, or `json` (default `auto`). Preview it without connecting to Discord: `.venv-selfbot/bin/python console_ui.py`.
+
+**Logs.** One line per event, meant to be read: `23:49:35 INFO    scout      judged a run in chat …`. `discord.*`
+login and gateway-resume chatter is hidden until `LOG_LEVEL=DEBUG`. Set `LOG_FORMAT=json` for machine-readable
+one-line JSON instead (the app and the self-bot both honour it).
 
 **CAPTCHA guard.** The self-bot cannot solve CAPTCHAs, and retrying only makes Discord stricter. If Discord asks
 for one (for example when replying, fetching a message, or accepting a friend request), the self-bot logs a single

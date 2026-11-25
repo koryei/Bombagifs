@@ -125,14 +125,14 @@ def env_flag_off(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"0", "false", "no", "off"}
 
 
-def resolve_ui_mode(setting: str | None, *, is_tty: bool) -> Literal["pretty", "json"]:
-    """Pick the terminal mode from SELFBOT_UI: ``auto`` is pretty on a terminal and JSON otherwise."""
+def resolve_ui_mode(setting: str | None, *, is_tty: bool) -> Literal["pretty", "text", "json"]:
+    """Pick the terminal mode from SELFBOT_UI: ``auto`` is pretty on a terminal and plain text otherwise."""
     value = (setting or "auto").strip().lower() or "auto"
     if value == "auto":
-        return "pretty" if is_tty else "json"
-    if value in ("pretty", "json"):
+        return "pretty" if is_tty else "text"
+    if value in ("pretty", "text", "json"):
         return value  # type: ignore[return-value]
-    raise RuntimeError("SELFBOT_UI must be auto, pretty, or json")
+    raise RuntimeError("SELFBOT_UI must be auto, pretty, text, or json")
 
 
 class CaptchaGuard:

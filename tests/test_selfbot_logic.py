@@ -524,10 +524,11 @@ class ResolveUiModeTests(unittest.TestCase):
         for setting in (None, "", "auto", " AUTO "):
             with self.subTest(setting=setting):
                 self.assertEqual(resolve_ui_mode(setting, is_tty=True), "pretty")
-                self.assertEqual(resolve_ui_mode(setting, is_tty=False), "json")
+                self.assertEqual(resolve_ui_mode(setting, is_tty=False), "text")
 
     def test_explicit_modes_win_over_the_terminal(self) -> None:
         self.assertEqual(resolve_ui_mode("pretty", is_tty=False), "pretty")
+        self.assertEqual(resolve_ui_mode("text", is_tty=True), "text")
         self.assertEqual(resolve_ui_mode("JSON", is_tty=True), "json")
 
     def test_unknown_mode_names_the_variable(self) -> None:

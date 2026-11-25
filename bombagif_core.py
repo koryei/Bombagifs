@@ -614,6 +614,7 @@ class Settings:
     log_level: str
     allowed_guilds: frozenset[int]
     background: tuple[int, int, int]
+    log_format: str = "text"
 
 
 async def read_bounded(response: aiohttp.ClientResponse, limit: int) -> bytes:
@@ -887,6 +888,10 @@ def read_settings(token_env: str = "DISCORD_TOKEN", env: Mapping[str, str] | Non
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise RuntimeError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
 
+    log_format = environ.get("LOG_FORMAT", "text").strip().lower() or "text"
+    if log_format not in {"text", "json"}:
+        raise RuntimeError("LOG_FORMAT must be text or json")
+
     return Settings(
         discord_token=discord_token,
         zipline_token=zipline_token,
@@ -894,7 +899,11 @@ def read_settings(token_env: str = "DISCORD_TOKEN", env: Mapping[str, str] | Non
         log_level=log_level,
         allowed_guilds=frozenset(guilds),
         background=(background[0], background[1], background[2]),
+        log_format=log_format,
     )
+
+
+LOG_CONTEXT_FIELDS: Final[tuple[str, ...]] = ("trace_id", "user_id", "guild_id", "attachment_name", "attempt")
 
 
 class JsonFormatter(logging.Formatter):
@@ -908,7 +917,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("trace_id", "user_id", "guild_id", "attachment_name", "attempt"):
+        for key in LOG_CONTEXT_FIELDS:
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
@@ -917,14 +926,36 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_logging(level: str) -> None:
-    """Configure concise structured logs on stderr."""
+class TextFormatter(logging.Formatter):
+    """Format records as one plain line a human can scan: ``HH:MM:SS LEVEL logger message k=v``."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Render the same fields as the JSON formatter, without the punctuation."""
+        line = (
+            f"{time.strftime('%H:%M:%S', time.localtime(record.created))} "
+            f"{record.levelname:<7} {record.name.removeprefix('bombagif.'):<10} {record.getMessage()}"
+        )
+        for key in LOG_CONTEXT_FIELDS:
+            value = getattr(record, key, None)
+            if value is not None:
+                line += f" {key}={value}"
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
+
+
+def configure_logging(level: str, fmt: str = "text") -> None:
+    """Configure one-line logs on stderr: readable text by default, JSON when ``fmt`` is ``"json"``."""
     handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
+    handler.setFormatter(JsonFormatter() if fmt == "json" else TextFormatter())
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
-    root.setLevel(getattr(logging, level, logging.INFO))
+    numeric = getattr(logging, level, logging.INFO)
+    root.setLevel(numeric)
+    # discord.py announces every login, user agent and gateway resume at INFO: noise in a log a human reads.
+    # Warnings and errors still show, and LOG_LEVEL=DEBUG brings everything back.
+    logging.getLogger("discord").setLevel(logging.NOTSET if numeric <= logging.DEBUG else max(numeric, logging.WARNING))
 
 
 @dataclass(frozen=True, slots=True)

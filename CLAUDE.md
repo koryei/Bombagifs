@@ -72,7 +72,7 @@ capped, guard-aware, never registers anyone).
 ## v2.2 (branch `v2.2-terminal-ui`, stacked on v2.1)
 
 Pretty terminal for the self-bot: `BotStats` counters + activity feed in `selfbot_logic.py`, `console_ui.py`
-renderers, `SELFBOT_UI=auto|pretty|json` (auto = pretty only on a TTY, JSON otherwise so systemd/Docker are unchanged).
+renderers, `SELFBOT_UI=auto|pretty|text|json` (auto = pretty only on a TTY, plain text otherwise).
 
 ## v2.2.1 (branch `v2.2.1-ui-fixes`, stacked on v2.2)
 
@@ -80,6 +80,14 @@ Found in the first live run: Ctrl-C left a stray panel border (a full-width live
 breaking Rich's erase maths), so the live panel is now 3 columns narrower, non-transient, and its last frame stays.
 `discord.*` INFO chatter is hidden in pretty mode (shown at LOG_LEVEL=DEBUG). Zipline 401/403/404/413 rejections log a hint.
 Verified with a pty + `pyte` screen emulator harness (kept out of the repo).
+
+## v2.3 readable service logs
+
+The service used to write one JSON object per line, which is unreadable in `journalctl`. `bombagif_core.TextFormatter`
+now writes `HH:MM:SS LEVEL logger message k=v` (same fields as `JsonFormatter`, no punctuation), and it is the default
+for both programs; `LOG_FORMAT=json` brings the JSON back, and `SELFBOT_UI=json` still implies it. `discord.*` INFO
+chatter is hidden in text mode too, as in pretty mode. `selfbot-ctl.sh logs` pipes the journal through `logfmt.py`, so
+entries written before the switch read as text as well.
 
 ## v3 clip scout (branch `v3-scout`)
 

@@ -636,7 +636,7 @@ def _install_signal_handlers(bot: BombagifBot) -> None:
 async def main() -> None:
     """Load configuration, connect to Discord and release resources on exit."""
     settings = _read_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.log_format)
     bot = create_bot(settings)
     _install_signal_handlers(bot)
     try:

@@ -1578,7 +1578,8 @@ def main() -> None:
         dashboard = console_ui.Dashboard(bot.stats, bot.ui_status, lambda: len(bot.allowlist), get_scout=bot.scout_view)
         bot.ui = console_ui.TerminalUi(console, dashboard)
     else:
-        configure_logging(settings.log_level)
+        # SELFBOT_UI=json keeps its old meaning (JSON logs); otherwise LOG_FORMAT decides.
+        configure_logging(settings.log_level, "json" if mode == "json" else settings.log_format)
     zone = host_zone()
     now = datetime.datetime.now(zone)
     logging.getLogger("bombagif").info("Clip cards use timezone %s (now %s)", now.tzname(), now.strftime("%H:%M UTC%z"))

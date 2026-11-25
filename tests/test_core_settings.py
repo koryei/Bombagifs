@@ -35,6 +35,17 @@ class ReadSettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SELFBOT_TOKEN"):
                 read_settings("SELFBOT_TOKEN", {})
 
+    def test_log_format_defaults_to_text_and_accepts_json(self) -> None:
+        with patch.dict(os.environ, {"SELFBOT_TOKEN": "t", **ZIPLINE}, clear=True):
+            self.assertEqual(read_settings("SELFBOT_TOKEN").log_format, "text")
+        with patch.dict(os.environ, {"SELFBOT_TOKEN": "t", "LOG_FORMAT": " JSON ", **ZIPLINE}, clear=True):
+            self.assertEqual(read_settings("SELFBOT_TOKEN").log_format, "json")
+
+    def test_an_unknown_log_format_names_the_variable(self) -> None:
+        with patch.dict(os.environ, {"SELFBOT_TOKEN": "t", "LOG_FORMAT": "xml", **ZIPLINE}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "LOG_FORMAT"):
+                read_settings("SELFBOT_TOKEN")
+
 
 if __name__ == "__main__":
     unittest.main()
