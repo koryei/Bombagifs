@@ -39,9 +39,12 @@ guessing from log text.
 - `selfbot_logic.py`: `StatusSnapshot` (frozen dataclass) + `snapshot_to_dict()`; `write_status(path, snapshot)`
   using `write_private_json`. Discord-free, so it is unit-testable.
 - `selfbot.py`: a background task every 5 s building the snapshot from `stats`, `ui_status`, `scout_view`,
-  `_scout_info`, `len(allowlist)`, `len(runtime.chats.list())`, `len(runtime.reviews)`; cancelled on close.
-- Shape (v1): `at`, `version`, `state`, `account`, `zipline`, `uptime_s`, `allowlist`, `scout{mode,judge,can_post,
-  chats,reviews_waiting,manual}`, `counters{…}`, `activity[{at,level,text}]`.
+  `_scout_info`, `len(allowlist)`, `runtime.chats.list()`, `len(runtime.reviews)`; cancelled on close.
+- Shape (v1): `at`, `state`, `account`, `zipline`, `uptime_s`, `allowlist`, `scout{mode,judge,can_post,chats,
+  chat_names,reviews_waiting,manual}`, `counters{…}`, `activity[{at,level,text}]`. No `version`: the bot does not
+  know which commit it is running, and the ctl script already answers that with `git describe` (`--version`).
+- `chat_names` is the first four names from `runtime.chats.list()`, so the panel can say *where* the scout is
+  watching instead of only how many.
 - **Verify:** unit test writes a snapshot and reads it back; adapter test asserts the task writes a file with the
   expected keys; `python -m unittest tests.test_status_snapshot`.
 - **Guard:** never write tokens or message text into the snapshot.
@@ -52,14 +55,18 @@ guessing from log text.
 something.
 
 - `read_status(path)` → `(snapshot | None, age_seconds)`; stale beyond 30 s is reported, not hidden.
-- `render_dashboard(snapshot, *, service, now, width)` → Rich renderable, four bands:
-  1. **Header** — state dot, account, Zipline host, allowlist size, version, uptime.
-  2. **Clip scout** — mode, judge, chats on, reviews waiting.
-  3. **This session** — judged / passed / posted / rejected / errors.
-  4. **Recent activity** — `HH:MM  icon  plain sentence`, chat names resolved from `scout-chats.json`.
+- `render_dashboard(snapshot, *, service, now, width)` → Rich renderable, five bands:
+  1. **Header** — state dot, account, Zipline host, allowlist size; subtitle carries version, uptime, and the
+     counter window.
+  2. **Clip scout** — mode, judge, reviews waiting; then the chat names it watches (three, then `+N more`); then
+     judged / passed / posted / rejected.
+  3. **Conversions** — converted / failed / triggers / rate limited / new users / friends.
+  4. **Recent activity** — `HH:MM  icon  plain sentence`. The bot writes names into the text as it notes each
+     event, so the renderer resolves nothing and never reads `scout-chats.json`.
   5. **Needs you** — derived only: CAPTCHA pause, judge paused, stale status, service not active.
 - **Verify:** render to text at 80 and 120 columns; assert no `clip=`, no bare 18-digit ids, no `trace_id`.
-- **Guard:** every number is labelled with its window ("this session"), so nothing is ambiguous.
+- **Guard:** the counters are in-memory and never reset, so the header says `counts since start` once, next to the
+  uptime it already shows, rather than repeating a window on each panel.
 
 ## Phase 3 — `./selfbot-ctl.sh dashboard`
 
