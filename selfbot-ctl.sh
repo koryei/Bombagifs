@@ -417,6 +417,7 @@ cmd_status() {
   say "  service:    $(sc_read is-active "$SERVICE.service" 2>/dev/null || true) (enabled: $(sc_read is-enabled "$SERVICE.service" 2>/dev/null || echo no))"
   say "  auto-update: $(sc_read is-active "$SERVICE-update.timer" 2>/dev/null || echo off)"
   [[ -e "$DIR/data/captcha-blocked.json" ]] && say "  ${C_YELLOW}paused by a CAPTCHA${C_RESET}: finish it in a browser on the account, delete data/captcha-blocked.json, restart."
+  say "${C_DIM}Live view: ./selfbot-ctl.sh dashboard${C_RESET}"
   return 0
 }
 

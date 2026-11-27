@@ -389,6 +389,12 @@ assert_contains "$out" "python[1]: INFO    scout      already text" "logs drops 
 assert_contains "$(cat "$FAKE_STATE/calls")" "-u bombagif-selfbot.service" "logs reads the service journal"
 unset SELFBOT_CTL_JOURNALCTL SELFBOT_CTL_PYTHON
 
+# --- status: says what is running, and where the one-screen view is ----------------------------------------------
+DIR="$TEST_ROOT/statusdir"; mkdir -p "$DIR"
+out="$(cmd_status 2>&1)"
+assert_contains "$out" "service:" "status reports the service"
+assert_contains "$out" "./selfbot-ctl.sh dashboard" "status points at the dashboard"
+
 # --- dashboard: one command, pointed at the snapshot ------------------------------------------------------------
 DIR="$TEST_ROOT/dash"; mkdir -p "$DIR/data"
 cat >"$FAKE_BIN/python" <<'FAKE'
