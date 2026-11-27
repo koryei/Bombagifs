@@ -37,6 +37,7 @@ chmod +x "$FAKE_BIN/pip"
 # source the script's functions (main is guarded)
 mkdir -p "$TEST_ROOT/unit"
 export SELFBOT_UNIT_DIR="$TEST_ROOT/unit"
+export SELFBOT_CTL_SUDOERS_DIR="$TEST_ROOT/etc/sudoers.d"
 source "$ROOT/selfbot-ctl.sh"
 
 # --- .env: you bring your own; the script only checks it --------------------------------------------------------
@@ -97,28 +98,35 @@ assert_not_contains "$sudoers" "NOPASSWD: ALL" "sudoers stays narrow"
 
 # --- auto-update -------------------------------------------------------------------------------------------
 # A fake root: rewrite the absolute system paths into the test root and drop the root ownership flags, so the
-# real /etc is never touched.
-as_root() {
-  local args=() filtered=("install") arg skip=0
-  for arg in "$@"; do
+# real /etc is never touched. It is a binary rather than a function so the script the update re-invokes gets it.
+mkdir -p "$TEST_ROOT/etc/sudoers.d" "$TEST_ROOT/etc/systemd/system"
+export TEST_ROOT
+cat >"$FAKE_BIN/sudo" <<'FAKE'
+#!/usr/bin/env bash
+while [[ "${1:-}" == -* ]]; do shift; done
+[[ $# -eq 0 ]] && exit 0
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    /etc/*) args+=("$TEST_ROOT$arg") ;;
+    *) args+=("$arg") ;;
+  esac
+done
+if [[ "${args[0]}" == "install" ]]; then
+  filtered=("install"); skip=0
+  for arg in "${args[@]:1}"; do
+    if (( skip > 0 )); then skip=$((skip - 1)); continue; fi
     case "$arg" in
-      /etc/*) args+=("$TEST_ROOT$arg") ;;
-      *) args+=("$arg") ;;
+      -o|-g) skip=1 ;;
+      *) filtered+=("$arg") ;;
     esac
   done
-  if [[ "${args[0]}" == "install" ]]; then
-    for arg in "${args[@]:1}"; do
-      if (( skip > 0 )); then skip=$((skip - 1)); continue; fi
-      case "$arg" in
-        -o|-g) skip=1 ;;
-        *) filtered+=("$arg") ;;
-      esac
-    done
-    args=("${filtered[@]}")
-  fi
-  "${args[@]}"
-}
-mkdir -p "$TEST_ROOT/etc/sudoers.d" "$TEST_ROOT/etc/systemd/system"
+  args=("${filtered[@]}")
+fi
+exec "${args[@]}"
+FAKE
+chmod +x "$FAKE_BIN/sudo"
+export SELFBOT_CTL_SUDO="$FAKE_BIN/sudo"
 DIR="/srv/bombagif"
 
 : >"$FAKE_STATE/calls"
@@ -151,6 +159,16 @@ cmd_update_service >/dev/null 2>&1 || fail "update-service should succeed"
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "update-service must not install the timer"
 assert_contains "$(cat "$FAKE_STATE/calls")" "daemon-reload" "update-service reloads systemd"
 assert_contains "$(cat "$sudoers_file")" "/usr/bin/systemctl start bombagif-selfbot-update.service" "the bot may start its update unit"
+
+# --if-needed is what an update runs: silent when the rule is already current, never fatal without root
+: >"$FAKE_STATE/calls"
+cmd_update_service --if-needed >/dev/null 2>&1 || fail "--if-needed should succeed"
+assert_not_contains "$(cat "$FAKE_STATE/calls")" "daemon-reload" "--if-needed does nothing when the rule is current"
+rm -f "$sudoers_file"
+out="$(SELFBOT_CTL_SUDO=/bin/false cmd_update_service --if-needed 2>&1)" || fail "--if-needed must not die without root"
+assert_contains "$out" "update-service" "it says how to fix a refused sudo"
+[[ ! -f "$sudoers_file" ]] || fail "--if-needed must not write without root"
+cmd_update_service >/dev/null 2>&1 || fail "update-service should still work"
 
 # --- waiting for idle before a restart ---------------------------------------------------------------------
 DIR="$TEST_ROOT/idle"; mkdir -p "$DIR/data"
@@ -217,6 +235,18 @@ assert_contains "$out" "healthy" "update reports healthy"
 assert_equal "v2" "$(cat "$DIR/app.txt")" "working tree updated"
 assert_contains "$(cat "$FAKE_STATE/calls")" "restart bombagif-selfbot.service" "restarted"
 assert_not_contains "$(cat "$FAKE_STATE/calls")" "pip" "no pip when requirements are unchanged"
+
+# an update refreshes the sudoers rule, so a host installed before !update existed starts working after one update
+make_repos
+cp "$ROOT/selfbot-ctl.sh" "$TEST_ROOT/work/selfbot-ctl.sh"
+git -C "$TEST_ROOT/work" add -A && git -C "$TEST_ROOT/work" "${git_ident[@]}" commit -q -m "add the ctl script"
+git -C "$TEST_ROOT/work" push -q origin HEAD:main 2>/dev/null
+git -C "$DIR" pull -q --ff-only 2>/dev/null
+rm -f "$sudoers_file"
+push_change app.txt v2 "second change"
+cmd_update >/dev/null 2>&1 || fail "update should succeed"
+[[ -f "$sudoers_file" ]] || fail "update must refresh the sudoers rule"
+assert_contains "$(cat "$sudoers_file")" "start bombagif-selfbot-update.service" "the refreshed rule lets the bot start its update"
 
 # requirements changed: pip runs before the restart
 make_repos; push_change requirements-selfbot.txt "discord.py-self==2" "bump dep"

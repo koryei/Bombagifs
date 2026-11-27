@@ -16,6 +16,7 @@ SERVICE="${SELFBOT_SERVICE:-bombagif-selfbot}"
 VENV="$DIR/.venv-selfbot"
 HEALTH_SECONDS="${SELFBOT_HEALTH_SECONDS:-20}"
 UNIT_DIR="${SELFBOT_UNIT_DIR:-/etc/systemd/system}"
+SUDOERS_DIR="${SELFBOT_CTL_SUDOERS_DIR:-/etc/sudoers.d}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'
@@ -37,7 +38,12 @@ sc_write() {
   elif [[ $EUID -eq 0 ]]; then systemctl "$@"
   else sudo systemctl "$@"; fi
 }
-as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+sudo_() { "${SELFBOT_CTL_SUDO:-sudo}" "$@"; }
+as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo_ "$@"; fi; }
+can_root() {  # true when root is reachable without hanging on a password prompt
+  [[ $EUID -eq 0 ]] && return 0
+  if [[ -t 0 ]]; then sudo_ -v 2>/dev/null; else sudo_ -n true 2>/dev/null; fi
+}
 journal_() { if [[ -n "${SELFBOT_CTL_JOURNALCTL:-}" ]]; then "$SELFBOT_CTL_JOURNALCTL" "$@"; else journalctl "$@"; fi; }
 
 py() { "${SELFBOT_CTL_PYTHON:-$VENV/bin/python}" "$@"; }
@@ -205,6 +211,11 @@ render_sudoers() {  # lets the service user restart this service, and kick off i
     "$user" "$SERVICE" "$SERVICE" "$SERVICE" "$SERVICE"
 }
 
+sudoers_current() {  # true when the installed rule already matches what this script would write
+  local dest="$SUDOERS_DIR/$SERVICE"
+  [[ -r "$dest" ]] && [[ "$(cat "$dest" 2>/dev/null)" == "$(render_sudoers "$(id -un)")" ]]
+}
+
 install_file() {  # install_file <content-producing function + args...> -- <dest> <mode>
   local dest="${*: -2:1}" mode="${*: -1}" tmp
   tmp="$(mktemp)"
@@ -354,6 +365,11 @@ cmd_update() {
   commits="$(git_ log --format='%h%x09%s' "$old..$new")"
   before_restarts="$(sc_read show -p NRestarts --value "$SERVICE.service" 2>/dev/null || echo 0)"
   git_ merge --quiet --ff-only "$new"
+  # The bot's right to start its update unit lives in a root-owned file that only this script writes. When the
+  # code changes what the bot needs, that file has to follow, or !update is refused forever after one update.
+  local quiet_flag=""; $QUIET && quiet_flag="--quiet"
+  bash "$DIR/selfbot-ctl.sh" update-service --if-needed $quiet_flag \
+    || warn "Could not refresh the update unit; !update may be refused."
   local deps=false
   if deps_changed "$old" "$new"; then deps=true; info "Dependencies changed; installing..."; fi
   if { ! $deps || install_deps; } && smoke_ok; then
@@ -375,11 +391,23 @@ cmd_update() {
 }
 
 cmd_update_service() {  # install just the update unit, so !update works without the timer
-  local user group
+  local user group soft=false
+  [[ "${1:-}" == "--if-needed" ]] && soft=true
   user="$(id -un)"; group="$(id -gn)"
-  install_file render_sudoers "$user" -- "/etc/sudoers.d/$SERVICE" 0440
-  if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "/etc/sudoers.d/$SERVICE" >/dev/null; then
-    as_root rm -f "/etc/sudoers.d/$SERVICE"; die "Could not validate the sudoers entry; !update not enabled."
+  if $soft && sudoers_current && [[ -f "$UNIT_DIR/$SERVICE-update.service" ]]; then return 0; fi
+  # Soft runs come from the update unit, which has no terminal: never sit waiting for a password there.
+  if $soft && ! can_root; then
+    warn "No root, so !update may be refused. Run: ./selfbot-ctl.sh update-service"
+    return 0
+  fi
+  if ! install_file render_sudoers "$user" -- "$SUDOERS_DIR/$SERVICE" 0440; then
+    $soft && { warn "Could not refresh $SUDOERS_DIR/$SERVICE; !update may still be refused."; return 0; }
+    die "Could not write $SUDOERS_DIR/$SERVICE (needs root)."
+  fi
+  if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "$SUDOERS_DIR/$SERVICE" >/dev/null; then
+    as_root rm -f "$SUDOERS_DIR/$SERVICE"
+    $soft && { warn "The sudoers entry did not validate; !update may still be refused."; return 0; }
+    die "Could not validate the sudoers entry; !update not enabled."
   fi
   install_file render_update_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE-update.service" 0644
   sc_write daemon-reload
@@ -392,9 +420,9 @@ cmd_auto() {
   case "$action" in
     on)
       [[ "$minutes" =~ ^[0-9]+$ && "$minutes" -ge 1 ]] || die "Use at least 1 minute: ./selfbot-ctl.sh auto on 1"
-      install_file render_sudoers "$user" -- "/etc/sudoers.d/$SERVICE" 0440
-      if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "/etc/sudoers.d/$SERVICE" >/dev/null; then
-        as_root rm -f "/etc/sudoers.d/$SERVICE"; die "Could not validate the sudoers entry; auto-update not enabled."
+      install_file render_sudoers "$user" -- "$SUDOERS_DIR/$SERVICE" 0440
+      if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "$SUDOERS_DIR/$SERVICE" >/dev/null; then
+        as_root rm -f "$SUDOERS_DIR/$SERVICE"; die "Could not validate the sudoers entry; auto-update not enabled."
       fi
       install_file render_update_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE-update.service" 0644
       install_file render_timer "$minutes" -- "$UNIT_DIR/$SERVICE-update.timer" 0644
@@ -404,7 +432,7 @@ cmd_auto() {
       ;;
     off)
       sc_write disable --now "$SERVICE-update.timer" || true
-      as_root rm -f "$UNIT_DIR/$SERVICE-update.timer" "$UNIT_DIR/$SERVICE-update.service" "/etc/sudoers.d/$SERVICE"
+      as_root rm -f "$UNIT_DIR/$SERVICE-update.timer" "$UNIT_DIR/$SERVICE-update.service" "$SUDOERS_DIR/$SERVICE"
       sc_write daemon-reload
       ok "Auto-update is off. Use ./selfbot-ctl.sh update when you want one."
       ;;
@@ -613,7 +641,7 @@ main() {
   case "$command" in
     install) cmd_install ;;
     update) cmd_update ;;
-    update-service) cmd_update_service ;;
+    update-service) cmd_update_service "$@" ;;
     auto) cmd_auto "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
     status) cmd_status ;;
