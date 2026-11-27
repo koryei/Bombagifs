@@ -133,6 +133,8 @@ git clone https://github.com/koryei/Bombagifs.git && cd Bombagifs
 ./selfbot-ctl.sh install        # venv, FFmpeg, Cairo, systemd service (you bring your own .env)
 ./selfbot-ctl.sh update         # fast-forward to the latest main, restart, check it stays up
 ./selfbot-ctl.sh auto on 15     # optional: look for updates every 15 minutes
+./selfbot-ctl.sh update-service # let the bot run !update from Discord (installs its update unit)
+./selfbot-ctl.sh dashboard      # one screen: state, scout, counters, recent activity
 ./selfbot-ctl.sh timezone America/New_York   # clip cards print clock times in the VM's timezone (default UTC)
 ./selfbot-ctl.sh training       # dry-run training form: review every judged run, then rate the DMs
 ./selfbot-ctl.sh status | logs -f | doctor | restart | stop | start | version
@@ -145,7 +147,10 @@ prompts for secrets; it locks the file to mode 600 and checks that `SELFBOT_TOKE
 `update` refuses to run over local edits or diverged history, installs dependencies only when `requirements-selfbot.txt`
 changed, imports the new code before restarting, and **rolls back** to the previous commit if the service does not stay
 up for 20 seconds. `data/` and `.env` are never touched. `auto on` adds a systemd timer and a one-line sudoers entry that
-lets your user restart only this service without a password. `doctor` reports what is missing without printing secrets.
+lets your user restart only this service without a password. `update-service` installs the update unit and the sudoers
+line that lets the bot start it, so `!update` in Discord pulls and restarts without you opening a shell; `update` refreshes
+that line whenever the code changes what the bot needs, so it cannot go stale. `doctor` reports what is missing without
+printing secrets.
 Tests: `bash tests/test_selfbot_ctl.sh`.
 
 Before it restarts, `update` reads `data/busy.json` and waits for in-flight conversions and clip renders to finish,
