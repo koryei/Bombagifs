@@ -122,6 +122,23 @@ def _header(snapshot: Mapping[str, Any] | None, *, version: str, service: str = 
     )
 
 
+def _watching(scout: Mapping[str, Any]) -> Text:
+    """Name the chats the scout is watching, or say how many when it has no names."""
+    chats = int(scout.get("chats") or 0)
+    names = [str(name) for name in (scout.get("chat_names") or []) if name]
+    line = Text()
+    if not names:
+        line.append(f"{chats} chats on" if chats else "no chats on", style="value")
+        return line
+    shown = names[:3]
+    line.append("watching ", style="muted")
+    line.append(", ".join(name if len(name) <= 24 else name[:23] + "\u2026" for name in shown), style="value")
+    hidden = chats - len(shown)
+    if hidden > 0:
+        line.append(f" +{hidden} more", style="muted")
+    return line
+
+
 def _scout_panel(snapshot: Mapping[str, Any] | None) -> Panel:
     scout = dict((snapshot or {}).get("scout") or {})
     counters = dict((snapshot or {}).get("counters") or {})
@@ -133,10 +150,12 @@ def _scout_panel(snapshot: Mapping[str, Any] | None) -> Panel:
         body.append(str(scout.get("mode", "?")), style="accent")
         body.append("  \u00b7  judge ", style="muted")
         body.append(str(scout.get("judge", "?")), style="ok" if scout.get("can_post") else "warn")
+        waiting = int(scout.get("reviews_waiting") or 0)
+        if waiting:
+            body.append("  \u00b7  ", style="muted")
+            body.append(f"{waiting} reviews waiting", style="value")
         body.append("\n")
-        body.append(f"{scout.get('chats', 0)} chats on", style="value")
-        body.append("  \u00b7  ", style="muted")
-        body.append(f"{scout.get('reviews_waiting', 0)} reviews waiting", style="value")
+        body.append_text(_watching(scout))
         body.append("\n")
         body.append(f"judged {counters.get('judged', 0)}", style="muted")
         body.append("   ")

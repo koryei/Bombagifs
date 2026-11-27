@@ -26,7 +26,8 @@ def _snapshot(**overrides: object) -> dict[str, object]:
         "zipline": "zip.example",
         "uptime_s": 183_420,
         "allowlist": 4,
-        "scout": {"mode": "dry-run", "judge": "inception", "can_post": True, "chats": 2, "reviews_waiting": 0, "manual": True},
+        "scout": {"mode": "dry-run", "judge": "inception", "can_post": True, "chats": 2,
+                  "chat_names": ["\U0001f4ac\uff5cgeneral", "Testing Bombagifs"], "reviews_waiting": 0, "manual": True},
         "counters": {"converted": 12, "failed": 1, "triggers": 30, "rate_limited": 2, "new_users": 1, "friends": 0,
                      "judged": 41, "passed": 3, "posted": 0, "rejected": 3},
         "activity": [
@@ -105,8 +106,25 @@ class RenderTests(unittest.TestCase):
 
     def test_the_screen_shows_the_scout_and_the_counters(self) -> None:
         screen = _render(_snapshot())
-        for expected in ("Clip scout", "dry-run", "judge inception", "2 chats on", "judged 41", "posted 0", "converted 12"):
+        for expected in ("Clip scout", "dry-run", "judge inception", "judged 41", "posted 0", "converted 12"):
             self.assertIn(expected, screen)
+
+    def test_the_scout_panel_names_the_chats_it_watches(self) -> None:
+        screen = _render(_snapshot())
+        self.assertIn("watching \U0001f4ac\uff5cgeneral, Testing Bombagifs", screen)
+
+    def test_extra_chats_collapse_into_a_count(self) -> None:
+        scout = {"mode": "on", "judge": "inception", "can_post": True, "chats": 5,
+                 "chat_names": ["a", "b", "c", "d"], "reviews_waiting": 0}
+        screen = _render(_snapshot(scout=scout))
+        self.assertIn("watching a, b, c +2 more", screen)
+
+    def test_a_long_chat_name_is_cut_short(self) -> None:
+        scout = {"mode": "on", "judge": "inception", "can_post": True, "chats": 1,
+                 "chat_names": ["a" * 40], "reviews_waiting": 0}
+        screen = _render(_snapshot(scout=scout))
+        self.assertIn("a" * 23 + "\u2026", screen)
+        self.assertNotIn("a" * 24, screen)
 
     def test_activity_reads_as_sentences_not_log_lines(self) -> None:
         screen = _render(_snapshot())

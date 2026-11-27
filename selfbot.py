@@ -293,6 +293,7 @@ class SelfBot(discord.Client):
         runtime = self._scouting()
         judge = runtime.judge if runtime is not None else None
         scout = runtime.scout if runtime is not None else None
+        chats = runtime.chats.list() if runtime is not None else []
         return StatusSnapshot(
             at=time.time(),
             state=self.ui_status(),
@@ -304,7 +305,8 @@ class SelfBot(discord.Client):
                 "mode": runtime.cfg.mode if runtime is not None else "off",
                 "judge": judge.status if judge is not None else "starting",
                 "can_post": bool(judge is not None and judge.can_post),
-                "chats": len(runtime.chats.list()) if runtime is not None else 0,
+                "chats": len(chats),
+                "chat_names": [name for _, name in chats if name][:4],
                 "reviews_waiting": len(scout.reviews) if scout is not None else 0,
                 "manual": bool(runtime.cfg.manual) if runtime is not None else False,
             },
