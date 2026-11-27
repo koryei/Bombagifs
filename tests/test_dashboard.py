@@ -154,6 +154,21 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(all(len(line) <= 80 for line in screen.splitlines()), "a line is wider than the terminal")
         self.assertIn("Clip scout", screen)
 
+    def test_every_needs_line_fits_one_row_at_eighty_columns(self) -> None:
+        busy = _snapshot(
+            state="paused",
+            scout={"mode": "on", "judge": "heuristic (no LLM)", "can_post": False, "chats": 1,
+                   "chat_names": [], "reviews_waiting": 3},
+        )
+        needs = dashboard.needs_you(busy, age=99.0, service="inactive")
+        self.assertEqual(len(needs), 5, "this test wants every reason at once")
+        console = Console(file=io.StringIO(), width=80, theme=THEME, highlight=False)
+        self.assertEqual(
+            dashboard._height(console, dashboard._needs_panel(needs)),
+            2 + len(needs),
+            "a needs line wrapped, which costs a row the activity feed needs",
+        )
+
     def test_the_screen_fits_a_short_terminal(self) -> None:
         busy = _snapshot(
             activity=[{"at": time.time() - 60 * i, "level": "ok", "text": f"clipped mika ({i})"} for i in range(1, 9)],

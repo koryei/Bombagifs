@@ -212,10 +212,10 @@ def needs_you(snapshot: Mapping[str, Any] | None, *, age: float | None, service:
     if age is not None and age > STALE_AFTER_S:
         needs.append(f"no status for {_duration(age)}: the bot may be stopped or hung")
     if snapshot.get("state") == "paused":
-        needs.append("paused by a CAPTCHA: finish it in a browser, delete data/captcha-blocked.json, restart")
+        needs.append("CAPTCHA pause: solve it, delete data/captcha-blocked.json, restart")
     scout = dict(snapshot.get("scout") or {})
     if scout.get("mode", "off") != "off" and not scout.get("can_post"):
-        needs.append("the judge cannot post (heuristic only): set INCEPTION_API_KEY or SCOUT_LLM_*")
+        needs.append("judge cannot post: set INCEPTION_API_KEY or SCOUT_LLM_*")
     waiting = int(scout.get("reviews_waiting") or 0)
     if waiting:
         needs.append(f"{waiting} review DM{'s' if waiting != 1 else ''} waiting for your rating")
