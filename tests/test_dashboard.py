@@ -109,6 +109,10 @@ class RenderTests(unittest.TestCase):
         for expected in ("Clip scout", "dry-run", "judge inception", "judged 41", "posted 0", "converted 12"):
             self.assertIn(expected, screen)
 
+    def test_the_counters_say_which_window_they_cover(self) -> None:
+        self.assertIn("counts since start", _render(_snapshot()))
+        self.assertNotIn("counts since start", _render(None, age=None, service="inactive"))
+
     def test_the_scout_panel_names_the_chats_it_watches(self) -> None:
         screen = _render(_snapshot())
         self.assertIn("watching \U0001f4ac\uff5cgeneral, Testing Bombagifs", screen)

@@ -111,7 +111,11 @@ def _header(snapshot: Mapping[str, Any] | None, *, version: str, service: str = 
         line.append("    ")
         line.append(str(snapshot.get("allowlist", 0)), style="accent")
         line.append(" allowlisted", style="muted")
-    subtitle = f"{version} \u00b7 up {_duration(snapshot.get('uptime_s', 0))}" if snapshot else version
+    subtitle = (
+        f"{version} \u00b7 up {_duration(snapshot.get('uptime_s', 0))} \u00b7 counts since start"
+        if snapshot
+        else version
+    )
     return Panel(
         line,
         title="[brand]Bombagif[/brand]",
