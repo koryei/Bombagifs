@@ -5,6 +5,8 @@ __pycache__/
 !.env.example
 .venv/
 .DS_Store
+.idea/
+.freebuff/
 *.png
 # Written by install.sh inside the install directory.
 .install-mode
