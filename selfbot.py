@@ -1356,7 +1356,10 @@ class SelfBot(discord.Client):
         except (OSError, subprocess.SubprocessError):
             return "I couldn't start the update."
         if started.returncode != 0:
-            return "I couldn't start the update (sudo refused). Run `./selfbot-ctl.sh update` on the host."
+            return (
+                "I couldn't start the update: sudo refused. Run `./selfbot-ctl.sh update-service` on the host "
+                "once (it grants me that one command), then `!update` works."
+            )
         return "Updating now. I'll restart and post what changed."
 
     async def _voice_command(self, action: str, message: discord.Message) -> str:

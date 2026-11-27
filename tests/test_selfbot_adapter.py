@@ -1464,7 +1464,9 @@ class SelfBotScoutCommandTests(_CommandCase):
         message = self.command("!update")
         with patch.object(selfbot_module.subprocess, "run", run):
             await self.bot.on_message(message)
-        self.assertIn("sudo refused", self.replies(message)[0])
+        reply = self.replies(message)[0]
+        self.assertIn("sudo refused", reply)
+        self.assertIn("update-service", reply, "it must name the command that grants the right")
 
     async def test_scout_command_when_mode_is_off_is_refused(self) -> None:
         runtime = make_runtime(Path(self._tmp.name) / "off", mode="off", enabled=(), SELFBOT_OWNER_ID=str(OWNER))
