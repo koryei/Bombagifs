@@ -67,6 +67,10 @@ something.
 - **Verify:** render to text at 80 and 120 columns; assert no `clip=`, no bare 18-digit ids, no `trace_id`.
 - **Guard:** the counters are in-memory and never reset, so the header says `counts since start` once, next to the
   uptime it already shows, rather than repeating a window on each panel.
+- **Guard:** the screen must fit the terminal. At 80 columns the scout and conversions panels stack, so the fixed
+  bands cost 20 rows and eight activity rows overflowed a 24-row terminal, scrolling "Needs you" away. The renderer
+  measures the fixed bands and gives the activity feed only the rows left over, dropping it when there are none.
+  Every "Needs you" message must fit one row at 80 columns, or it silently costs the feed a row.
 
 ## Phase 3 — `./selfbot-ctl.sh dashboard`
 
