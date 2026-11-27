@@ -39,9 +39,18 @@ def _snapshot(**overrides: object) -> dict[str, object]:
     return snapshot
 
 
-def _render(snapshot: dict[str, object] | None, *, width: int = 120, age: float | None = 2.0, service: str = "active") -> str:
-    console = Console(file=io.StringIO(), width=width, theme=THEME, highlight=False)
-    console.print(dashboard.render_dashboard(snapshot, age=age, service=service, version="v3.2"))
+def _render(
+    snapshot: dict[str, object] | None,
+    *,
+    width: int = 120,
+    height: int = 40,
+    age: float | None = 2.0,
+    service: str = "active",
+) -> str:
+    console = Console(file=io.StringIO(), width=width, height=height, theme=THEME, highlight=False)
+    console.print(
+        dashboard.render_dashboard(snapshot, age=age, service=service, version="v3.2", console=console)
+    )
     return console.file.getvalue()  # type: ignore[union-attr]
 
 
@@ -144,6 +153,27 @@ class RenderTests(unittest.TestCase):
         screen = _render(_snapshot(), width=80)
         self.assertTrue(all(len(line) <= 80 for line in screen.splitlines()), "a line is wider than the terminal")
         self.assertIn("Clip scout", screen)
+
+    def test_the_screen_fits_a_short_terminal(self) -> None:
+        busy = _snapshot(
+            activity=[{"at": time.time() - 60 * i, "level": "ok", "text": f"clipped mika ({i})"} for i in range(1, 9)],
+            scout={"mode": "on", "judge": "heuristic (no LLM)", "can_post": False, "chats": 9,
+                   "chat_names": ["a", "b", "c", "d"], "reviews_waiting": 12},
+        )
+        screen = _render(busy, width=80, height=24, age=99.0, service="inactive")
+        lines = screen.splitlines()
+        self.assertLessEqual(len(lines), 24, "the screen runs past a 24-row terminal")
+        self.assertIn("Needs you", screen, "the panel that matters scrolled away")
+
+    def test_the_activity_feed_shrinks_before_the_panels_do(self) -> None:
+        busy = _snapshot(
+            activity=[{"at": time.time() - 60 * i, "level": "ok", "text": f"clipped mika ({i})"} for i in range(1, 9)],
+        )
+        short = _render(busy, width=80, height=24)
+        tall = _render(busy, width=120, height=40)
+        self.assertIn("Clip scout", short)
+        self.assertIn("Conversions", short)
+        self.assertLess(short.count("clipped mika"), tall.count("clipped mika"), "a short terminal kept every row")
 
     def test_without_a_snapshot_it_says_so_instead_of_showing_zeros(self) -> None:
         screen = _render(None, age=None, service="inactive")

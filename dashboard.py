@@ -182,16 +182,17 @@ def _conversions_panel(snapshot: Mapping[str, Any] | None) -> Panel:
     return Panel(grid, title="[label]Conversions[/label]", border_style="muted", box=box.ROUNDED, padding=(0, 1))
 
 
-def _activity_panel(snapshot: Mapping[str, Any] | None) -> Panel:
+def _activity_panel(snapshot: Mapping[str, Any] | None, *, limit: int = 8) -> Panel:
     entries = list((snapshot or {}).get("activity") or [])
-    if not entries:
+    shown = list(reversed(entries))[:limit]  # newest first
+    if not shown:
         body: RenderableType = Text("nothing yet", style="muted")
     else:
         grid = Table.grid(padding=(0, 2), expand=True)
         grid.add_column(style="muted", no_wrap=True)
         grid.add_column(no_wrap=True)
         grid.add_column(overflow="ellipsis", ratio=1)
-        for entry in reversed(entries):  # newest first
+        for entry in shown:
             icon, style = _LEVEL_VIEW.get(str(entry.get("level", "info")), ("\u2022", "info"))
             at = entry.get("at")
             clock = time.strftime("%H:%M", time.localtime(at)) if isinstance(at, (int, float)) else "--:--"
@@ -229,29 +230,44 @@ def _needs_panel(needs: list[str]) -> Panel:
     return Panel(body, title="[label]Needs you[/label]", border_style="muted", box=box.ROUNDED, padding=(0, 1))
 
 
+def _height(console: Console, renderable: RenderableType) -> int:
+    """How many lines a renderable takes at this console's width."""
+    return len(console.render_lines(renderable, console.options.update(height=None)))
+
+
 def render_dashboard(
     snapshot: Mapping[str, Any] | None,
     *,
     age: float | None = None,
     service: str = "unknown",
     version: str = "",
+    console: Console | None = None,
 ) -> RenderableType:
     """The whole screen: who the bot is, what the scout is doing, what happened, what needs you."""
+    console = console or create_console()
     needs = _needs_panel(needs_you(snapshot, age=age, service=service))
+    header = _header(snapshot, version=version, service=service)
     if snapshot is None:  # a wall of zeros would only confuse: say what is missing and stop
-        return Group(_header(None, version=version, service=service), needs)
-    return Group(
-        _header(snapshot, version=version, service=service),
-        Columns([_scout_panel(snapshot), _conversions_panel(snapshot)], expand=True),
-        _activity_panel(snapshot),
-        needs,
-    )
+        return Group(header, needs)
+    columns = Columns([_scout_panel(snapshot), _conversions_panel(snapshot)], expand=True)
+    # The activity feed is the only band that can shrink, so it gets what the fixed bands leave over.
+    # Without this the screen runs past a 24-row terminal and the "Needs you" panel scrolls away.
+    room = console.height - _height(console, Group(header, columns, needs)) - 2
+    if room < 1:  # no room for history: the bands above matter more than a cut-off screen
+        return Group(header, columns, needs)
+    return Group(header, columns, _activity_panel(snapshot, limit=room), needs)
 
 
-def _frame(status_path: Path, *, service: str, version: str, systemctl: str) -> RenderableType:
+def _frame(
+    status_path: Path, *, service: str, version: str, systemctl: str, console: Console
+) -> RenderableType:
     snapshot, age = read_status(status_path)
     return render_dashboard(
-        snapshot, age=age, service=service_state(service, systemctl=systemctl), version=version
+        snapshot,
+        age=age,
+        service=service_state(service, systemctl=systemctl),
+        version=version,
+        console=console,
     )
 
 
@@ -268,7 +284,9 @@ def main(argv: list[str] | None = None) -> int:
 
     status_path = Path(args.status)
     console: Console = create_console()
-    frame = lambda: _frame(status_path, service=args.service, version=args.version, systemctl=args.systemctl)  # noqa: E731
+    frame = lambda: _frame(  # noqa: E731
+        status_path, service=args.service, version=args.version, systemctl=args.systemctl, console=console
+    )
     if args.once or not console.is_terminal:  # a pipe gets one frame, not an empty alternate screen
         console.print(frame())
         return 0
