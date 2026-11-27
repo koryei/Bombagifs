@@ -129,6 +129,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn("selfbot-ctl.sh start", screen)
         self.assertNotIn("converted 0", screen)
 
+    def test_a_stopped_service_is_not_reported_as_online(self) -> None:
+        screen = _render(_snapshot(), service="inactive")  # the snapshot still says "online"
+        self.assertIn("stopped", screen)
+        self.assertNotIn("online", screen)
+
     def test_a_quiet_bot_is_flagged_on_screen(self) -> None:
         self.assertIn("no status for 6m 40s", _render(_snapshot(), age=400.0))
 

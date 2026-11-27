@@ -91,10 +91,17 @@ def _stat(label: str, value: object) -> Text:
     return text
 
 
-def _header(snapshot: Mapping[str, Any] | None, *, version: str) -> Panel:
-    line = Text()
+def _state_view(snapshot: Mapping[str, Any] | None, service: str) -> tuple[str, str, str]:
+    """What the header says. A stopped service wins: a bot that is not running cannot be online."""
+    if service in ("inactive", "failed"):
+        return ("\u25cb", "stopped", "bad")
     state = str(snapshot.get("state", "unknown")) if snapshot else "unknown"
-    icon, label, style = _STATE_VIEW.get(state, ("\u25cb", "no status yet", "muted"))
+    return _STATE_VIEW.get(state, ("\u25cb", "no status yet", "muted"))
+
+
+def _header(snapshot: Mapping[str, Any] | None, *, version: str, service: str = "unknown") -> Panel:
+    line = Text()
+    icon, label, style = _state_view(snapshot, service)
     line.append(f"{icon} {label}", style=style)
     if snapshot:
         line.append("    ")
@@ -209,9 +216,9 @@ def render_dashboard(
     """The whole screen: who the bot is, what the scout is doing, what happened, what needs you."""
     needs = _needs_panel(needs_you(snapshot, age=age, service=service))
     if snapshot is None:  # a wall of zeros would only confuse: say what is missing and stop
-        return Group(_header(None, version=version), needs)
+        return Group(_header(None, version=version, service=service), needs)
     return Group(
-        _header(snapshot, version=version),
+        _header(snapshot, version=version, service=service),
         Columns([_scout_panel(snapshot), _conversions_panel(snapshot)], expand=True),
         _activity_panel(snapshot),
         needs,
