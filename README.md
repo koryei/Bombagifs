@@ -146,11 +146,11 @@ prompts for secrets; it locks the file to mode 600 and checks that `SELFBOT_TOKE
 
 `update` refuses to run over local edits or diverged history, installs dependencies only when `requirements-selfbot.txt`
 changed, imports the new code before restarting, and **rolls back** to the previous commit if the service does not stay
-up for 20 seconds. `data/` and `.env` are never touched. `auto on` adds a systemd timer and a one-line sudoers entry that
-lets your user restart only this service without a password. `update-service` installs the update unit and the sudoers
-line that lets the bot start it, so `!update` in Discord pulls and restarts without you opening a shell; `update` refreshes
-that line whenever the code changes what the bot needs, so it cannot go stale. `doctor` reports what is missing without
-printing secrets.
+up for 20 seconds. `data/` and `.env` are never touched. `auto on` adds a systemd timer that checks on a schedule.
+`update-service` installs the update unit and a path unit, so `!update` in Discord pulls and restarts without you opening a
+shell: the bot cannot escalate privileges (its unit sets `NoNewPrivileges`, which stops `sudo` dead), so it drops
+`data/update-request` and systemd starts the update. `update` reinstalls those units whenever the code changes what they
+need, so they cannot go stale. `doctor` reports what is missing without printing secrets.
 Tests: `bash tests/test_selfbot_ctl.sh`.
 
 Before it restarts, `update` reads `data/busy.json` and waits for in-flight conversions and clip renders to finish,
