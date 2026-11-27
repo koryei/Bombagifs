@@ -1304,14 +1304,15 @@ class _CommandCase(_SelfBotCase):
         """What the bot said back, in the channel the command was typed in."""
         return [call.args[0] if call.args else call.kwargs.get("content", "") for call in message.channel.send.await_args_list]
 
-    def update_run(self, *, cat_ok: bool = True, start_ok: bool = True):
-        """Fake subprocess.run for !update: the systemctl cat probe, then the sudo start."""
+    def update_run(self, *, cat_ok: bool = True, active: str = "active"):
+        """Fake subprocess.run for !update: the path-unit probe, then the is-active check."""
         calls: list[list[str]] = []
 
         def run(argv, **kwargs):
             calls.append(argv)
-            ok = cat_ok if argv[1] == "cat" else start_ok
-            return SimpleNamespace(returncode=0 if ok else 1, stdout=b"", stderr=b"")
+            if argv[1] == "cat":
+                return SimpleNamespace(returncode=0 if cat_ok else 1, stdout=b"", stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=active.encode(), stderr=b"")
 
         return run, calls
 
@@ -1437,16 +1438,30 @@ class SelfBotScoutCommandTests(_CommandCase):
         await self.bot.on_message(message)
         self.assertIn("no chats", self.replies(message)[0].lower())
 
-    async def test_update_starts_the_update_unit(self) -> None:
+    async def test_update_asks_through_the_path_unit(self) -> None:
         import selfbot as selfbot_module
 
         run, calls = self.update_run()
         message = self.command("!update")
         with patch.object(selfbot_module.subprocess, "run", run):
             await self.bot.on_message(message)
-        self.assertEqual(calls[0], ["systemctl", "cat", "bombagif-selfbot-update.service"])
-        self.assertEqual(calls[1], ["sudo", "-n", "systemctl", "start", "bombagif-selfbot-update.service"])
+        self.assertEqual(calls[0], ["systemctl", "cat", "bombagif-selfbot-update.path"])
+        self.assertEqual(calls[1], ["systemctl", "is-active", "bombagif-selfbot-update.path"])
         self.assertIn("Updating now", self.replies(message)[0])
+        request = self.bot._status_path.with_name("update-request")
+        self.assertTrue(request.exists(), "the bot must leave the request the path unit watches")
+
+    async def test_update_never_escalates_privileges(self) -> None:
+        import selfbot as selfbot_module
+
+        run, calls = self.update_run()
+        message = self.command("!update")
+        with patch.object(selfbot_module.subprocess, "run", run):
+            await self.bot.on_message(message)
+        self.assertFalse(
+            [call for call in calls if call[0] == "sudo"],
+            "the unit sets NoNewPrivileges, so sudo cannot work and must not be tried",
+        )
 
     async def test_update_says_how_to_enable_it_when_the_unit_is_missing(self) -> None:
         import selfbot as selfbot_module
@@ -1457,16 +1472,20 @@ class SelfBotScoutCommandTests(_CommandCase):
             await self.bot.on_message(message)
         self.assertIn("update-service", self.replies(message)[0])
 
-    async def test_update_reports_a_refused_sudo(self) -> None:
+    async def test_update_says_so_when_nothing_is_watching(self) -> None:
         import selfbot as selfbot_module
 
-        run, _ = self.update_run(start_ok=False)
+        run, _ = self.update_run(active="inactive")
         message = self.command("!update")
         with patch.object(selfbot_module.subprocess, "run", run):
             await self.bot.on_message(message)
         reply = self.replies(message)[0]
-        self.assertIn("sudo refused", reply)
-        self.assertIn("update-service", reply, "it must name the command that grants the right")
+        self.assertIn("watcher isn't running", reply)
+        self.assertIn("update-service", reply, "it must name the command that installs the watcher")
+        self.assertFalse(
+            self.bot._status_path.with_name("update-request").exists(),
+            "it must not leave a request nobody is watching",
+        )
 
     async def test_scout_command_when_mode_is_off_is_refused(self) -> None:
         runtime = make_runtime(Path(self._tmp.name) / "off", mode="off", enabled=(), SELFBOT_OWNER_ID=str(OWNER))

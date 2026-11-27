@@ -91,10 +91,8 @@ assert_contains "$unit" "SELFBOT_UI=json" "unit ui"
 assert_not_contains "$unit" "TOKEN" "unit must not carry secrets"
 assert_contains "$(render_update_unit alice alice)" "selfbot-ctl.sh update --quiet" "update unit"
 assert_contains "$(render_timer 15)" "OnUnitActiveSec=15min" "timer"
-sudoers="$(render_sudoers alice)"
-assert_contains "$sudoers" "alice ALL=(root) NOPASSWD: /usr/bin/systemctl restart bombagif-selfbot.service" "sudoers"
-assert_not_contains "$sudoers" "ALL, " "sudoers stays narrow"
-assert_not_contains "$sudoers" "NOPASSWD: ALL" "sudoers stays narrow"
+assert_contains "$(render_update_path_unit)" "PathExists=/srv/bombagif/data/update-request" "path unit watches the request"
+assert_contains "$(render_update_path_unit)" "WantedBy=paths.target" "path unit is enabled by paths.target"
 
 # --- auto-update -------------------------------------------------------------------------------------------
 # A fake root: rewrite the absolute system paths into the test root and drop the root ownership flags, so the
@@ -136,38 +134,45 @@ assert_contains "$(cat "$FAKE_STATE/calls")" "enable --now bombagif-selfbot-upda
 [[ -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "auto on writes the timer"
 assert_contains "$(cat "$UNIT_DIR/bombagif-selfbot-update.timer")" "OnUnitActiveSec=15min" "the timer uses the requested interval"
 assert_contains "$(cat "$UNIT_DIR/bombagif-selfbot-update.service")" "selfbot-ctl.sh update --quiet" "the timer runs a quiet update"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.path" ]] || fail "auto on writes the path unit !update asks through"
+assert_contains "$(cat "$UNIT_DIR/bombagif-selfbot-update.path")" "PathExists=/srv/bombagif/data/update-request" "the path unit watches the request"
+assert_contains "$(cat "$FAKE_STATE/calls")" "enable --now bombagif-selfbot-update.path" "the path unit is enabled"
 sudoers_file="$TEST_ROOT/etc/sudoers.d/bombagif-selfbot"
-assert_contains "$(cat "$sudoers_file")" "NOPASSWD: /usr/bin/systemctl restart bombagif-selfbot.service" "the sudoers entry is installed"
-assert_equal 440 "$(stat -c %a "$sudoers_file" 2>/dev/null || stat -f %Lp "$sudoers_file")" "sudoers is mode 440"
+[[ ! -f "$sudoers_file" ]] || fail "nothing grants the bot sudo any more"
 
 # an interval under a minute is refused before anything is installed
 : >"$FAKE_STATE/calls"
 if (cmd_auto on 0 >/dev/null 2>&1); then fail "auto on 0 must be refused"; fi
 assert_not_contains "$(cat "$FAKE_STATE/calls")" "enable" "a refused interval enables nothing"
 
-# auto off takes the timer, the unit and the sudoers entry away again
+# auto off takes the timer, the units and any stale sudoers entry away again
+echo "stale rule" >"$sudoers_file"
 cmd_auto off >/dev/null 2>&1 || fail "auto off should succeed"
 assert_contains "$(cat "$FAKE_STATE/calls")" "disable --now bombagif-selfbot-update.timer" "the timer is disabled"
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "auto off removes the timer"
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "auto off removes the update service"
-[[ ! -f "$sudoers_file" ]] || fail "auto off removes the sudoers entry"
+[[ ! -f "$UNIT_DIR/bombagif-selfbot-update.path" ]] || fail "auto off removes the path unit"
+[[ ! -f "$sudoers_file" ]] || fail "auto off removes a stale sudoers entry"
 
-# update-service installs the unit and the sudoers rule without the timer, so !update works on its own
+# update-service installs the unit and the path unit without the timer, so !update works on its own
 : >"$FAKE_STATE/calls"
+echo "stale rule" >"$sudoers_file"
 cmd_update_service >/dev/null 2>&1 || fail "update-service should succeed"
 [[ -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "update-service writes the update unit"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.path" ]] || fail "update-service writes the path unit"
 [[ ! -f "$UNIT_DIR/bombagif-selfbot-update.timer" ]] || fail "update-service must not install the timer"
 assert_contains "$(cat "$FAKE_STATE/calls")" "daemon-reload" "update-service reloads systemd"
-assert_contains "$(cat "$sudoers_file")" "/usr/bin/systemctl start bombagif-selfbot-update.service" "the bot may start its update unit"
+assert_contains "$(cat "$FAKE_STATE/calls")" "enable --now bombagif-selfbot-update.path" "the watcher is enabled"
+[[ ! -f "$sudoers_file" ]] || fail "update-service clears the sudoers rule the bot cannot use"
 
-# --if-needed is what an update runs: silent when the rule is already current, never fatal without root
+# --if-needed is what an update runs: silent when the units are already there, never fatal without root
 : >"$FAKE_STATE/calls"
 cmd_update_service --if-needed >/dev/null 2>&1 || fail "--if-needed should succeed"
-assert_not_contains "$(cat "$FAKE_STATE/calls")" "daemon-reload" "--if-needed does nothing when the rule is current"
-rm -f "$sudoers_file"
+assert_not_contains "$(cat "$FAKE_STATE/calls")" "daemon-reload" "--if-needed does nothing when the units are current"
+rm -f "$UNIT_DIR/bombagif-selfbot-update.path"
 out="$(SELFBOT_CTL_SUDO=/bin/false cmd_update_service --if-needed 2>&1)" || fail "--if-needed must not die without root"
-assert_contains "$out" "update-service" "it says how to fix a refused sudo"
-[[ ! -f "$sudoers_file" ]] || fail "--if-needed must not write without root"
+assert_contains "$out" "update-service" "it says how to fix a missing watcher"
+[[ ! -f "$UNIT_DIR/bombagif-selfbot-update.path" ]] || fail "--if-needed must not write without root"
 cmd_update_service >/dev/null 2>&1 || fail "update-service should still work"
 
 # --- waiting for idle before a restart ---------------------------------------------------------------------
@@ -236,17 +241,24 @@ assert_equal "v2" "$(cat "$DIR/app.txt")" "working tree updated"
 assert_contains "$(cat "$FAKE_STATE/calls")" "restart bombagif-selfbot.service" "restarted"
 assert_not_contains "$(cat "$FAKE_STATE/calls")" "pip" "no pip when requirements are unchanged"
 
-# an update refreshes the sudoers rule, so a host installed before !update existed starts working after one update
+# an update installs the units !update needs, so a host that predates them starts working after one update
 make_repos
 cp "$ROOT/selfbot-ctl.sh" "$TEST_ROOT/work/selfbot-ctl.sh"
 git -C "$TEST_ROOT/work" add -A && git -C "$TEST_ROOT/work" "${git_ident[@]}" commit -q -m "add the ctl script"
 git -C "$TEST_ROOT/work" push -q origin HEAD:main 2>/dev/null
 git -C "$DIR" pull -q --ff-only 2>/dev/null
-rm -f "$sudoers_file"
+rm -f "$UNIT_DIR/bombagif-selfbot-update.path" "$UNIT_DIR/bombagif-selfbot-update.service"
 push_change app.txt v2 "second change"
 cmd_update >/dev/null 2>&1 || fail "update should succeed"
-[[ -f "$sudoers_file" ]] || fail "update must refresh the sudoers rule"
-assert_contains "$(cat "$sudoers_file")" "start bombagif-selfbot-update.service" "the refreshed rule lets the bot start its update"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.path" ]] || fail "update must install the path unit !update asks through"
+[[ -f "$UNIT_DIR/bombagif-selfbot-update.service" ]] || fail "update must install the update unit"
+
+# an update clears the request that started it, so a reload cannot retrigger it forever
+make_repos
+mkdir -p "$DIR/data"; echo 1 >"$DIR/data/update-request"
+push_change app.txt v2 "second change"
+cmd_update >/dev/null 2>&1 || fail "update should succeed"
+[[ ! -f "$DIR/data/update-request" ]] || fail "update must clear the request it consumed"
 
 # requirements changed: pip runs before the restart
 make_repos; push_change requirements-selfbot.txt "discord.py-self==2" "bump dep"

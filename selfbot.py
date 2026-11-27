@@ -136,6 +136,7 @@ logger = logging.getLogger("bombagif.selfbot")
 _MARKDOWN_SPECIALS = re.compile(r"([\\*_~|>`])")
 UPDATE_NOTICE_NAME = "update-notice.json"  # written by selfbot-ctl.sh update, read once on boot
 UPDATE_UNIT = f"{os.environ.get('SELFBOT_SERVICE', 'bombagif-selfbot')}-update.service"  # runs the update outside our cgroup
+UPDATE_PATH_UNIT = f"{os.environ.get('SELFBOT_SERVICE', 'bombagif-selfbot')}-update.path"  # watches for our request
 MAX_IMAGE_BYTES = 400_000  # a picture bigger than this is not worth the judge request
 REVIEW_DM_LIMIT = 1800  # a batch DM is split before Discord's 2000-character limit
 
@@ -1338,10 +1339,14 @@ class SelfBot(discord.Client):
 
     async def _update_command(self) -> str:
         """Pull the latest code and restart, from Discord. The update runs in its own unit, so the restart it
-        triggers cannot kill it halfway through."""
+        triggers cannot kill it halfway through.
+
+        The bot cannot escalate privileges (the unit sets ``NoNewPrivileges``, which stops sudo dead), so it does
+        not start the unit itself: it drops a request file that a path unit watches, and systemd starts the update.
+        """
         try:
             probe = await asyncio.to_thread(
-                subprocess.run, ["systemctl", "cat", UPDATE_UNIT], capture_output=True, timeout=15
+                subprocess.run, ["systemctl", "cat", UPDATE_PATH_UNIT], capture_output=True, timeout=15
             )
         except (OSError, subprocess.SubprocessError):
             return "I can't reach systemd on this host, so `!update` won't work here."
@@ -1350,16 +1355,21 @@ class SelfBot(discord.Client):
                 "Updates aren't set up on this host. Run `./selfbot-ctl.sh update-service` once, then `!update` works."
             )
         try:
-            started = await asyncio.to_thread(
-                subprocess.run, ["sudo", "-n", "systemctl", "start", UPDATE_UNIT], capture_output=True, timeout=30
+            watching = await asyncio.to_thread(
+                subprocess.run, ["systemctl", "is-active", UPDATE_PATH_UNIT], capture_output=True, timeout=15
             )
         except (OSError, subprocess.SubprocessError):
-            return "I couldn't start the update."
-        if started.returncode != 0:
+            return "I couldn't ask systemd whether the update watcher is running."
+        if watching.stdout.decode(errors="replace").strip() not in ("active", "activating"):
             return (
-                "I couldn't start the update: sudo refused. Run `./selfbot-ctl.sh update-service` on the host "
-                "once (it grants me that one command), then `!update` works."
+                "The update watcher isn't running. Run `./selfbot-ctl.sh update-service` on the host once, "
+                "then `!update` works."
             )
+        request = self._status_path.with_name("update-request")
+        try:
+            await asyncio.to_thread(request.write_text, f"{time.time():.0f}\n", encoding="utf-8")
+        except OSError:
+            return f"I couldn't ask for an update: I can't write {request}. Check that data/ is writable."
         return "Updating now. I'll restart and post what changed."
 
     async def _voice_command(self, action: str, message: discord.Message) -> str:

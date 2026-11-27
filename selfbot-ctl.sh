@@ -189,6 +189,19 @@ ExecStart=$DIR/selfbot-ctl.sh update --quiet
 UNIT
 }
 
+render_update_path_unit() {  # the bot cannot escalate privileges, so it asks for an update by touching a file
+  cat <<UNIT
+[Unit]
+Description=Start the Bombagif update when the bot asks
+
+[Path]
+PathExists=$DIR/data/update-request
+
+[Install]
+WantedBy=paths.target
+UNIT
+}
+
 render_timer() {
   local minutes="$1"
   cat <<UNIT
@@ -203,17 +216,6 @@ RandomizedDelaySec=60
 [Install]
 WantedBy=timers.target
 UNIT
-}
-
-render_sudoers() {  # lets the service user restart this service, and kick off its update unit, without a password
-  local user="$1"
-  printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl restart %s.service, /usr/bin/systemctl start %s.service, /usr/bin/systemctl stop %s.service, /usr/bin/systemctl start %s-update.service\n' \
-    "$user" "$SERVICE" "$SERVICE" "$SERVICE" "$SERVICE"
-}
-
-sudoers_current() {  # true when the installed rule already matches what this script would write
-  local dest="$SUDOERS_DIR/$SERVICE"
-  [[ -r "$dest" ]] && [[ "$(cat "$dest" 2>/dev/null)" == "$(render_sudoers "$(id -un)")" ]]
 }
 
 install_file() {  # install_file <content-producing function + args...> -- <dest> <mode>
@@ -253,6 +255,7 @@ cmd_install() {
   mkdir -p "$DIR/data"; chmod 700 "$DIR/data"
   info "Registering $SERVICE.service..."
   install_file render_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE.service" 0644
+  cmd_update_service  # so !update works from Discord without a second command
   sc_write daemon-reload
   local missing
   if missing="$(env_missing)"; then
@@ -350,6 +353,7 @@ wait_for_idle() {  # wait_for_idle: let in-flight work finish before the restart
 }
 
 cmd_update() {
+  rm -f "$DIR/data/update-request"  # clear the request that started us, so it cannot retrigger on a reload
   git_ diff --quiet && git_ diff --cached --quiet || die "This checkout has local changes; refusing to update. Run: git -C $DIR status"
   local branch old new
   branch="$(git_ rev-parse --abbrev-ref HEAD)"
@@ -390,27 +394,25 @@ cmd_update() {
   die "Update failed and was rolled back to $(version). Look at: ./selfbot-ctl.sh logs"
 }
 
-cmd_update_service() {  # install just the update unit, so !update works without the timer
+cmd_update_service() {  # install the update unit and the path unit that !update asks through
   local user group soft=false
   [[ "${1:-}" == "--if-needed" ]] && soft=true
   user="$(id -un)"; group="$(id -gn)"
-  if $soft && sudoers_current && [[ -f "$UNIT_DIR/$SERVICE-update.service" ]]; then return 0; fi
+  if $soft && [[ -f "$UNIT_DIR/$SERVICE-update.service" ]] && [[ -f "$UNIT_DIR/$SERVICE-update.path" ]]; then return 0; fi
   # Soft runs come from the update unit, which has no terminal: never sit waiting for a password there.
   if $soft && ! can_root; then
     warn "No root, so !update may be refused. Run: ./selfbot-ctl.sh update-service"
     return 0
   fi
-  if ! install_file render_sudoers "$user" -- "$SUDOERS_DIR/$SERVICE" 0440; then
-    $soft && { warn "Could not refresh $SUDOERS_DIR/$SERVICE; !update may still be refused."; return 0; }
-    die "Could not write $SUDOERS_DIR/$SERVICE (needs root)."
+  if ! install_file render_update_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE-update.service" 0644 \
+    || ! install_file render_update_path_unit -- "$UNIT_DIR/$SERVICE-update.path" 0644; then
+    $soft && { warn "Could not install the update units; !update may be refused."; return 0; }
+    die "Could not install the update units (needs root)."
   fi
-  if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "$SUDOERS_DIR/$SERVICE" >/dev/null; then
-    as_root rm -f "$SUDOERS_DIR/$SERVICE"
-    $soft && { warn "The sudoers entry did not validate; !update may still be refused."; return 0; }
-    die "Could not validate the sudoers entry; !update not enabled."
-  fi
-  install_file render_update_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE-update.service" 0644
   sc_write daemon-reload
+  sc_write enable --now "$SERVICE-update.path"
+  # An older version granted the bot sudo for this; it cannot use it (the unit sets NoNewPrivileges), so drop it.
+  [[ -e "$SUDOERS_DIR/$SERVICE" ]] && as_root rm -f "$SUDOERS_DIR/$SERVICE"
   ok "!update is enabled: it runs ./selfbot-ctl.sh update in its own unit, so the restart cannot kill it."
 }
 
@@ -420,11 +422,7 @@ cmd_auto() {
   case "$action" in
     on)
       [[ "$minutes" =~ ^[0-9]+$ && "$minutes" -ge 1 ]] || die "Use at least 1 minute: ./selfbot-ctl.sh auto on 1"
-      install_file render_sudoers "$user" -- "$SUDOERS_DIR/$SERVICE" 0440
-      if [[ -z "${SELFBOT_CTL_SYSTEMCTL:-}" ]] && ! as_root visudo -cf "$SUDOERS_DIR/$SERVICE" >/dev/null; then
-        as_root rm -f "$SUDOERS_DIR/$SERVICE"; die "Could not validate the sudoers entry; auto-update not enabled."
-      fi
-      install_file render_update_unit "$user" "$group" -- "$UNIT_DIR/$SERVICE-update.service" 0644
+      cmd_update_service
       install_file render_timer "$minutes" -- "$UNIT_DIR/$SERVICE-update.timer" 0644
       sc_write daemon-reload
       sc_write enable --now "$SERVICE-update.timer"
@@ -432,7 +430,9 @@ cmd_auto() {
       ;;
     off)
       sc_write disable --now "$SERVICE-update.timer" || true
-      as_root rm -f "$UNIT_DIR/$SERVICE-update.timer" "$UNIT_DIR/$SERVICE-update.service" "$SUDOERS_DIR/$SERVICE"
+      sc_write disable --now "$SERVICE-update.path" || true
+      as_root rm -f "$UNIT_DIR/$SERVICE-update.timer" "$UNIT_DIR/$SERVICE-update.service" \
+        "$UNIT_DIR/$SERVICE-update.path" "$SUDOERS_DIR/$SERVICE"
       sc_write daemon-reload
       ok "Auto-update is off. Use ./selfbot-ctl.sh update when you want one."
       ;;
