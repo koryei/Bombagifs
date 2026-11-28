@@ -918,7 +918,16 @@ class SelfBot(discord.Client):
         if notes is None or store is None:
             return "Teaching isn't set up on this account."
         if action == "taste":
-            return f"{notes.show()}\n({len(notes.text)}/{NOTES_MAX_CHARS} characters)"
+            # The notes are only half of what the owner taught: the ratings are the other half, and without them
+            # here a fresh rating looks like it was lost ("no taste notes yet" after rating a batch).
+            text = notes.text
+            counts = store.counts()
+            rated = (
+                f"{counts['good']} good / {counts['bad']} bad examples — `!examples` lists them"
+                if any(counts.values())
+                else "No rated examples yet — reply `good` or `bad` to a review DM to teach me."
+            )
+            return f"{notes.show()}\n({len(text)}/{NOTES_MAX_CHARS} characters)\n{rated}"
         if action == "taste_add":
             if notes.add(command.arg or ""):
                 return f"Added. ({len(notes.text)}/{NOTES_MAX_CHARS} characters)"

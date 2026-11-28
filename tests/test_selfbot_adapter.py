@@ -1999,6 +1999,20 @@ class SelfBotTeachingCommandTests(_CommandCase):
         self.assertEqual(self.runtime.taste_notes.text, "")
         self.assertIn("Cleared", self.replies(cleared)[0])
 
+    async def test_taste_reports_the_rated_examples_too(self) -> None:
+        # Rating a review DM is silent, so !taste is where the owner checks that the ratings landed.
+        empty = self.command("!taste")
+        await self.bot.on_message(empty)
+        self.assertIn("No rated examples yet", self.replies(empty)[0])
+        store = self.runtime.taste_store
+        store.add("good", [("A", "the better one was me")])
+        store.add("bad", [("A", "a boring line")])
+        message = self.command("!taste")
+        await self.bot.on_message(message)
+        text = self.replies(message)[0]
+        self.assertIn("1 good / 1 bad examples", text)
+        self.assertIn("!examples", text)
+
     async def test_taste_add_refuses_overlong_notes_and_changes_nothing(self) -> None:
         self.runtime.taste_notes.add("x" * 1490)
         message = self.command("!taste add " + "y" * 50)

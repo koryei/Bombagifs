@@ -299,8 +299,10 @@ video" are correctly ignored. With no provider, only the exact phrases work.
 The judge starts with a fixed idea of "funny out of context". You can steer it three ways (all owner-only, answers
 come by DM):
 1. **Taste notes**, plain English, up to 1,500 characters: `!taste add we like deadpan one-liners, skip
-   anything about exams`. They go into the judge's instructions. `!taste` shows them, `!taste clear` wipes
-   them, and `data/scout-taste.txt` can be edited by hand (changes apply on the next judging call).
+   anything about exams`. They go into the judge's instructions. `!taste` shows them plus how many rated
+   examples the judge has learned from (rating a review DM is silent, so that line is how you check a rating
+   landed), `!taste clear` wipes them, and `data/scout-taste.txt` can be edited by hand (changes apply on the
+   next judging call).
 2. **Rate examples.** In dry-run the account DMs you the candidates (what it would clip, plus some near-misses; at most
    `SCOUT_REVIEW_PER_HOUR`). They are **batched**: candidates queue up and arrive as one numbered DM once
    `SCOUT_REVIEW_BATCH` of them are waiting or `SCOUT_REVIEW_BATCH_MINUTES` have passed, whichever comes first, so a
